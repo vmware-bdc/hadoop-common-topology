@@ -59,4 +59,9 @@ public class StaticMapping extends Configured implements DNSToSwitchMapping {
       return m;
     }
   }
+  
+  @Override
+  public String resolve(String name) {
+    return nameToRackMap.get(name);
+  }
 }

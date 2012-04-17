@@ -38,6 +38,7 @@ import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
@@ -65,7 +66,10 @@ import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.net.CachedDNSToSwitchMapping;
 import org.apache.hadoop.net.DNSToSwitchMapping;
 import org.apache.hadoop.net.NetworkTopology;
+import org.apache.hadoop.net.Node;
+import org.apache.hadoop.net.NodeBase;
 import org.apache.hadoop.net.ScriptBasedMapping;
+import org.apache.hadoop.net.VirtualizationNetworkTopology;
 import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.HostsFileReader;
 import org.apache.hadoop.util.ReflectionUtils;
@@ -108,7 +112,7 @@ public class DatanodeManager {
       = new TreeMap<String, DatanodeDescriptor>();
 
   /** Cluster network topology */
-  private final NetworkTopology networktopology = new NetworkTopology();
+  private static NetworkTopology networktopology = new NetworkTopology();
 
   /** Host names to datanode descriptors mapping. */
   private final Host2NodesMap host2DatanodeMap = new Host2NodesMap();
@@ -128,6 +132,10 @@ public class DatanodeManager {
       ) throws IOException {
     this.namesystem = namesystem;
     this.blockManager = blockManager;
+    
+    if (conf.getBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false)) {
+        networktopology = new VirtualizationNetworkTopology();
+    }
 
     this.heartbeatManager = new HeartbeatManager(namesystem, blockManager, conf);
 
@@ -198,7 +206,14 @@ public class DatanodeManager {
   public void sortLocatedBlocks(final String targethost,
       final List<LocatedBlock> locatedblocks) {
     //sort the blocks
-    final DatanodeDescriptor client = getDatanodeByHost(targethost);
+	// vNetworkTopology changes -- key part!!!
+	// As it is possible for the separation of node manager and datanode, here we should get node but not datanode only .
+    Node client = getDatanodeByHost(targethost);
+    if (client == null) {
+      String rName = dnsToSwitchMapping.resolve(targethost);
+      if (rName != null)
+        client = new NodeBase(rName + NodeBase.PATH_SEPARATOR_STR + targethost);
+    }
     for (LocatedBlock b : locatedblocks) {
       networktopology.pseudoSortByDistance(client, b.getLocations());
       
@@ -348,27 +363,26 @@ public class DatanodeManager {
 
   /* Resolve a node's network location */
   private void resolveNetworkLocation (DatanodeDescriptor node) {
-    List<String> names = new ArrayList<String>(1);
+    String hostName = null;
     if (dnsToSwitchMapping instanceof CachedDNSToSwitchMapping) {
       // get the node's IP address
-      names.add(node.getHost());
+      hostName = node.getHost();
     } else {
       // get the node's host name
-      String hostName = node.getHostName();
+      hostName = node.getHostName();
       int colon = hostName.indexOf(":");
       hostName = (colon==-1)?hostName:hostName.substring(0,colon);
-      names.add(hostName);
     }
     
     // resolve its network location
-    List<String> rName = dnsToSwitchMapping.resolve(names);
+    String rName = dnsToSwitchMapping.resolve(hostName);
     String networkLocation;
     if (rName == null) {
       LOG.error("The resolve call returned null! Using " + 
-          NetworkTopology.DEFAULT_RACK + " for host " + names);
+          NetworkTopology.DEFAULT_RACK + " for host " + hostName);
       networkLocation = NetworkTopology.DEFAULT_RACK;
     } else {
-      networkLocation = rName.get(0);
+      networkLocation = rName;
     }
     node.setNetworkLocation(networkLocation);
   }

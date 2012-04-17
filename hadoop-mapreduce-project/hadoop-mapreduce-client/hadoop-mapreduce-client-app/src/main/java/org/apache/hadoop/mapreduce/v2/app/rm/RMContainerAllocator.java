@@ -34,6 +34,7 @@ import java.util.Set;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.mapreduce.JobCounter;
 import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.MRJobConfig;
@@ -53,6 +54,7 @@ import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptContainerAssigned
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptDiagnosticsUpdateEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
+import org.apache.hadoop.net.TopologyResolver;
 import org.apache.hadoop.yarn.YarnException;
 import org.apache.hadoop.yarn.api.records.AMResponse;
 import org.apache.hadoop.yarn.api.records.Container;
@@ -117,6 +119,7 @@ public class RMContainerAllocator extends RMContainerRequestor
   private int containersAllocated = 0;
   private int containersReleased = 0;
   private int hostLocalAssigned = 0;
+  private int nodegroupLocalAssigned = 0;
   private int rackLocalAssigned = 0;
   
   private boolean recalculateReduceSchedule = false;
@@ -131,6 +134,8 @@ public class RMContainerAllocator extends RMContainerRequestor
   private float reduceSlowStart = 0;
   private long retryInterval;
   private long retrystartTime;
+  // Mark if cluster is deployed on virtualization platform, default is not
+  private boolean isOnVirtualization = false;
   
   public RMContainerAllocator(ClientService clientService, AppContext context) {
     super(clientService, context);
@@ -149,6 +154,7 @@ public class RMContainerAllocator extends RMContainerRequestor
         MRJobConfig.MR_AM_JOB_REDUCE_PREEMPTION_LIMIT,
         MRJobConfig.DEFAULT_MR_AM_JOB_REDUCE_PREEMPTION_LIMIT);
     RackResolver.init(conf);
+    isOnVirtualization = conf.getBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false);
     retryInterval = getConfig().getLong(MRJobConfig.MR_AM_TO_RM_WAIT_INTERVAL_MS,
                                 MRJobConfig.DEFAULT_MR_AM_TO_RM_WAIT_INTERVAL_MS);
     // Init startTime to current time. If all goes well, it will be reset after
@@ -434,6 +440,7 @@ public class RMContainerAllocator extends RMContainerRequestor
         " containersAllocated:" + containersAllocated +
         " containersReleased:" + containersReleased +
         " hostLocalAssigned:" + hostLocalAssigned + 
+        " nodegroupLocalAssigned:" + nodegroupLocalAssigned + 
         " rackLocalAssigned:" + rackLocalAssigned +
         " availableResources(headroom):" + getAvailableResources();
   }
@@ -524,6 +531,8 @@ public class RMContainerAllocator extends RMContainerRequestor
     /** Maps from a host to a list of Map tasks with data on the host */
     private final Map<String, LinkedList<TaskAttemptId>> mapsHostMapping = 
       new HashMap<String, LinkedList<TaskAttemptId>>();
+    private final Map<String, LinkedList<TaskAttemptId>> mapsNodeGroupMapping = 
+    	      new HashMap<String, LinkedList<TaskAttemptId>>();
     private final Map<String, LinkedList<TaskAttemptId>> mapsRackMapping = 
       new HashMap<String, LinkedList<TaskAttemptId>>();
     private final Map<TaskAttemptId, ContainerRequest> maps = 
@@ -574,7 +583,19 @@ public class RMContainerAllocator extends RMContainerRequestor
           }
           list.add(event.getAttemptID());
           LOG.info("Added attempt req to host " + host);
-       }
+        }
+        if (event instanceof ContainerRequestOnVirtualizationEvent
+            && isOnVirtualization) {
+          for (String nodegroup: ((ContainerRequestOnVirtualizationEvent)event).getNodeGroup()) {
+            LinkedList<TaskAttemptId> list = mapsNodeGroupMapping.get(nodegroup);
+            if (list == null) {
+              list = new LinkedList<TaskAttemptId>();
+              mapsNodeGroupMapping.put(nodegroup, list);
+            }
+            list.add(event.getAttemptID());
+            LOG.info("Added attempt req to nodegroup " + nodegroup);
+          } 
+        }
        for (String rack: event.getRacks()) {
          LinkedList<TaskAttemptId> list = mapsRackMapping.get(rack);
          if (list == null) {
@@ -805,22 +826,47 @@ public class RMContainerAllocator extends RMContainerRequestor
             break;
           }
         }
+
         if (assigned == null) {
-          String rack = RackResolver.resolve(host).getNetworkLocation();
-          list = mapsRackMapping.get(rack);
-          while (list != null && list.size() > 0) {
-            TaskAttemptId tId = list.removeFirst();
-            if (maps.containsKey(tId)) {
-              assigned = maps.remove(tId);
-              JobCounterUpdateEvent jce =
-                new JobCounterUpdateEvent(assigned.attemptID.getTaskId().getJobId());
-              jce.addCounterUpdate(JobCounter.RACK_LOCAL_MAPS, 1);
-              eventHandler.handle(jce);
-              rackLocalAssigned++;
-              LOG.info("Assigned based on rack match " + rack);
-              break;
+          // Try assign nodegroup-local if on virtualization
+          if (isOnVirtualization) {
+        	String nodegroup = TopologyResolver.getNodeGroup(RackResolver.resolve(host), isOnVirtualization);
+            if (nodegroup != null)  
+        	  list = mapsNodeGroupMapping.get(nodegroup);
+            while (list != null && list.size() > 0) {
+              TaskAttemptId tId = list.removeFirst();
+              if (maps.containsKey(tId)) {
+                assigned = maps.remove(tId);
+                JobCounterUpdateEvent jce =
+                    new JobCounterUpdateEvent(assigned.attemptID.getTaskId().getJobId());
+                jce.addCounterUpdate(JobCounter.NODEGROUP_LOCAL_MAPS, 1);
+                eventHandler.handle(jce);
+                nodegroupLocalAssigned++;
+                LOG.info("Assigned based on nodegroup match " + nodegroup);
+                break;
+              }
             }
           }
+        	
+          // Try assign rack-local
+          if (assigned == null && maps.size() > 0) {
+            String rack = TopologyResolver.getRack(RackResolver.resolve(host), isOnVirtualization);
+            list = mapsRackMapping.get(rack);
+            while (list != null && list.size() > 0) {
+              TaskAttemptId tId = list.removeFirst();
+              if (maps.containsKey(tId)) {
+                assigned = maps.remove(tId);
+                JobCounterUpdateEvent jce =
+                  new JobCounterUpdateEvent(assigned.attemptID.getTaskId().getJobId());
+                jce.addCounterUpdate(JobCounter.RACK_LOCAL_MAPS, 1);
+                eventHandler.handle(jce);
+                rackLocalAssigned++;
+                LOG.info("Assigned based on rack match " + rack);
+                break;
+              }
+            }
+          }
+          
           if (assigned == null && maps.size() > 0) {
             TaskAttemptId tId = maps.keySet().iterator().next();
             assigned = maps.remove(tId);

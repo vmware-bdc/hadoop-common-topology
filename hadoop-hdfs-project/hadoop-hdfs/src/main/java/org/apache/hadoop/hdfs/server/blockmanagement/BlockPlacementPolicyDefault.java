@@ -49,7 +49,7 @@ import org.apache.hadoop.net.NodeBase;
 @InterfaceAudience.Private
 public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
   private boolean considerLoad; 
-  private NetworkTopology clusterMap;
+  protected NetworkTopology clusterMap;
   private FSClusterStats stats;
   static final String enableDebugLogging = "For more information, please enable"
     + " DEBUG level logging on the "
@@ -213,7 +213,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
    * choose a node on the same rack
    * @return the chosen node
    */
-  private DatanodeDescriptor chooseLocalNode(
+  protected DatanodeDescriptor chooseLocalNode(
                                              DatanodeDescriptor localMachine,
                                              HashMap<Node, Node> excludedNodes,
                                              long blocksize,
@@ -247,7 +247,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
    * in the cluster.
    * @return the chosen node
    */
-  private DatanodeDescriptor chooseLocalRack(
+  protected DatanodeDescriptor chooseLocalRack(
                                              DatanodeDescriptor localMachine,
                                              HashMap<Node, Node> excludedNodes,
                                              long blocksize,
@@ -300,7 +300,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
    * from the local rack
    */
     
-  private void chooseRemoteRack(int numOfReplicas,
+  protected void chooseRemoteRack(int numOfReplicas,
                                 DatanodeDescriptor localMachine,
                                 HashMap<Node, Node> excludedNodes,
                                 long blocksize,
@@ -322,7 +322,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
   /* Randomly choose one target from <i>nodes</i>.
    * @return the chosen node
    */
-  private DatanodeDescriptor chooseRandom(
+  protected DatanodeDescriptor chooseRandom(
                                           String nodes,
                                           HashMap<Node, Node> excludedNodes,
                                           long blocksize,
@@ -366,7 +366,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
     
   /* Randomly choose <i>numOfReplicas</i> targets from <i>nodes</i>.
    */
-  private void chooseRandom(int numOfReplicas,
+  protected void chooseRandom(int numOfReplicas,
                             String nodes,
                             HashMap<Node, Node> excludedNodes,
                             long blocksize,
@@ -422,7 +422,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
                         this.considerLoad, results);
   }
     
-  private boolean isGoodTarget(DatanodeDescriptor node,
+  protected boolean isGoodTarget(DatanodeDescriptor node,
                                long blockSize, int maxTargetPerLoc,
                                boolean considerLoad,
                                List<DatanodeDescriptor> results) {

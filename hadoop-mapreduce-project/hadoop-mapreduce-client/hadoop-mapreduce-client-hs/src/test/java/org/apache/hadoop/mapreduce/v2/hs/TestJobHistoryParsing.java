@@ -66,6 +66,11 @@ public class TestJobHistoryParsing {
     public List<String> resolve(List<String> names) {
       return Arrays.asList(new String[]{"MyRackName"});
     }
+
+	@Override
+	public String resolve(String name) {
+      return "MyRackName";
+	}
   }
 
   @Test

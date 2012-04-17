@@ -118,4 +118,17 @@ public class CachedDNSToSwitchMapping implements DNSToSwitchMapping {
     return getCachedHosts(names);
 
   }
+
+  @Override
+  public String resolve(String name) {
+	name = NetUtils.normalizeHostName(name);
+	String result = cache.get("name");
+	// not in cache now.
+	if (result == null) {
+      result = rawMapping.resolve(name);
+      cache.put(name, result);
+	}
+    
+	return result;
+  }
 }

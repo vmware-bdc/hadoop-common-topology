@@ -61,6 +61,9 @@ public class CommonConfigurationKeysPublic {
   public static final String  NET_TOPOLOGY_SCRIPT_FILE_NAME_KEY =
     "net.topology.script.file.name";
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY =
+    "net.topology.environment.type";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY =
     "net.topology.node.switch.mapping.impl";
 

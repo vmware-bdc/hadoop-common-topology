@@ -207,5 +207,16 @@ implements Configurable
       }
       return allOutput.toString();
     }
+
+	@Override
+	public String resolve(String name) {
+	  List <String> names = new ArrayList<String>(1);
+	  names.add(name);
+	  List<String> rNameList = resolve(names);
+	  if (rNameList == null || rNameList.size() == 0) {
+		return null;
+	  }
+	  return rNameList.get(0);
+	}
   }
 }

@@ -56,7 +56,7 @@ public class SchedulerNode {
   private final Map<ContainerId, RMContainer> launchedContainers = 
     new HashMap<ContainerId, RMContainer>();
   
-  private final RMNode rmNode;
+  protected final RMNode rmNode;
 
   public static final String ANY = "*";
 
