@@ -4,7 +4,7 @@
 
 The original [proposal 692](https://issues.apache.org/jira/browse/HADOOP-692) for hadoop rack awareness proposed a three-layer network topology as follows: 
 
-<img src="../../raw/hadoop-common-topology/3layer.png">
+<img src="../../raw/branch-0.23.0-vNetworkTopology/3layer.png">
 
 And in most cases, the third layer of "data center" is not taken into consideration when placing replica, scheduling tasks, etc. And the user's topology script is required to provide rack info only.
 
@@ -33,7 +33,7 @@ N: Rack/Host V: Rack/NodeGroup/Host
 
 For efficiency and robust reasons for hadoop cluster running in virtualization environment, the hierarchy layers we want to build in hadoop is as following:
 
-<img src="../../raw/hadoop-common-topology/4layer.png">
+<img src="../../raw/branch-0.23.0-vNetworkTopology/4layer.png">
 
 In high level, the proposed changes include: 
 
@@ -70,7 +70,7 @@ Two layers: Rack/Node
 
 The original network [topology proposal](https://issues.apache.org/jira/browse/HADOOP-692) proposes three-layer network topology as following: 
 
-<img src="../../raw/hadoop-common-topology/3layer.png">
+<img src="../../raw/branch-0.23.0-vNetworkTopology/3layer.png">
 
 In short, data locality awareness in hadoop affects: replica placement in HDFS write flow, choosing replica of block in HDFS read flow, task scheduling by ApplicationMaster and ResourceManager, choosing target node for balancing.
 
@@ -99,7 +99,7 @@ The possible choices could be:
 Cons: no physical rack awareness
    - No reliability of recovery from rack failure
    - No rack traffic optimization in HDFS read and scheduling tasks (see below graph)
-<img src="../../raw/hadoop-common-topology/norack.png">
+<img src="../../raw/branch-0.23.0-vNetworkTopology/norack.png">
 
 2. Omit host layer – "Keep rack info there, but treat VMs as different nodes" 
 Cons: no physical host awareness
