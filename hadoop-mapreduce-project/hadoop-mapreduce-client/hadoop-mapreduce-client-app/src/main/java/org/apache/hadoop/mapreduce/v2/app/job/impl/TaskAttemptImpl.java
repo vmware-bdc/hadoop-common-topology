@@ -1019,6 +1019,8 @@ public abstract class TaskAttemptImpl implements
         
         if (isOnVirtualization) {
           String[] nodegroups = new String[taskAttempt.dataLocalHosts.length];
+          // Reset i to zero or will have ArrayOutOfBounds exception
+          i = 0;
           for (String host : taskAttempt.dataLocalHosts) {
             nodegroups[i++] = TopologyResolver.getNodeGroup(RackResolver.resolve(host), isOnVirtualization);
           }
