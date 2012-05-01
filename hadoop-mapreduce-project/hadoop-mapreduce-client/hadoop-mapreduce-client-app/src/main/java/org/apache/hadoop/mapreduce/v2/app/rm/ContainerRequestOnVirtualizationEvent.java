@@ -28,7 +28,7 @@ public class ContainerRequestOnVirtualizationEvent extends
     this.nodegroups = nodegroups;
   }
   
-  public String[] getNodeGroup() {
+  public String[] getNodeGroups() {
 	return nodegroups;
   }
 

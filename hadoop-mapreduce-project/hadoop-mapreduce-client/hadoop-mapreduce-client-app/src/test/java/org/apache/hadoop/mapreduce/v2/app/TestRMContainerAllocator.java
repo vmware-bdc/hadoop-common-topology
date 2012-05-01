@@ -1020,7 +1020,7 @@ private static class MyResourceManager extends MockRM {
 	if (checkNodeGroupMatch) {
 	  Assert.assertTrue("Request type error: not a request on virtualization.", request instanceof ContainerRequestOnVirtualizationEvent);
 	  
-      List<String> requestNodeGroups = Arrays.asList(((ContainerRequestOnVirtualizationEvent)request).getNodeGroup());
+      List<String> requestNodeGroups = Arrays.asList(((ContainerRequestOnVirtualizationEvent)request).getNodeGroups());
 	  NodeId assignedNode = assigned.getContainer().getNodeId();
 	  Assert.assertTrue(
 		  "Not assigned to requested rack", requestNodeGroups.contains(
