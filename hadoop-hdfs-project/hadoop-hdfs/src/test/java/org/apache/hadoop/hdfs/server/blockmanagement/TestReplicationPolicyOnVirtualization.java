@@ -69,6 +69,7 @@ public class TestReplicationPolicyOnVirtualization extends TestCase {
       CONF.set(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY, "0.0.0.0:0");
       CONF.setBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, true);
       CONF.set("dfs.block.replicator.classname", "org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyVirtualization");
+      CONF.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY, "org.apache.hadoop.net.VirtualizationNetworkTopology");
       DFSTestUtil.formatNameNode(CONF);
       namenode = new NameNode(CONF);
     } catch (IOException e) {
@@ -204,7 +205,7 @@ public class TestReplicationPolicyOnVirtualization extends TestCase {
         BLOCK_SIZE);
     assertEquals(targets.length, 4);
     assertEquals(targets[0], dataNodes[0]);
-    assertTrue(cluster instanceof VirtualizationNetworkTopology);
+    assertTrue(cluster.isNodeGroupAware());
     for(int i=1; i<4; i++) {
       assertFalse(((VirtualizationNetworkTopology)cluster).isOnSameNodeGroup(targets[0], targets[i]));
     }
@@ -267,7 +268,7 @@ public class TestReplicationPolicyOnVirtualization extends TestCase {
                                       4, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 4);
     assertEquals(targets[0], dataNodes[1]);
-    assertTrue(cluster instanceof VirtualizationNetworkTopology);    
+    assertTrue(cluster.isNodeGroupAware());    
     for(int i=1; i<4; i++) {
       assertFalse(((VirtualizationNetworkTopology)cluster).isOnSameNodeGroup(targets[0], targets[i]));
     }

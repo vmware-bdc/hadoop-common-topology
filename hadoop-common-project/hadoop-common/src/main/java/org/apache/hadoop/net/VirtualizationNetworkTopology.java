@@ -139,6 +139,14 @@ public class VirtualizationNetworkTopology extends NetworkTopology {
 		}
 	}
 	
+	/**
+	 * Check if network topology is aware of NodeGroup
+	 */
+	@Override
+	public boolean isNodeGroupAware() {
+	  return true;
+	}
+	
 	/** Add a leaf node
 	 * Update node counter & rack counter if necessary
 	 * @param node node to be added; can be null
