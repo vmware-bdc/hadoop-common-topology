@@ -40,6 +40,7 @@ import java.util.regex.Pattern;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -94,10 +95,12 @@ import org.apache.hadoop.mapreduce.v2.app.launcher.ContainerRemoteLaunchEvent;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerAllocator;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerAllocatorEvent;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerRequestEvent;
+import org.apache.hadoop.mapreduce.v2.app.rm.ContainerRequestOnVirtualizationEvent;
 import org.apache.hadoop.mapreduce.v2.app.speculate.SpeculatorEvent;
 import org.apache.hadoop.mapreduce.v2.app.taskclean.TaskCleanupEvent;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.net.TopologyResolver;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
@@ -907,6 +910,9 @@ public abstract class TaskAttemptImpl implements
     }
   }
 
+  public Configuration getConf() {
+	return conf;
+  }
   @Override
   public float getProgress() {
     readLock.lock();
@@ -1114,14 +1120,30 @@ public abstract class TaskAttemptImpl implements
                 taskAttempt.attemptId, 
                 taskAttempt.resourceCapability));
       } else {
-        Set<String> racks = new HashSet<String>(); 
+        Set<String> racks = new HashSet<String>();
+        boolean isOnVirtualization = taskAttempt.getConf().getBoolean(
+            CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false);
         for (String host : taskAttempt.dataLocalHosts) {
-          racks.add(RackResolver.resolve(host).getNetworkLocation());
+          racks.add(TopologyResolver.getRack(RackResolver.resolve(host), isOnVirtualization));
         }
-        taskAttempt.eventHandler.handle(new ContainerRequestEvent(
-            taskAttempt.attemptId, taskAttempt.resourceCapability, taskAttempt
-                .resolveHosts(taskAttempt.dataLocalHosts), racks
-                .toArray(new String[racks.size()])));
+        
+        if (isOnVirtualization) {
+          String[] nodegroups = new String[taskAttempt.dataLocalHosts.length];
+          int i = 0;
+          for (String host : taskAttempt.dataLocalHosts) {
+            nodegroups[i++] = TopologyResolver.getNodeGroup(RackResolver.resolve(host), isOnVirtualization);
+          }
+          taskAttempt.eventHandler.handle(
+              new ContainerRequestOnVirtualizationEvent(taskAttempt.attemptId,
+                  taskAttempt.resourceCapability, taskAttempt.resolveHosts(taskAttempt.dataLocalHosts),
+                  nodegroups, racks.toArray(new String[racks.size()])));
+          } else {
+            taskAttempt.eventHandler.handle(
+                new ContainerRequestEvent(taskAttempt.attemptId,
+                    taskAttempt.resourceCapability,
+                    taskAttempt.resolveHosts(taskAttempt.dataLocalHosts),
+                    racks.toArray(new String[racks.size()])));
+          }
       }
     }
   }

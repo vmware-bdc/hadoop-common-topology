@@ -1177,6 +1177,129 @@ public class TestLeafQueue {
   }
   
   @Test
+  public void testLocalitySchedulingOnVirtualization() throws Exception {
+
+    // Manipulate queue 'a'
+    LeafQueue a = stubLeafQueue((LeafQueue)queues.get(A));
+
+    // User
+    String user_0 = "user_0";
+    
+    // Submit applications
+    final ApplicationAttemptId appAttemptId_0 = 
+        TestUtils.getMockApplicationAttemptId(0, 0); 
+    SchedulerApp app_0 = 
+        spy(new SchedulerApp(appAttemptId_0, user_0, a, 
+            mock(ActiveUsersManager.class), rmContext, null));
+    a.submitApplication(app_0, user_0, A);
+    
+    // Setup some nodes and racks
+    String host_0 = "host_0";
+    String rack_0 = "rack_0";
+    SchedulerNode node_0 = TestUtils.getMockNode(host_0, rack_0, 0, 8*GB);
+    
+    String host_1 = "host_1";
+    String rack_1 = "rack_1";
+    SchedulerNode node_1 = TestUtils.getMockNode(host_1, rack_1, 0, 8*GB);
+    
+    String host_2 = "host_2";
+    String rack_2 = "rack_2";
+    SchedulerNode node_2 = TestUtils.getMockNode(host_2, rack_2, 0, 8*GB);
+
+    final int numNodes = 3;
+    Resource clusterResource = Resources.createResource(numNodes * (8*GB));
+    when(csContext.getNumClusterNodes()).thenReturn(numNodes);
+    
+    // Setup resource-requests and submit
+    Priority priority = TestUtils.createMockPriority(1);
+    List<ResourceRequest> app_0_requests_0 = new ArrayList<ResourceRequest>();
+    app_0_requests_0.add(
+        TestUtils.createResourceRequest(host_0, 1*GB, 1, 
+            priority, recordFactory));
+    app_0_requests_0.add(
+        TestUtils.createResourceRequest(rack_0, 1*GB, 1, 
+            priority, recordFactory));
+    app_0_requests_0.add(
+        TestUtils.createResourceRequest(host_1, 1*GB, 1, 
+            priority, recordFactory));
+    app_0_requests_0.add(
+        TestUtils.createResourceRequest(rack_1, 1*GB, 1, 
+            priority, recordFactory));
+    app_0_requests_0.add(
+        TestUtils.createResourceRequest(RMNodeImpl.ANY, 1*GB, 3, // one extra 
+            priority, recordFactory));
+    app_0.updateResourceRequests(app_0_requests_0);
+
+    // Start testing...
+    
+    // Start with off switch, shouldn't allocate due to delay scheduling
+    a.assignContainers(clusterResource, node_2);
+    verify(app_0, never()).allocate(any(NodeType.class), eq(node_2), 
+        any(Priority.class), any(ResourceRequest.class), any(Container.class));
+    assertEquals(1, app_0.getSchedulingOpportunities(priority));
+    assertEquals(3, app_0.getTotalRequiredResources(priority));
+
+    // Another off switch, shouldn't allocate due to delay scheduling
+    a.assignContainers(clusterResource, node_2);
+    verify(app_0, never()).allocate(any(NodeType.class), eq(node_2), 
+        any(Priority.class), any(ResourceRequest.class), any(Container.class));
+    assertEquals(2, app_0.getSchedulingOpportunities(priority));
+    assertEquals(3, app_0.getTotalRequiredResources(priority));
+    
+    // Another off switch, shouldn't allocate due to delay scheduling
+    a.assignContainers(clusterResource, node_2);
+    verify(app_0, never()).allocate(any(NodeType.class), eq(node_2), 
+        any(Priority.class), any(ResourceRequest.class), any(Container.class));
+    assertEquals(3, app_0.getSchedulingOpportunities(priority));
+    assertEquals(3, app_0.getTotalRequiredResources(priority));
+    
+    // Another off switch, now we should allocate 
+    // since missedOpportunities=3 and reqdContainers=3
+    a.assignContainers(clusterResource, node_2);
+    verify(app_0).allocate(eq(NodeType.OFF_SWITCH), eq(node_2), 
+        any(Priority.class), any(ResourceRequest.class), any(Container.class));
+    assertEquals(0, app_0.getSchedulingOpportunities(priority)); // should reset
+    assertEquals(2, app_0.getTotalRequiredResources(priority));
+    
+    // NODE_LOCAL - node_0
+    a.assignContainers(clusterResource, node_0);
+    verify(app_0).allocate(eq(NodeType.NODE_LOCAL), eq(node_0), 
+        any(Priority.class), any(ResourceRequest.class), any(Container.class));
+    assertEquals(0, app_0.getSchedulingOpportunities(priority)); // should reset
+    assertEquals(1, app_0.getTotalRequiredResources(priority));
+    
+    // NODE_LOCAL - node_1
+    a.assignContainers(clusterResource, node_1);
+    verify(app_0).allocate(eq(NodeType.NODE_LOCAL), eq(node_1), 
+        any(Priority.class), any(ResourceRequest.class), any(Container.class));
+    assertEquals(0, app_0.getSchedulingOpportunities(priority)); // should reset
+    assertEquals(0, app_0.getTotalRequiredResources(priority));
+    
+    // Add 1 more request to check for RACK_LOCAL
+    app_0_requests_0.clear();
+    app_0_requests_0.add(
+        TestUtils.createResourceRequest(host_1, 1*GB, 1, 
+            priority, recordFactory));
+    app_0_requests_0.add(
+        TestUtils.createResourceRequest(rack_1, 1*GB, 1, 
+            priority, recordFactory));
+    app_0_requests_0.add(
+        TestUtils.createResourceRequest(RMNodeImpl.ANY, 1*GB, 1, // one extra 
+            priority, recordFactory));
+    app_0.updateResourceRequests(app_0_requests_0);
+    assertEquals(1, app_0.getTotalRequiredResources(priority));
+    
+    String host_3 = "host_3"; // on rack_1
+    SchedulerNode node_3 = TestUtils.getMockNode(host_3, rack_1, 0, 8*GB);
+    
+    a.assignContainers(clusterResource, node_3);
+    verify(app_0).allocate(eq(NodeType.RACK_LOCAL), eq(node_3), 
+        any(Priority.class), any(ResourceRequest.class), any(Container.class));
+    assertEquals(0, app_0.getSchedulingOpportunities(priority)); // should reset
+    assertEquals(0, app_0.getTotalRequiredResources(priority));
+  }  
+  
+  @Test
   public void testApplicationPriorityScheduling() throws Exception {
     // Manipulate queue 'a'
     LeafQueue a = stubLeafQueue((LeafQueue)queues.get(A));

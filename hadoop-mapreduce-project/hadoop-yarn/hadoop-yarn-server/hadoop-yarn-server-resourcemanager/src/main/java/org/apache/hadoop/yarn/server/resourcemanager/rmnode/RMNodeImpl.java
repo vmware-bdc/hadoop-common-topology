@@ -85,7 +85,7 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
   private final String nodeAddress; // The containerManager address
   private final String httpAddress;
   private final Resource totalCapability;
-  private final Node node;
+  protected final Node node;
   private final NodeHealthStatus nodeHealthStatus = recordFactory
       .newRecordInstance(NodeHealthStatus.class);
   

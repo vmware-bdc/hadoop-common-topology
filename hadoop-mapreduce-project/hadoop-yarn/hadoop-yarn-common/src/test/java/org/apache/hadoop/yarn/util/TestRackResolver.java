@@ -53,6 +53,11 @@ public class TestRackResolver {
       return returnList;
     }
 
+	@Override
+	public String resolve(String name) {
+	  return "/rack1";
+	}
+
   }
 
   @Test

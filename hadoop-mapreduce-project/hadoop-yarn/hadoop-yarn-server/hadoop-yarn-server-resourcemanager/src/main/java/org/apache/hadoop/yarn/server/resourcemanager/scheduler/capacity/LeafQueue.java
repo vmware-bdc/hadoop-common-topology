@@ -34,6 +34,8 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AccessControlList;
@@ -66,6 +68,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.VirtualizedSchedulerNode;
 import org.apache.hadoop.yarn.server.security.ContainerTokenSecretManager;
 import org.apache.hadoop.yarn.util.BuilderUtils;
 
@@ -84,6 +87,7 @@ public class LeafQueue implements CSQueue {
   private int userLimit;
   private float userLimitFactor;
 
+  private Configuration conf;
   private int maxApplications;
   private int maxApplicationsPerUser;
   
@@ -126,10 +130,11 @@ public class LeafQueue implements CSQueue {
   
   private final ActiveUsersManager activeUsersManager;
   
-  public LeafQueue(CapacitySchedulerContext cs, 
+  public LeafQueue(CapacitySchedulerContext cs, Configuration conf,
       String queueName, CSQueue parent, 
       Comparator<SchedulerApp> applicationComparator, CSQueue old) {
     this.scheduler = cs;
+    this.conf = conf;
     this.queueName = queueName;
     this.parent = parent;
     // must be after parent and queueName are initialized
@@ -805,9 +810,16 @@ public class LeafQueue implements CSQueue {
           application.addSchedulingOpportunity(priority);
           
           // Try to schedule
-          CSAssignment assignment =  
-            assignContainersOnNode(clusterResource, node, application, priority, 
+          CSAssignment assignment;
+
+          if (conf.getBoolean(
+              CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false)) {
+        	assignment = assignContainersOnVirtualizedNode(clusterResource, node, application, 
+                priority, null);
+          } else {
+            assignment = assignContainersOnNode(clusterResource, node, application, priority, 
                 null);
+          }
 
           // Did we schedule or reserve a container?
           Resource assigned = assignment.getResource();
@@ -857,9 +869,14 @@ public class LeafQueue implements CSQueue {
     }
 
     // Try to assign if we have sufficient resources
-    assignContainersOnNode(clusterResource, node, application, priority, 
-        rmContainer);
-    
+    if (conf.getBoolean(
+        CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false)) {
+      assignContainersOnVirtualizedNode(clusterResource, node, application, priority, rmContainer);
+    } else {
+      assignContainersOnNode(clusterResource, node, application, priority, 
+    		  rmContainer);
+    }
+
     // Doesn't matter... since it's already charged for at time of reservation
     // "re-reservation" is *free*
     return org.apache.hadoop.yarn.server.resourcemanager.resource.Resource.NONE;
@@ -1067,6 +1084,42 @@ public class LeafQueue implements CSQueue {
             priority, reservedContainer), 
         NodeType.OFF_SWITCH);
   }
+  
+    
+  private CSAssignment assignContainersOnVirtualizedNode(Resource clusterResource, 
+      SchedulerNode node, SchedulerApp application, 
+      Priority priority, RMContainer reservedContainer) {
+      
+    Resource assigned = Resources.none();
+
+    // Data-local
+    assigned = 
+        assignNodeLocalContainers(clusterResource, node, application, priority,
+            reservedContainer); 
+    if (Resources.greaterThan(assigned, Resources.none())) {
+      return new CSAssignment(assigned, NodeType.NODE_LOCAL);
+    }
+         
+    // NodeGroup-local
+    assigned = 
+        assignNodeGroupLocalContainers(clusterResource, node, application, priority,
+            reservedContainer); 
+    if (Resources.greaterThan(assigned, Resources.none())) {
+      return new CSAssignment(assigned, NodeType.NODEGROUP_LOCAL);
+    }
+         
+    // Rack-local
+    assigned = 
+        assignRackLocalContainers(clusterResource, node, application, priority, 
+        reservedContainer);
+    if (Resources.greaterThan(assigned, Resources.none())) {
+      return new CSAssignment(assigned, NodeType.RACK_LOCAL);
+    }
+             
+    // Off-switch
+    return new CSAssignment(assignOffSwitchContainers(clusterResource, node, application, 
+        priority, reservedContainer), NodeType.OFF_SWITCH);
+  }  
 
   private Resource assignNodeLocalContainers(Resource clusterResource, 
       SchedulerNode node, SchedulerApp application, 
@@ -1082,6 +1135,27 @@ public class LeafQueue implements CSQueue {
     }
     
     return Resources.none();
+  }
+
+  private Resource assignNodeGroupLocalContainers(Resource clusterResource,  
+      SchedulerNode node, SchedulerApp application, Priority priority,
+	  RMContainer reservedContainer) {
+	
+    ResourceRequest request = null;
+    if (node instanceof VirtualizedSchedulerNode ) {
+      VirtualizedSchedulerNode vNode = (VirtualizedSchedulerNode) node;
+      request = application.getResourceRequest(
+          priority, vNode.getNodeGroup());
+    }
+
+	if (request != null) {
+	  if (canAssign(application, priority, node, NodeType.NODEGROUP_LOCAL, 
+	      reservedContainer)) {
+	    return assignContainer(clusterResource, node, application, priority, request, 
+	        NodeType.NODEGROUP_LOCAL, reservedContainer);
+	  }
+	}
+	return Resources.none();
   }
 
   private Resource assignRackLocalContainers(Resource clusterResource,  
@@ -1150,6 +1224,18 @@ public class LeafQueue implements CSQueue {
       return true;
     }
 
+    // Check if we need containers on this nodegroup
+    if (type == NodeType.NODEGROUP_LOCAL) {
+      // Now check if we need containers on this nodegroup...
+      if (node instanceof VirtualizedSchedulerNode) {
+    	ResourceRequest nodegroupLocalRequest = 
+    		application.getResourceRequest(priority, ((VirtualizedSchedulerNode)node).getNodeGroup());
+        if (nodegroupLocalRequest != null) {
+    	  return nodegroupLocalRequest.getNumContainers() > 0;
+        }  
+      }      
+    }
+    
     // Check if we need containers on this host
     if (type == NodeType.NODE_LOCAL) {
       // Now check if we need containers on this host...

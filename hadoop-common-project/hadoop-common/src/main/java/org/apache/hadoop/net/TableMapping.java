@@ -142,6 +142,19 @@ public class TableMapping extends CachedDNSToSwitchMapping {
       }
       return results;
     }
-    
+
+	@Override
+	public String resolve(String name) {
+	  if (!initialized) {
+	    initialized = true;
+	    load();
+	  }
+	  String result = map.get(name);
+      if (result != null) {
+        return result;
+      } else {
+        return NetworkTopology.DEFAULT_RACK;
+      }
+	}
   }
 }

@@ -51,4 +51,6 @@ public interface DNSToSwitchMapping {
    * If <i>names</i> is empty, the returned list is also empty
    */
   public List<String> resolve(List<String> names);
+  
+  public String resolve(String name);
 }
