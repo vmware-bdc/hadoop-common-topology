@@ -23,6 +23,7 @@ import static org.mockito.Matchers.isA;
 import static org.mockito.Mockito.*;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -381,7 +382,7 @@ public class TestRMContainerAllocator {
     
     StaticMapping.addNodeToRack(host5, rack1);
     StaticMapping.addNodeToRack("h5", rack1);
-    RackResolver.setResolver(new StaticMapping());
+    setRackResolverToUseStaticMapping();
     
     // add resources to scheduler
     MockNM nodeManager1 = rm.registerNode(host1, 1024);
@@ -514,7 +515,7 @@ public class TestRMContainerAllocator {
     
     StaticMapping.addNodeToRack(host6, rack2 + nodegroup4);
     StaticMapping.addNodeToRack("h6", rack2 + nodegroup4);
-    RackResolver.setResolver(new StaticMapping());
+    setRackResolverToUseStaticMapping();
     
     // add resources to scheduler
     MockNM nodeManager1 = rm.registerNode(host1, 2048);
@@ -588,6 +589,12 @@ public class TestRMContainerAllocator {
 
   }
   
+  private void setRackResolverToUseStaticMapping() throws SecurityException, 
+      NoSuchFieldException, IllegalArgumentException, IllegalAccessException {
+	Field field = RackResolver.class.getDeclaredField("dnsToSwitchMapping");
+	field.setAccessible(true);
+	field.set(null, new StaticMapping());
+	}
 
 private static class MyResourceManager extends MockRM {
 
@@ -1428,7 +1435,7 @@ private static class MyResourceManager extends MockRM {
 	if (checkNodeGroupMatch) {
 	  Assert.assertTrue("Request type error: not a request on virtualization.", request instanceof ContainerRequestOnVirtualizationEvent);
 	  
-      List<String> requestNodeGroups = Arrays.asList(((ContainerRequestOnVirtualizationEvent)request).getNodeGroup());
+      List<String> requestNodeGroups = Arrays.asList(((ContainerRequestOnVirtualizationEvent)request).getNodeGroups());
 	  NodeId assignedNode = assigned.getContainer().getNodeId();
 	  Assert.assertTrue(
 		  "Not assigned to requested rack", requestNodeGroups.contains(

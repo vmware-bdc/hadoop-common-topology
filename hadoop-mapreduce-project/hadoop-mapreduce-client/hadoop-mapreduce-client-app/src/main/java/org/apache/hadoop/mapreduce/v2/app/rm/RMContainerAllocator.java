@@ -688,7 +688,7 @@ public class RMContainerAllocator extends RMContainerRequestor
 
         if (event instanceof ContainerRequestOnVirtualizationEvent
             && isOnVirtualization) {
-          for (String nodegroup: ((ContainerRequestOnVirtualizationEvent)event).getNodeGroup()) {
+          for (String nodegroup: ((ContainerRequestOnVirtualizationEvent)event).getNodeGroups()) {
             LinkedList<TaskAttemptId> list = mapsNodeGroupMapping.get(nodegroup);
             if (list == null) {
               list = new LinkedList<TaskAttemptId>();

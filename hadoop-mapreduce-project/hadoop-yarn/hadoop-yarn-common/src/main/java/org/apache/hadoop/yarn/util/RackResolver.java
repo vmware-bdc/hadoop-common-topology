@@ -66,10 +66,6 @@ public class RackResolver {
     }
   }
   
-  public static void setResolver(DNSToSwitchMapping mapping) {
-	dnsToSwitchMapping = mapping;
-  }
-  
   /**
    * Utility method for getting a hostname resolved to a node in the
    * network topology. This method initializes the class with the 
