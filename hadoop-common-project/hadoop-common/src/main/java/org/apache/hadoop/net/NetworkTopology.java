@@ -308,6 +308,13 @@ public class NetworkTopology {
       netlock.readLock().unlock();
     }
   }
+  
+  /**
+   * Check if network topology is aware of NodeGroup
+   */
+  public boolean isNodeGroupAware() {
+    return false;
+  }
 
   /**
    * Compare the parents of each node for equality

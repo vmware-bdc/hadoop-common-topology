@@ -87,6 +87,7 @@ public class TestBalancerOnVirtualization extends TestCase {
 	Configuration conf = new HdfsConfiguration();
 	TestBalancer.initConf(conf);
     conf.setBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, true);
+    conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY, "org.apache.hadoop.net.VirtualizationNetworkTopology");
     return conf;
   }
 

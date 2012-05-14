@@ -71,7 +71,6 @@ import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.Node;
 import org.apache.hadoop.net.NodeBase;
 import org.apache.hadoop.net.ScriptBasedMapping;
-import org.apache.hadoop.net.VirtualizationNetworkTopology;
 import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.HostsFileReader;
 import org.apache.hadoop.util.ReflectionUtils;
@@ -144,9 +143,11 @@ public class DatanodeManager {
     this.namesystem = namesystem;
     this.blockManager = blockManager;
     
-    if (conf.getBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false)) {
-        networktopology = new VirtualizationNetworkTopology();
-    }
+    Class<? extends NetworkTopology> networkTopologyClass =
+        conf.getClass(CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY,
+            NetworkTopology.class, NetworkTopology.class);
+    networktopology = (NetworkTopology) ReflectionUtils.newInstance(
+        networkTopologyClass, conf);
 
     this.heartbeatManager = new HeartbeatManager(namesystem, blockManager, conf);
 

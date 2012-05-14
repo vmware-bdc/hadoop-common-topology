@@ -75,6 +75,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.VirtualizationNetworkTopology;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
@@ -780,9 +781,9 @@ public class Balancer {
     this.threshold = p.threshold;
     this.policy = p.policy;
     this.nnc = theblockpool;
-    if ("true".equalsIgnoreCase(conf.get(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY))) {
-      cluster = new VirtualizationNetworkTopology();
-    }
+	cluster = ReflectionUtils.newInstance(conf.getClass(
+        CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY,
+		    NetworkTopology.class, NetworkTopology.class), conf);
   }
   
   /* Shuffle datanode array */
@@ -894,7 +895,7 @@ public class Balancer {
    */
   private long chooseNodes() {
 	//TODO MLP - abstract out into another strategy method for another balancer implementation.
-	if (cluster instanceof VirtualizationNetworkTopology) {
+	if (cluster.isNodeGroupAware()) {
         chooseNodesOnSameNodeGroup();	  
 	}
     // Match nodes on the same rack first
@@ -969,7 +970,7 @@ public class Balancer {
     
      
   	  //TODO MLP - abstract out into another strategy method for another balancer implementation.
-  	  if (cluster instanceof VirtualizationNetworkTopology) {
+  	  if (cluster.isNodeGroupAware()) {
         // choose from on-rack nodes
         if ( ((VirtualizationNetworkTopology)cluster).isOnSameNodeGroup(source.getDatanode(), target.getDatanode())) {
           foundSource = true;
@@ -1136,7 +1137,7 @@ public class Balancer {
         continue;
       }
   	  //TODO MLP - abstract out into another strategy method for another balancer implementation.
-  	  if (cluster instanceof VirtualizationNetworkTopology) {
+  	  if (cluster.isNodeGroupAware()) {
   		// choose from on-NodeGroup nodes
         if ( ((VirtualizationNetworkTopology)cluster).isOnSameNodeGroup(source.datanode, target.datanode)) {
           foundTarget = true;

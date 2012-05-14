@@ -67,7 +67,8 @@ public class CommonConfigurationKeysPublic {
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY =
     "net.topology.environment.type";
-  
+  public static final String  NET_TOPOLOGY_CLASS_NAME_KEY =
+	"net.topology.classname";
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  NET_TOPOLOGY_TABLE_MAPPING_FILE_KEY =
     "net.topology.table.file.name";
