@@ -139,7 +139,7 @@ public class RMContainerAllocator extends RMContainerRequestor
   private long retrystartTime;
   
   // Mark if cluster is deployed on virtualization platform, default is not
-  private boolean isOnVirtualization = false;
+  private boolean topologyWithNodeGroup = false;
 
   BlockingQueue<ContainerAllocatorEvent> eventQueue
     = new LinkedBlockingQueue<ContainerAllocatorEvent>();
@@ -161,7 +161,7 @@ public class RMContainerAllocator extends RMContainerRequestor
         MRJobConfig.MR_AM_JOB_REDUCE_PREEMPTION_LIMIT,
         MRJobConfig.DEFAULT_MR_AM_JOB_REDUCE_PREEMPTION_LIMIT);
     RackResolver.init(conf);
-    isOnVirtualization = conf.getBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false);
+    topologyWithNodeGroup = conf.getBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false);
     retryInterval = getConfig().getLong(MRJobConfig.MR_AM_TO_RM_WAIT_INTERVAL_MS,
                                 MRJobConfig.DEFAULT_MR_AM_TO_RM_WAIT_INTERVAL_MS);
     // Init startTime to current time. If all goes well, it will be reset after
@@ -621,7 +621,7 @@ public class RMContainerAllocator extends RMContainerRequestor
        assignedRequests.reduces.size() * reduceResourceReqt;
   }
   
-  private class ScheduledRequests {
+  protected class ScheduledRequests {
     
     private final LinkedList<TaskAttemptId> earlierFailedMaps = 
       new LinkedList<TaskAttemptId>();
@@ -686,18 +686,7 @@ public class RMContainerAllocator extends RMContainerRequestor
           }
         }
 
-        if (event instanceof ContainerRequestOnVirtualizationEvent
-            && isOnVirtualization) {
-          for (String nodegroup: ((ContainerRequestOnVirtualizationEvent)event).getNodeGroups()) {
-            LinkedList<TaskAttemptId> list = mapsNodeGroupMapping.get(nodegroup);
-            if (list == null) {
-              list = new LinkedList<TaskAttemptId>();
-              mapsNodeGroupMapping.put(nodegroup, list);
-            }
-        	list.add(event.getAttemptID());
-        	LOG.info("Added attempt req to nodegroup " + nodegroup);
-          } 
-        }
+        doNodeGroupMapping(event);
 
        for (String rack: event.getRacks()) {
          LinkedList<TaskAttemptId> list = mapsRackMapping.get(rack);
@@ -715,9 +704,47 @@ public class RMContainerAllocator extends RMContainerRequestor
       maps.put(event.getAttemptID(), request);
       addContainerReq(request);
     }
+
+	protected void doNodeGroupMapping(ContainerRequestEvent event) {
+	  if (event instanceof ContainerRequestOnVirtualizationEvent
+          && topologyWithNodeGroup) {
+        for (String nodegroup: ((ContainerRequestOnVirtualizationEvent)event).getNodeGroups()) {
+          LinkedList<TaskAttemptId> list = mapsNodeGroupMapping.get(nodegroup);
+          if (list == null) {
+            list = new LinkedList<TaskAttemptId>();
+            mapsNodeGroupMapping.put(nodegroup, list);
+          }
+          list.add(event.getAttemptID());
+      	  LOG.info("Added attempt req to nodegroup " + nodegroup);
+        }
+      }
+	}
     
-    
-    void addReduce(ContainerRequest req) {
+    protected ContainerRequest doAssignToNodeGroup(String host, LinkedList<TaskAttemptId> list) {
+		ContainerRequest assigned = null;
+		// Try to assign nodegroup-local if on virtualization
+	      if (topologyWithNodeGroup) {
+	        String nodegroup = TopologyResolver.getNodeGroup(RackResolver.resolve(host), topologyWithNodeGroup);
+	        if (nodegroup != null)  
+	          list = mapsNodeGroupMapping.get(nodegroup);
+	        while (list != null && list.size() > 0) {
+	          TaskAttemptId tId = list.removeFirst();
+	          if (maps.containsKey(tId)) {
+	            assigned = maps.remove(tId);
+	            JobCounterUpdateEvent jce =
+	                new JobCounterUpdateEvent(assigned.attemptID.getTaskId().getJobId());
+	            jce.addCounterUpdate(JobCounter.NODEGROUP_LOCAL_MAPS, 1);
+	            eventHandler.handle(jce);
+	            nodegroupLocalAssigned++;
+	            LOG.info("Assigned based on nodegroup match " + nodegroup);
+	            break;
+	          }
+	        }
+	      }
+		return assigned;
+	}
+
+	void addReduce(ContainerRequest req) {
       reduces.put(req.attemptID, req);
       addContainerReq(req);
     }
@@ -961,29 +988,12 @@ public class RMContainerAllocator extends RMContainerRequestor
           }
         }
         if (assigned == null) {
-          // Try to assign nodegroup-local if on virtualization
-          if (isOnVirtualization) {
-            String nodegroup = TopologyResolver.getNodeGroup(RackResolver.resolve(host), isOnVirtualization);
-            if (nodegroup != null)  
-              list = mapsNodeGroupMapping.get(nodegroup);
-            while (list != null && list.size() > 0) {
-              TaskAttemptId tId = list.removeFirst();
-              if (maps.containsKey(tId)) {
-                assigned = maps.remove(tId);
-                JobCounterUpdateEvent jce =
-                    new JobCounterUpdateEvent(assigned.attemptID.getTaskId().getJobId());
-                jce.addCounterUpdate(JobCounter.NODEGROUP_LOCAL_MAPS, 1);
-                eventHandler.handle(jce);
-                nodegroupLocalAssigned++;
-                LOG.info("Assigned based on nodegroup match " + nodegroup);
-                break;
-              }
-            }
-          }
+        	
+          assigned = doAssignToNodeGroup(host, list);
 
           // Try to assign rack-local
           if (assigned == null && maps.size() > 0) {
-            String rack = TopologyResolver.getRack(RackResolver.resolve(host), isOnVirtualization);
+            String rack = TopologyResolver.getRack(RackResolver.resolve(host), topologyWithNodeGroup);
             list = mapsRackMapping.get(rack);
             while (list != null && list.size() > 0) {
               TaskAttemptId tId = list.removeFirst();

@@ -96,7 +96,7 @@ import org.apache.hadoop.yarn.util.BuilderUtils;
 @SuppressWarnings("unchecked")
 public class FifoScheduler implements ResourceScheduler, Configurable {
 
-  private static final Log LOG = LogFactory.getLog(FifoScheduler.class);
+  protected static final Log LOG = LogFactory.getLog(FifoScheduler.class);
 
   private static final RecordFactory recordFactory = 
     RecordFactoryProvider.getRecordFactory(null);
@@ -378,12 +378,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
           // Ensure the application needs containers of this priority
           if (maxContainers > 0) {
         	int assignedContainers = 0;
-        	if (conf.getBoolean(
-                    CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false)) {
-              assignedContainers = assignContainersOnVirtualizedNode(node, application, priority);
-        	} else {
-        	  assignedContainers = assignContainersOnNode(node, application, priority);
-        	}
+        	assignedContainers = assignContainersOnNode(node, application, priority);
             // Do not assign out of order w.r.t priorities
             if (assignedContainers == 0) {
               break;
@@ -404,7 +399,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
     }
   }
 
-  private int getMaxAllocatableContainers(SchedulerApp application,
+  protected int getMaxAllocatableContainers(SchedulerApp application,
       Priority priority, SchedulerNode node, NodeType type) {
     ResourceRequest offSwitchRequest = 
       application.getResourceRequest(priority, SchedulerNode.ANY);
@@ -449,7 +444,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
   }
 
 
-  private int assignContainersOnNode(SchedulerNode node, 
+  protected int assignContainersOnNode(SchedulerNode node, 
       SchedulerApp application, Priority priority 
   ) {
     // Data-local
@@ -475,36 +470,8 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
 
     return (nodeLocalContainers + rackLocalContainers + offSwitchContainers);
   }
-  
-  private int assignContainersOnVirtualizedNode(SchedulerNode node, 
-      SchedulerApp application, Priority priority) {
-    // Data-local
-	int nodeLocalContainers = 
-	  assignNodeLocalContainers(node, application, priority);
-	    
-	// NodeGroup-local
-	int nodegroupLocalContainers = 
-	  assignNodeGroupLocalContainers(node, application, priority);
-	    
-	// Rack-local
-	int rackLocalContainers = 
-	  assignRackLocalContainers(node, application, priority);
 
-	// Off-switch
-	int offSwitchContainers =
-	  assignOffSwitchContainers(node, application, priority);
-
-	LOG.debug("assignContainersOnNode:" +
-	    " node=" + node.getRMNode().getNodeAddress() + 
-	    " application=" + application.getApplicationId().getId() +
-	    " priority=" + priority.getPriority() + 
-	    " #assigned=" + 
-	    (nodeLocalContainers + nodegroupLocalContainers + rackLocalContainers + offSwitchContainers));
-
-	return (nodeLocalContainers + nodegroupLocalContainers + rackLocalContainers + offSwitchContainers);
-  }
-
-  private int assignNodeLocalContainers(SchedulerNode node, 
+  protected int assignNodeLocalContainers(SchedulerNode node, 
       SchedulerApp application, Priority priority) {
     int assignedContainers = 0;
     ResourceRequest request = 
@@ -529,39 +496,8 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
     }
     return assignedContainers;
   }
-  
-  private int assignNodeGroupLocalContainers(SchedulerNode node, 
-	  SchedulerApp application, Priority priority) {
-	int assignedContainers = 0;
-	if (!(node instanceof VirtualizedSchedulerNode)) {
-	  return 0;
-	}
-	VirtualizedSchedulerNode vNode = (VirtualizedSchedulerNode)node; 
-	if (vNode.getNodeGroup() == null)
-	  return 0;
-	ResourceRequest request = 
-	    application.getResourceRequest(priority, vNode.getNodeGroup());
-	if (request != null) {
-	  // Don't allocate on this nodegroup if the application doens't need containers on this rack
-	  ResourceRequest rackRequest =
-	      application.getResourceRequest(priority, node.getRackName());
-	  if (rackRequest.getNumContainers() <= 0) {
-	    return 0;
-	  }
-	      
-	  int assignableContainers = 
-	    Math.min(
-	        getMaxAllocatableContainers(application, priority, node, 
-	            NodeType.NODEGROUP_LOCAL), 
-	            request.getNumContainers());
-	  assignedContainers = 
-	    assignContainer(node, application, priority, 
-	        assignableContainers, request, NodeType.NODEGROUP_LOCAL);
-	}
-	return assignedContainers;
-  }
 
-  private int assignRackLocalContainers(SchedulerNode node, 
+  protected int assignRackLocalContainers(SchedulerNode node, 
       SchedulerApp application, Priority priority) {
     int assignedContainers = 0;
     ResourceRequest request = 
@@ -586,7 +522,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
     return assignedContainers;
   }
 
-  private int assignOffSwitchContainers(SchedulerNode node, 
+  protected int assignOffSwitchContainers(SchedulerNode node, 
       SchedulerApp application, Priority priority) {
     int assignedContainers = 0;
     ResourceRequest request = 
@@ -599,7 +535,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
     return assignedContainers;
   }
 
-  private int assignContainer(SchedulerNode node, SchedulerApp application, 
+  protected int assignContainer(SchedulerNode node, SchedulerApp application, 
       Priority priority, int assignableContainers, 
       ResourceRequest request, NodeType type) {
     LOG.debug("assignContainers:" +

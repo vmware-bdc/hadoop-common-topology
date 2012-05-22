@@ -813,14 +813,8 @@ public class LeafQueue implements CSQueue {
           // Try to schedule
           CSAssignment assignment;
 
-          if (conf.getBoolean(
-              CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false)) {
-        	assignment = assignContainersOnVirtualizedNode(clusterResource, node, application, 
-                priority, null);
-          } else {
-            assignment = assignContainersOnNode(clusterResource, node, application, priority, 
-                null);
-          }
+          assignment = assignContainersOnNode(clusterResource, node, application, priority, 
+              null);
 
           // Did we schedule or reserve a container?
           Resource assigned = assignment.getResource();
@@ -870,13 +864,8 @@ public class LeafQueue implements CSQueue {
     }
 
     // Try to assign if we have sufficient resources
-    if (conf.getBoolean(
-        CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false)) {
-      assignContainersOnVirtualizedNode(clusterResource, node, application, priority, rmContainer);
-    } else {
-      assignContainersOnNode(clusterResource, node, application, priority, 
-    		  rmContainer);
-    }
+    assignContainersOnNode(clusterResource, node, application, priority, 
+        rmContainer);
 
     // Doesn't matter... since it's already charged for at time of reservation
     // "re-reservation" is *free*
@@ -1057,7 +1046,7 @@ public class LeafQueue implements CSQueue {
     return (((starvation + requiredContainers) - reservedContainers) > 0);
   }
 
-  private CSAssignment assignContainersOnNode(Resource clusterResource, 
+  protected CSAssignment assignContainersOnNode(Resource clusterResource, 
       SchedulerNode node, SchedulerApp application, 
       Priority priority, RMContainer reservedContainer) {
 
@@ -1085,44 +1074,8 @@ public class LeafQueue implements CSQueue {
             priority, reservedContainer), 
         NodeType.OFF_SWITCH);
   }
-  
-    
-  private CSAssignment assignContainersOnVirtualizedNode(Resource clusterResource, 
-      SchedulerNode node, SchedulerApp application, 
-      Priority priority, RMContainer reservedContainer) {
-      
-    Resource assigned = Resources.none();
 
-    // Data-local
-    assigned = 
-        assignNodeLocalContainers(clusterResource, node, application, priority,
-            reservedContainer); 
-    if (Resources.greaterThan(assigned, Resources.none())) {
-      return new CSAssignment(assigned, NodeType.NODE_LOCAL);
-    }
-         
-    // NodeGroup-local
-    assigned = 
-        assignNodeGroupLocalContainers(clusterResource, node, application, priority,
-            reservedContainer); 
-    if (Resources.greaterThan(assigned, Resources.none())) {
-      return new CSAssignment(assigned, NodeType.NODEGROUP_LOCAL);
-    }
-         
-    // Rack-local
-    assigned = 
-        assignRackLocalContainers(clusterResource, node, application, priority, 
-        reservedContainer);
-    if (Resources.greaterThan(assigned, Resources.none())) {
-      return new CSAssignment(assigned, NodeType.RACK_LOCAL);
-    }
-             
-    // Off-switch
-    return new CSAssignment(assignOffSwitchContainers(clusterResource, node, application, 
-        priority, reservedContainer), NodeType.OFF_SWITCH);
-  }  
-
-  private Resource assignNodeLocalContainers(Resource clusterResource, 
+  protected Resource assignNodeLocalContainers(Resource clusterResource, 
       SchedulerNode node, SchedulerApp application, 
       Priority priority, RMContainer reservedContainer) {
     ResourceRequest request = 
@@ -1138,28 +1091,7 @@ public class LeafQueue implements CSQueue {
     return Resources.none();
   }
 
-  private Resource assignNodeGroupLocalContainers(Resource clusterResource,  
-      SchedulerNode node, SchedulerApp application, Priority priority,
-	  RMContainer reservedContainer) {
-	
-    ResourceRequest request = null;
-    if (node instanceof VirtualizedSchedulerNode ) {
-      VirtualizedSchedulerNode vNode = (VirtualizedSchedulerNode) node;
-      request = application.getResourceRequest(
-          priority, vNode.getNodeGroup());
-    }
-
-	if (request != null) {
-	  if (canAssign(application, priority, node, NodeType.NODEGROUP_LOCAL, 
-	      reservedContainer)) {
-	    return assignContainer(clusterResource, node, application, priority, request, 
-	        NodeType.NODEGROUP_LOCAL, reservedContainer);
-	  }
-	}
-	return Resources.none();
-  }
-
-  private Resource assignRackLocalContainers(Resource clusterResource,  
+  protected Resource assignRackLocalContainers(Resource clusterResource,  
       SchedulerNode node, SchedulerApp application, Priority priority,
       RMContainer reservedContainer) {
     ResourceRequest request = 
@@ -1174,7 +1106,7 @@ public class LeafQueue implements CSQueue {
     return Resources.none();
   }
 
-  private Resource assignOffSwitchContainers(Resource clusterResource, SchedulerNode node, 
+  protected Resource assignOffSwitchContainers(Resource clusterResource, SchedulerNode node, 
       SchedulerApp application, Priority priority, 
       RMContainer reservedContainer) {
     ResourceRequest request = 
@@ -1283,7 +1215,7 @@ public class LeafQueue implements CSQueue {
     return container;
   }
   
-  private Resource assignContainer(Resource clusterResource, SchedulerNode node, 
+  protected Resource assignContainer(Resource clusterResource, SchedulerNode node, 
       SchedulerApp application, Priority priority, 
       ResourceRequest request, NodeType type, RMContainer rmContainer) {
     if (LOG.isDebugEnabled()) {

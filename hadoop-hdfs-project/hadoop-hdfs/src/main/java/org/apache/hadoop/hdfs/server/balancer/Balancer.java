@@ -894,10 +894,9 @@ public class Balancer {
    * Return total number of bytes to move in this iteration
    */
   private long chooseNodes() {
-	//TODO MLP - abstract out into another strategy method for another balancer implementation.
-	if (cluster.isNodeGroupAware()) {
-        chooseNodesOnSameNodeGroup();	  
-	}
+	  
+	// Match nodes taking into consideration a custom fault domain
+	doChooseNodesForCustomFaultDomain();
     // Match nodes on the same rack first
     chooseNodes(true);
     // Then match nodes on different racks
@@ -914,6 +913,12 @@ public class Balancer {
       bytesToMove += src.scheduledSize;
     }
     return bytesToMove;
+  }
+
+  protected void doChooseNodesForCustomFaultDomain() {
+	if (cluster.isNodeGroupAware()) {
+        chooseNodesOnSameNodeGroup();	  
+    }
   }
   
   /* Decide all <source, target> pairs where source and target are 
@@ -967,15 +972,7 @@ public class Balancer {
         sourceCandidates.remove();
         continue;
       }
-    
-     
-  	  //TODO MLP - abstract out into another strategy method for another balancer implementation.
-  	  if (cluster.isNodeGroupAware()) {
-        // choose from on-rack nodes
-        if ( ((VirtualizationNetworkTopology)cluster).isOnSameNodeGroup(source.getDatanode(), target.getDatanode())) {
-          foundSource = true;
-        }
-  	  }
+  	  foundSource = doAreDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
     }
     if (foundSource) {
       assert(source != null):"Choose a null source";
@@ -994,6 +991,16 @@ public class Balancer {
       return true;
     }
     return false;
+  }
+
+  protected boolean doAreDataNodesOnSameNodeGroup(DatanodeInfo sourceDatanode, DatanodeInfo targetDatanode) {
+	  if (cluster.isNodeGroupAware()) {
+          // choose from on-rack nodes
+          if ( ((VirtualizationNetworkTopology)cluster).isOnSameNodeGroup(sourceDatanode, targetDatanode)) {
+            return true;
+          }
+  	    }
+	  return false;
   }
 
   private void chooseTargetsOnSameNodeGroup(Iterator<BalancerDatanode> targetCandidates) {
@@ -1136,13 +1143,8 @@ public class Balancer {
         targetCandidates.remove();
         continue;
       }
-  	  //TODO MLP - abstract out into another strategy method for another balancer implementation.
-  	  if (cluster.isNodeGroupAware()) {
-  		// choose from on-NodeGroup nodes
-        if ( ((VirtualizationNetworkTopology)cluster).isOnSameNodeGroup(source.datanode, target.datanode)) {
-          foundTarget = true;
-        }
-  	  }
+  	  foundTarget = doAreDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
+
     }
     if (foundTarget) {
       assert(target != null):"Choose a null target";
