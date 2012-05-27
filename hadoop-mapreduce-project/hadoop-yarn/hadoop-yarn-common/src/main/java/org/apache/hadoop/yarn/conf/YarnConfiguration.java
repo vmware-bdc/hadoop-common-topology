@@ -101,6 +101,10 @@ public class YarnConfiguration extends Configuration {
   public static final String RM_PRINCIPAL =
     RM_PREFIX + "principal";
   
+  /** Implementation class of ScheduledRequests.*/
+  public static final String  RM_SCHEDULED_REQUESTS_CLASS_KEY =
+	RM_PREFIX + "scheduled.requests.class";
+  
   /** The address of the scheduler interface.*/
   public static final String RM_SCHEDULER_ADDRESS = 
     RM_PREFIX + "scheduler.address";
