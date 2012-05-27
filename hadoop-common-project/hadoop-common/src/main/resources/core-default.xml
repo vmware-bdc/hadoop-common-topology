@@ -661,10 +661,10 @@
 
 <!-- Rack Configuration -->
 <property>
-  <name>net.topology.environment.type</name>
-  <value></value>
+  <name>net.topology.with.nodegroup</name>
+  <value>false</value>
   <description> The boolean value to identify if the cluster is deployed on
-    a virtualized platform which need an additional layer (node group) between
+    an environment which needs an additional layer (node group) between
     node and rack for network topology.
   </description>
 </property>

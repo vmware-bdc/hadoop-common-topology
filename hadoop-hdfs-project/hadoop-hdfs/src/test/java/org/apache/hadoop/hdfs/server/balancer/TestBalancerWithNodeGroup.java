@@ -42,7 +42,7 @@ import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.hdfs.MiniVirtualDFSCluster;
+import org.apache.hadoop.hdfs.MiniDFSClusterWithNodeGroup;
 import org.apache.hadoop.hdfs.NameNodeProxies;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
@@ -56,7 +56,7 @@ import org.apache.hadoop.hdfs.server.namenode.NameNode;
 /**
  * This class tests if a balancer schedules tasks correctly.
  */
-public class TestBalancerOnVirtualization extends TestCase {
+public class TestBalancerWithNodeGroup extends TestCase {
   private static final Log LOG = LogFactory.getLog(
   "org.apache.hadoop.hdfs.TestReplication");
   
@@ -69,7 +69,7 @@ public class TestBalancerOnVirtualization extends TestCase {
   final private static String NODEGROUP2 = "/nodegroup2";
   final static private String fileName = "/tmp.txt";
   final static private Path filePath = new Path(fileName);
-  MiniVirtualDFSCluster cluster;
+  MiniDFSClusterWithNodeGroup cluster;
 
   ClientProtocol client;
 
@@ -86,8 +86,8 @@ public class TestBalancerOnVirtualization extends TestCase {
   static Configuration createConf() {
 	Configuration conf = new HdfsConfiguration();
 	TestBalancer.initConf(conf);
-    conf.setBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, true);
-    conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY, "org.apache.hadoop.net.VirtualizationNetworkTopology");
+    conf.setBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, true);
+    conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY, "org.apache.hadoop.net.NetworkTopologyWithNodeGroup");
     return conf;
   }
 
@@ -107,7 +107,7 @@ public class TestBalancerOnVirtualization extends TestCase {
   private ExtendedBlock[] generateBlocks(Configuration conf, long size,
       short numNodes) throws IOException {
 	MiniDFSCluster.Builder builder = new MiniDFSCluster.Builder(conf).numDataNodes(numNodes);
-    cluster = new MiniVirtualDFSCluster (builder);
+    cluster = new MiniDFSClusterWithNodeGroup (builder);
     try {
       cluster.waitActive();
       client = NameNodeProxies.createProxy(conf, cluster.getFileSystem(0).getUri(),
@@ -162,8 +162,8 @@ public class TestBalancerOnVirtualization extends TestCase {
                                               .format(false)
                                               .racks(racks)
                                               .simulatedCapacities(capacities);
-    MiniVirtualDFSCluster.setNodeGroups(nodeGroups);
-    cluster = new MiniVirtualDFSCluster(builder);
+    MiniDFSClusterWithNodeGroup.setNodeGroups(nodeGroups);
+    cluster = new MiniDFSClusterWithNodeGroup(builder);
     cluster.waitActive();
     client = NameNodeProxies.createProxy(conf, cluster.getFileSystem(0).getUri(),
         ClientProtocol.class).getProxy();;
@@ -276,8 +276,8 @@ public class TestBalancerOnVirtualization extends TestCase {
                                 .numDataNodes(capacities.length)
                                 .racks(racks)
                                 .simulatedCapacities(capacities);
-    MiniVirtualDFSCluster.setNodeGroups(nodeGroups);
-    cluster = new MiniVirtualDFSCluster(builder);
+    MiniDFSClusterWithNodeGroup.setNodeGroups(nodeGroups);
+    cluster = new MiniDFSClusterWithNodeGroup(builder);
     try {
       cluster.waitActive();
       client = NameNodeProxies.createProxy(conf, cluster.getFileSystem(0).getUri(),
@@ -362,8 +362,8 @@ public class TestBalancerOnVirtualization extends TestCase {
                                 .numDataNodes(capacities.length)
                                 .racks(racks)
                                 .simulatedCapacities(capacities);
-    MiniVirtualDFSCluster.setNodeGroups(nodeGroups);
-    cluster = new MiniVirtualDFSCluster(builder);
+    MiniDFSClusterWithNodeGroup.setNodeGroups(nodeGroups);
+    cluster = new MiniDFSClusterWithNodeGroup(builder);
     try {
       cluster.waitActive();
       client = NameNodeProxies.createProxy(conf, cluster.getFileSystem(0).getUri(),

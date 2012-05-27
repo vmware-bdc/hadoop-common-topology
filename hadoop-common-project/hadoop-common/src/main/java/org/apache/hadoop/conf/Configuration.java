@@ -1905,7 +1905,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     Configuration.addDeprecation("topology.script.file.name", 
                new String[]{CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_FILE_NAME_KEY});
     Configuration.addDeprecation("topology.environment.type", 
-            new String[]{CommonConfigurationKeys.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY});
+            new String[]{CommonConfigurationKeys.NET_TOPOLOGY_WITH_NODEGROUP});
     Configuration.addDeprecation("topology.script.number.args", 
                new String[]{CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_NUMBER_ARGS_KEY});
     Configuration.addDeprecation("hadoop.configured.node.mapping", 

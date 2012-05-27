@@ -73,7 +73,7 @@ import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.BlockWithLocat
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.NetworkTopology;
-import org.apache.hadoop.net.VirtualizationNetworkTopology;
+import org.apache.hadoop.net.NetworkTopologyWithNodeGroup;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
@@ -896,7 +896,7 @@ public class Balancer {
   private long chooseNodes() {
 	  
 	// Match nodes taking into consideration a custom fault domain
-	doChooseNodesForCustomFaultDomain();
+	chooseNodesForCustomFaultDomain();
     // Match nodes on the same rack first
     chooseNodes(true);
     // Then match nodes on different racks
@@ -915,7 +915,7 @@ public class Balancer {
     return bytesToMove;
   }
 
-  protected void doChooseNodesForCustomFaultDomain() {
+  protected void chooseNodesForCustomFaultDomain() {
 	if (cluster.isNodeGroupAware()) {
         chooseNodesOnSameNodeGroup();	  
     }
@@ -972,7 +972,7 @@ public class Balancer {
         sourceCandidates.remove();
         continue;
       }
-  	  foundSource = doAreDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
+  	  foundSource = areDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
     }
     if (foundSource) {
       assert(source != null):"Choose a null source";
@@ -993,10 +993,10 @@ public class Balancer {
     return false;
   }
 
-  protected boolean doAreDataNodesOnSameNodeGroup(DatanodeInfo sourceDatanode, DatanodeInfo targetDatanode) {
+  protected boolean areDataNodesOnSameNodeGroup(DatanodeInfo sourceDatanode, DatanodeInfo targetDatanode) {
 	  if (cluster.isNodeGroupAware()) {
           // choose from on-rack nodes
-          if ( ((VirtualizationNetworkTopology)cluster).isOnSameNodeGroup(sourceDatanode, targetDatanode)) {
+          if ( ((NetworkTopologyWithNodeGroup)cluster).isOnSameNodeGroup(sourceDatanode, targetDatanode)) {
             return true;
           }
   	    }
@@ -1143,7 +1143,7 @@ public class Balancer {
         targetCandidates.remove();
         continue;
       }
-  	  foundTarget = doAreDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
+  	  foundTarget = areDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
 
     }
     if (foundTarget) {

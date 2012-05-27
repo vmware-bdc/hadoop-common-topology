@@ -5,7 +5,7 @@ import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.VirtualizedSchedulerNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup;
 
 public class FifoSchedulerWithNodeGroup extends FifoScheduler {
   @Override
@@ -40,10 +40,10 @@ public class FifoSchedulerWithNodeGroup extends FifoScheduler {
   private int assignNodeGroupLocalContainers(SchedulerNode node, 
 	  SchedulerApp application, Priority priority) {
     int assignedContainers = 0;
-    if (!(node instanceof VirtualizedSchedulerNode)) {
+    if (!(node instanceof SchedulerNodeWithNodeGroup)) {
 	  return 0;
     }
-    VirtualizedSchedulerNode vNode = (VirtualizedSchedulerNode)node; 
+    SchedulerNodeWithNodeGroup vNode = (SchedulerNodeWithNodeGroup)node; 
 	if (vNode.getNodeGroup() == null)
       return 0;
     ResourceRequest request = 

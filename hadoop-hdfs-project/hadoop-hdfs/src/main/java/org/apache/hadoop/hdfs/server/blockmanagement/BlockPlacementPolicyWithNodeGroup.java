@@ -28,20 +28,20 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicy.NotEnoughReplicasException;
 import org.apache.hadoop.hdfs.server.namenode.FSClusterStats;
 import org.apache.hadoop.net.NetworkTopology;
+import org.apache.hadoop.net.NetworkTopologyWithNodeGroup;
 import org.apache.hadoop.net.Node;
 import org.apache.hadoop.net.NodeBase;
 import org.apache.hadoop.net.TopologyResolver;
-import org.apache.hadoop.net.VirtualizationNetworkTopology;
 
-public class BlockPlacementPolicyVirtualization extends
+public class BlockPlacementPolicyWithNodeGroup extends
 		BlockPlacementPolicyDefault {
 	
-  BlockPlacementPolicyVirtualization(Configuration conf,  FSClusterStats stats,
+  BlockPlacementPolicyWithNodeGroup(Configuration conf,  FSClusterStats stats,
       NetworkTopology clusterMap) {
     initialize(conf, stats, clusterMap);
   }
   
-  BlockPlacementPolicyVirtualization() {
+  BlockPlacementPolicyWithNodeGroup() {
   }
   
   public void initialize(Configuration conf,  FSClusterStats stats,
@@ -78,7 +78,7 @@ public class BlockPlacementPolicyVirtualization extends
 	} 
 
 	  // try a node on local node group
-	DatanodeDescriptor chosenNode = chooseLocalNodeGroup((VirtualizationNetworkTopology)clusterMap, localMachine, excludedNodes, 
+	DatanodeDescriptor chosenNode = chooseLocalNodeGroup((NetworkTopologyWithNodeGroup)clusterMap, localMachine, excludedNodes, 
 	    blocksize, maxNodesPerRack, results);
 	if (chosenNode != null) {
 	  return chosenNode;
@@ -161,7 +161,7 @@ public class BlockPlacementPolicyVirtualization extends
       }
   }
 	
-  private DatanodeDescriptor chooseLocalNodeGroup(VirtualizationNetworkTopology virtClusterMap,
+  private DatanodeDescriptor chooseLocalNodeGroup(NetworkTopologyWithNodeGroup virtClusterMap,
       DatanodeDescriptor localMachine, HashMap<Node, Node> excludedNodes, long blocksize, 
       int maxNodesPerRack, List<DatanodeDescriptor> results) throws NotEnoughReplicasException {
     // no local machine, so choose a random machine

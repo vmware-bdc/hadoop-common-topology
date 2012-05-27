@@ -70,7 +70,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppRepor
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeReport;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.VirtualizedSchedulerNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAddedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.ContainerExpiredSchedulerEvent;
@@ -675,8 +675,8 @@ implements ResourceScheduler, CapacitySchedulerContext, Configurable {
   }
 
   private synchronized void addNode(RMNode nodeManager) {
-    if (conf.getBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false)) {
-  	  this.nodes.put(nodeManager.getNodeID(), new VirtualizedSchedulerNode(nodeManager));
+    if (conf.getBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, false)) {
+  	  this.nodes.put(nodeManager.getNodeID(), new SchedulerNodeWithNodeGroup(nodeManager));
   	} else {
       this.nodes.put(nodeManager.getNodeID(), new SchedulerNode(nodeManager));
   	}

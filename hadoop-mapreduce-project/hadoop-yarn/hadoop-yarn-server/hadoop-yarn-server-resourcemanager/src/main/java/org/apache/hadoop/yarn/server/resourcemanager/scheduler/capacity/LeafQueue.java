@@ -69,7 +69,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.VirtualizedSchedulerNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup;
 import org.apache.hadoop.yarn.server.security.ContainerTokenSecretManager;
 import org.apache.hadoop.yarn.util.BuilderUtils;
 
@@ -1160,9 +1160,9 @@ public class LeafQueue implements CSQueue {
     // Check if we need containers on this nodegroup
     if (type == NodeType.NODEGROUP_LOCAL) {
       // Now check if we need containers on this nodegroup...
-      if (node instanceof VirtualizedSchedulerNode) {
+      if (node instanceof SchedulerNodeWithNodeGroup) {
     	ResourceRequest nodegroupLocalRequest = 
-    		application.getResourceRequest(priority, ((VirtualizedSchedulerNode)node).getNodeGroup());
+    		application.getResourceRequest(priority, ((SchedulerNodeWithNodeGroup)node).getNodeGroup());
         if (nodegroupLocalRequest != null) {
     	  return nodegroupLocalRequest.getNumContainers() > 0;
         }  

@@ -21,9 +21,9 @@ import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 
-public class RMNodeImplOnVirtualization extends RMNodeImpl {
+public class RMNodeImplWithNodeGroup extends RMNodeImpl {
 
-  public RMNodeImplOnVirtualization(NodeId nodeId, RMContext context,
+  public RMNodeImplWithNodeGroup(NodeId nodeId, RMContext context,
       String hostName, int cmPort, int httpPort, Node node,
 	      Resource capability) {
     super(nodeId, context, hostName, cmPort, httpPort, node, capability);

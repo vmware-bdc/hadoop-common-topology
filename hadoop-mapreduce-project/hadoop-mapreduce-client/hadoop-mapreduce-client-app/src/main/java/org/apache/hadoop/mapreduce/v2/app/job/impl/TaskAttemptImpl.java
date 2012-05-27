@@ -96,7 +96,7 @@ import org.apache.hadoop.mapreduce.v2.app.launcher.ContainerRemoteLaunchEvent;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerAllocator;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerAllocatorEvent;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerRequestEvent;
-import org.apache.hadoop.mapreduce.v2.app.rm.ContainerRequestOnVirtualizationEvent;
+import org.apache.hadoop.mapreduce.v2.app.rm.ContainerRequestWithNodeGroupEvent;
 import org.apache.hadoop.mapreduce.v2.app.speculate.SpeculatorEvent;
 import org.apache.hadoop.mapreduce.v2.app.taskclean.TaskCleanupEvent;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
@@ -1123,7 +1123,7 @@ public abstract class TaskAttemptImpl implements
       } else {
         Set<String> racks = new HashSet<String>();
         boolean isOnVirtualization = taskAttempt.getConf().getBoolean(
-            CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false);
+            CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, false);
         for (String host : taskAttempt.dataLocalHosts) {
           racks.add(TopologyResolver.getRack(RackResolver.resolve(host), isOnVirtualization));
         }
@@ -1135,7 +1135,7 @@ public abstract class TaskAttemptImpl implements
             nodegroups[i++] = TopologyResolver.getNodeGroup(RackResolver.resolve(host), isOnVirtualization);
           }
           taskAttempt.eventHandler.handle(
-              new ContainerRequestOnVirtualizationEvent(taskAttempt.attemptId,
+              new ContainerRequestWithNodeGroupEvent(taskAttempt.attemptId,
                   taskAttempt.resourceCapability, taskAttempt.resolveHosts(taskAttempt.dataLocalHosts),
                   nodegroups, racks.toArray(new String[racks.size()])));
           } else {

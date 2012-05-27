@@ -28,8 +28,8 @@ import junit.framework.TestCase;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 
-public class TestVNetworkTopology extends TestCase {
-  private final static VirtualizationNetworkTopology cluster = new VirtualizationNetworkTopology();
+public class TestNetworkTopologyWithNodeGroup extends TestCase {
+  private final static NetworkTopologyWithNodeGroup cluster = new NetworkTopologyWithNodeGroup();
   
   private final static DatanodeDescriptor dataNodes[] = new DatanodeDescriptor[] {
 	new DatanodeDescriptor(new DatanodeID("h1", 5020), "/d1/r1/s1"),

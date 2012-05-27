@@ -82,7 +82,7 @@ public class NetworkTopology {
     }
     netlock.writeLock().lock();
     try {
-      Node rack = doGetNodeForNetworkLocation(node);
+      Node rack = getNodeForNetworkLocation(node);
       if (rack != null && !(rack instanceof InnerNode)) {
         throw new IllegalArgumentException("Unexpected data node " 
                                            + node.toString() 
@@ -128,7 +128,7 @@ public class NetworkTopology {
    * @see #add(Node)
    * @see #getNode(String)
    */
-  protected Node doGetNodeForNetworkLocation(Node node) {
+  protected Node getNodeForNetworkLocation(Node node) {
   	return getNode(node.getNetworkLocation());
   }
   
@@ -303,7 +303,7 @@ public class NetworkTopology {
       
     netlock.readLock().lock();
     try {
-      return doCompareParents(node1, node2);
+      return compareParents(node1, node2);
     } finally {
       netlock.readLock().unlock();
     }
@@ -328,7 +328,7 @@ public class NetworkTopology {
    * 
    * @see #isOnSameRack(Node, Node)
    */
-  protected boolean doCompareParents(Node node1, Node node2) {
+  protected boolean compareParents(Node node1, Node node2) {
 	return node1.getParent()==node2.getParent();
   }
     

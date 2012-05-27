@@ -11,7 +11,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.VirtualizedSchedulerNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup;
 
 public class LeafQueueWithNodeGroup extends LeafQueue {
 	
@@ -62,8 +62,8 @@ public class LeafQueueWithNodeGroup extends LeafQueue {
       RMContainer reservedContainer) {
 
     ResourceRequest request = null;
-    if (node instanceof VirtualizedSchedulerNode ) {
-      VirtualizedSchedulerNode vNode = (VirtualizedSchedulerNode) node;
+    if (node instanceof SchedulerNodeWithNodeGroup ) {
+      SchedulerNodeWithNodeGroup vNode = (SchedulerNodeWithNodeGroup) node;
       request = application.getResourceRequest(
           priority, vNode.getNodeGroup());
     }

@@ -33,12 +33,12 @@ import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.StaticMapping;
 
-public class MiniVirtualDFSCluster extends MiniDFSCluster {
+public class MiniDFSClusterWithNodeGroup extends MiniDFSCluster {
 	
   private static String[] NODE_GROUPS = null;
-  private static final Log LOG = LogFactory.getLog(MiniVirtualDFSCluster.class);
+  private static final Log LOG = LogFactory.getLog(MiniDFSClusterWithNodeGroup.class);
   
-  public MiniVirtualDFSCluster(Builder builder) throws IOException {
+  public MiniDFSClusterWithNodeGroup(Builder builder) throws IOException {
 	super(builder);
   }
   

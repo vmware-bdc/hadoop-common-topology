@@ -43,7 +43,7 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.hdfs.MiniVirtualDFSCluster;
+import org.apache.hadoop.hdfs.MiniDFSClusterWithNodeGroup;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
@@ -59,11 +59,11 @@ import org.apache.hadoop.net.NetUtils;
 /**
  * This class tests if block replacement request to data nodes work correctly.
  */
-public class TestBlockReplacementOnVirtualization extends TestCase {
+public class TestBlockReplacementWithNodeGroup extends TestCase {
   private static final Log LOG = LogFactory.getLog(
   "org.apache.hadoop.hdfs.TestBlockReplacement");
 
-  MiniVirtualDFSCluster cluster;
+  MiniDFSClusterWithNodeGroup cluster;
   public void testThrottler() throws IOException {
     Configuration conf = new HdfsConfiguration();
     FileSystem.setDefaultUri(conf, "hdfs://localhost:0");
@@ -101,13 +101,13 @@ public class TestBlockReplacementOnVirtualization extends TestCase {
     CONF.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, DEFAULT_BLOCK_SIZE);
     CONF.setInt(DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY, DEFAULT_BLOCK_SIZE/2);
     CONF.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY,500);
-    CONF.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY, "org.apache.hadoop.net.VirtualizationNetworkTopology");
+    CONF.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY, "org.apache.hadoop.net.NetworkTopologyWithNodeGroup");
     
-    MiniVirtualDFSCluster.Builder builder = new MiniVirtualDFSCluster.Builder(CONF)
+    MiniDFSClusterWithNodeGroup.Builder builder = new MiniDFSClusterWithNodeGroup.Builder(CONF)
                                          .numDataNodes(REPLICATION_FACTOR)
                                          .racks(INITIAL_RACKS);
-    MiniVirtualDFSCluster.setNodeGroups(INITIAL_NODE_GROUPS);
-    cluster = new MiniVirtualDFSCluster(builder);
+    MiniDFSClusterWithNodeGroup.setNodeGroups(INITIAL_NODE_GROUPS);
+    cluster = new MiniDFSClusterWithNodeGroup(builder);
     try {
       cluster.waitActive();
       

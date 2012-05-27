@@ -52,7 +52,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImpl;
-import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImplOnVirtualization;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImplWithNodeGroup;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeReconnectEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeStatusEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.security.authorize.RMPolicyProvider;
@@ -179,8 +179,8 @@ public class ResourceTrackerService extends AbstractService implements
     
     RMNode rmNode = null;
     if (super.getConfig().getBoolean(
-        CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false)) {
-      rmNode = new RMNodeImplOnVirtualization(nodeId, rmContext, host, cmPort, httpPort,
+        CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, false)) {
+      rmNode = new RMNodeImplWithNodeGroup(nodeId, rmContext, host, cmPort, httpPort,
       resolve(host), capability);
     } else {
       rmNode = new RMNodeImpl(nodeId, rmContext, host, cmPort, httpPort,

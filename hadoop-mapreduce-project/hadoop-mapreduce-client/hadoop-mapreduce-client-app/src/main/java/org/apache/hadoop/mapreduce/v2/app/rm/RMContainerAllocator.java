@@ -138,7 +138,7 @@ public class RMContainerAllocator extends RMContainerRequestor
   private long retryInterval;
   private long retrystartTime;
   
-  // Mark if cluster is deployed on virtualization platform, default is not
+  // Mark if cluster is deployed on environment with nodegroup layer in topology, default is not
   private boolean topologyWithNodeGroup = false;
 
   BlockingQueue<ContainerAllocatorEvent> eventQueue
@@ -161,7 +161,7 @@ public class RMContainerAllocator extends RMContainerRequestor
         MRJobConfig.MR_AM_JOB_REDUCE_PREEMPTION_LIMIT,
         MRJobConfig.DEFAULT_MR_AM_JOB_REDUCE_PREEMPTION_LIMIT);
     RackResolver.init(conf);
-    topologyWithNodeGroup = conf.getBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, false);
+    topologyWithNodeGroup = conf.getBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, false);
     retryInterval = getConfig().getLong(MRJobConfig.MR_AM_TO_RM_WAIT_INTERVAL_MS,
                                 MRJobConfig.DEFAULT_MR_AM_TO_RM_WAIT_INTERVAL_MS);
     // Init startTime to current time. If all goes well, it will be reset after
@@ -688,27 +688,27 @@ public class RMContainerAllocator extends RMContainerRequestor
 
         doNodeGroupMapping(event);
 
-       for (String rack: event.getRacks()) {
-         LinkedList<TaskAttemptId> list = mapsRackMapping.get(rack);
-         if (list == null) {
-           list = new LinkedList<TaskAttemptId>();
-           mapsRackMapping.put(rack, list);
-         }
-         list.add(event.getAttemptID());
-         if (LOG.isDebugEnabled()) {
+        for (String rack: event.getRacks()) {
+          LinkedList<TaskAttemptId> list = mapsRackMapping.get(rack);
+          if (list == null) {
+            list = new LinkedList<TaskAttemptId>();
+            mapsRackMapping.put(rack, list);
+          }
+          list.add(event.getAttemptID());
+          if (LOG.isDebugEnabled()) {
             LOG.debug("Added attempt req to rack " + rack);
-         }
-       }
-       request = new ContainerRequest(event, PRIORITY_MAP);
+          }
+        }
+        request = new ContainerRequest(event, PRIORITY_MAP);
       }
       maps.put(event.getAttemptID(), request);
       addContainerReq(request);
     }
 
 	protected void doNodeGroupMapping(ContainerRequestEvent event) {
-	  if (event instanceof ContainerRequestOnVirtualizationEvent
+	  if (event instanceof ContainerRequestWithNodeGroupEvent
           && topologyWithNodeGroup) {
-        for (String nodegroup: ((ContainerRequestOnVirtualizationEvent)event).getNodeGroups()) {
+        for (String nodegroup: ((ContainerRequestWithNodeGroupEvent)event).getNodeGroups()) {
           LinkedList<TaskAttemptId> list = mapsNodeGroupMapping.get(nodegroup);
           if (list == null) {
             list = new LinkedList<TaskAttemptId>();
@@ -720,9 +720,9 @@ public class RMContainerAllocator extends RMContainerRequestor
       }
 	}
     
-    protected ContainerRequest doAssignToNodeGroup(String host, LinkedList<TaskAttemptId> list) {
+    protected ContainerRequest assignToNodeGroup(String host, LinkedList<TaskAttemptId> list) {
 		ContainerRequest assigned = null;
-		// Try to assign nodegroup-local if on virtualization
+		// Try to assign nodegroup-local
 	      if (topologyWithNodeGroup) {
 	        String nodegroup = TopologyResolver.getNodeGroup(RackResolver.resolve(host), topologyWithNodeGroup);
 	        if (nodegroup != null)  
@@ -989,7 +989,7 @@ public class RMContainerAllocator extends RMContainerRequestor
         }
         if (assigned == null) {
         	
-          assigned = doAssignToNodeGroup(host, list);
+          assigned = assignToNodeGroup(host, list);
 
           // Try to assign rack-local
           if (assigned == null && maps.size() > 0) {

@@ -55,7 +55,7 @@ import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerAllocator;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerFailedEvent;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerRequestEvent;
-import org.apache.hadoop.mapreduce.v2.app.rm.ContainerRequestOnVirtualizationEvent;
+import org.apache.hadoop.mapreduce.v2.app.rm.ContainerRequestWithNodeGroupEvent;
 import org.apache.hadoop.mapreduce.v2.app.rm.RMContainerAllocator;
 import org.apache.hadoop.mapreduce.v2.util.MRBuilderUtils;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
@@ -450,13 +450,13 @@ public class TestRMContainerAllocator {
   
   
   @Test
-  public void testMapTaskSchedulingOnVirtualization() throws Exception {
+  public void testMapTaskSchedulingWithNodeGroup() throws Exception {
 
-    LOG.info("Running testMapTaskSchedulingOnVirtualization");
+    LOG.info("Running testMapTaskSchedulingWithNodeGroup");
 
     Configuration conf = new Configuration();
-    // set virtualization property here.
-    conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, "true");
+    // set net topology with nodegroup layer here.
+    conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, "true");
     MyResourceManager rm = new MyResourceManager(conf);
     rm.start();
     DrainDispatcher dispatcher = (DrainDispatcher) rm.getRMContext()
@@ -1360,7 +1360,7 @@ private static class MyResourceManager extends MockRM {
         taskAttemptId);
     Resource containerNeed = BuilderUtils.newResource(memory);
 
-    return new ContainerRequestOnVirtualizationEvent(attemptId, containerNeed, hosts,
+    return new ContainerRequestWithNodeGroupEvent(attemptId, containerNeed, hosts,
         nodegroups, racks);
   }
 
@@ -1433,9 +1433,9 @@ private static class MyResourceManager extends MockRM {
 		  assignedNode.getHost()));
 	}
 	if (checkNodeGroupMatch) {
-	  Assert.assertTrue("Request type error: not a request on virtualization.", request instanceof ContainerRequestOnVirtualizationEvent);
+	  Assert.assertTrue("Request type error: not a request with nodegroup.", request instanceof ContainerRequestWithNodeGroupEvent);
 	  
-      List<String> requestNodeGroups = Arrays.asList(((ContainerRequestOnVirtualizationEvent)request).getNodeGroups());
+      List<String> requestNodeGroups = Arrays.asList(((ContainerRequestWithNodeGroupEvent)request).getNodeGroups());
 	  NodeId assignedNode = assigned.getContainer().getNodeId();
 	  Assert.assertTrue(
 		  "Not assigned to requested rack", requestNodeGroups.contains(
@@ -1450,7 +1450,7 @@ private static class MyResourceManager extends MockRM {
 		  "Not assigned to requested rack", requestRacks.contains(
 		      TopologyResolver.getRack(
 		          RackResolver.resolve(assignedNode.getHost()),
-		          request instanceof ContainerRequestOnVirtualizationEvent)));
+		          request instanceof ContainerRequestWithNodeGroupEvent)));
 	}
   }
 

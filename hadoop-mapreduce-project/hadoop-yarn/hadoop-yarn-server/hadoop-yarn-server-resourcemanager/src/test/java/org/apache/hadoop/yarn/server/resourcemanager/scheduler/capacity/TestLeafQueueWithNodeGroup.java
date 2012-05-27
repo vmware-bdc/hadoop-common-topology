@@ -58,7 +58,7 @@ import org.junit.Test;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-public class TestLeafQueueOnVirtualization {
+public class TestLeafQueueWithNodeGroup {
   private static final Log LOG = LogFactory.getLog(TestLeafQueue.class);
   
   private final RecordFactory recordFactory = 
@@ -105,8 +105,8 @@ public class TestLeafQueueOnVirtualization {
   private static final String A = "a";
   private static final String B = "b";
   private void setupQueueConfiguration(CapacitySchedulerConfiguration conf) {
-	// Set virtualization property here.
-	conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, "true");
+	// Set topology with nodegroup here.
+	conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, "true");
 	
     // Define top-level queues
     conf.setQueues(CapacitySchedulerConfiguration.ROOT, new String[] {A, B});

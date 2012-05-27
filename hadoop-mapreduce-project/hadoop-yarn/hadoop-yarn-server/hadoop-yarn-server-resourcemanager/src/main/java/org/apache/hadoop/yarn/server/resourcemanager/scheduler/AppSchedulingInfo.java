@@ -259,13 +259,13 @@ public class AppSchedulingInfo {
       this.requests.get(priority).remove(node.getHostName());
     }
 
-    if (node instanceof VirtualizedSchedulerNode) {
+    if (node instanceof SchedulerNodeWithNodeGroup) {
       ResourceRequest nodegroupLocalRequest = requests.get(priority).get(
-    	  ((VirtualizedSchedulerNode)node).getNodeGroup());
+    	  ((SchedulerNodeWithNodeGroup)node).getNodeGroup());
       if (nodegroupLocalRequest != null) {
         nodegroupLocalRequest.setNumContainers(nodegroupLocalRequest.getNumContainers() - 1);
         if (nodegroupLocalRequest.getNumContainers() == 0) {
-    	  this.requests.get(priority).remove(((VirtualizedSchedulerNode)node).getNodeGroup());
+    	  this.requests.get(priority).remove(((SchedulerNodeWithNodeGroup)node).getNodeGroup());
         }
       }
     }
@@ -296,9 +296,9 @@ public class AppSchedulingInfo {
     // Update future requirements
     nodegroupLocalRequest.setNumContainers(nodegroupLocalRequest.getNumContainers() - 1);
     if (nodegroupLocalRequest.getNumContainers() == 0) {
-      if (!(node instanceof VirtualizedSchedulerNode))
+      if (!(node instanceof SchedulerNodeWithNodeGroup))
     	throw new RuntimeException("Node type exception for node: " + node.getNodeID());
-      this.requests.get(priority).remove(((VirtualizedSchedulerNode)node).getNodeGroup());
+      this.requests.get(priority).remove(((SchedulerNodeWithNodeGroup)node).getNodeGroup());
     }
     
     ResourceRequest rackLocalRequest = requests.get(priority).get(

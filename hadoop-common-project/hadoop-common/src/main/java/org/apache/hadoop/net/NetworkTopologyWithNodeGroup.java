@@ -19,16 +19,16 @@
  */
 package org.apache.hadoop.net;
 
-public class VirtualizationNetworkTopology extends NetworkTopology {
+public class NetworkTopologyWithNodeGroup extends NetworkTopology {
 
 	public final static String DEFAULT_NODEGROUP = "/default-nodegroup";
 
-	public VirtualizationNetworkTopology() {
-		clusterMap = new VirtualizedInnerNode(InnerNode.ROOT);
+	public NetworkTopologyWithNodeGroup() {
+		clusterMap = new InnerNodeWithNodeGroup(InnerNode.ROOT);
 	}
 
 	@Override
-	protected Node doGetNodeForNetworkLocation(Node node) {
+	protected Node getNodeForNetworkLocation(Node node) {
 		// if node only with default rack info, here we need to add default
 		// nodegroup info
 		if (NetworkTopology.DEFAULT_RACK.equals(node.getNetworkLocation())) {
@@ -49,8 +49,8 @@ public class VirtualizationNetworkTopology extends NetworkTopology {
 		try {
 			loc = InnerNode.normalize(loc);
 			Node locNode = getNode(loc);
-			if (locNode instanceof VirtualizedInnerNode) {
-				VirtualizedInnerNode node = (VirtualizedInnerNode) locNode;
+			if (locNode instanceof InnerNodeWithNodeGroup) {
+				InnerNodeWithNodeGroup node = (InnerNodeWithNodeGroup) locNode;
 				if (node.isRack()) {
 					return loc;
 				} else if (node.isNodeGroup()) {
@@ -81,8 +81,8 @@ public class VirtualizationNetworkTopology extends NetworkTopology {
 		try {
 			loc = InnerNode.normalize(loc);
 			Node locNode = getNode(loc);
-			if (locNode instanceof VirtualizedInnerNode) {
-				VirtualizedInnerNode node = (VirtualizedInnerNode) locNode;
+			if (locNode instanceof InnerNodeWithNodeGroup) {
+				InnerNodeWithNodeGroup node = (InnerNodeWithNodeGroup) locNode;
 				if (node.isNodeGroup()) {
 					return loc;
 				} else if (node.isRack()) {
@@ -102,7 +102,7 @@ public class VirtualizationNetworkTopology extends NetworkTopology {
 	}
 
 	@Override
-	protected boolean doCompareParents(Node node1, Node node2) {
+	protected boolean compareParents(Node node1, Node node2) {
 		if (node1.getParent() == null || node2.getParent() == null) {
 			LOG.warn("Some nodes in: " + node1.getName() + ", "
 					+ node2.getName() + "don't have parent node.");
@@ -166,11 +166,11 @@ public class VirtualizationNetworkTopology extends NetworkTopology {
 
 	  	// if node only with default rack info, here we need to add default nodegroup info
 	    if (NetworkTopology.DEFAULT_RACK.equals(node.getNetworkLocation())) {
-	      node.setNetworkLocation(node.getNetworkLocation() + VirtualizationNetworkTopology.DEFAULT_NODEGROUP);
+	      node.setNetworkLocation(node.getNetworkLocation() + NetworkTopologyWithNodeGroup.DEFAULT_NODEGROUP);
 	   	}
 	    Node nodeGroup = getNode(node.getNetworkLocation());
 	    if (nodeGroup == null) {
-	      nodeGroup = new VirtualizedInnerNode(node.getNetworkLocation());
+	      nodeGroup = new InnerNodeWithNodeGroup(node.getNetworkLocation());
 	    }
 	    rack = getNode(nodeGroup.getNetworkLocation());
   

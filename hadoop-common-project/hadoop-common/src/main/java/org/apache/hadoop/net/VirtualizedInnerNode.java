@@ -19,18 +19,18 @@
  */
 package org.apache.hadoop.net;
 
-class VirtualizedInnerNode extends InnerNode {
+class InnerNodeWithNodeGroup extends InnerNode {
 
-	public VirtualizedInnerNode(String name, String location, InnerNode parent,
+	public InnerNodeWithNodeGroup(String name, String location, InnerNode parent,
 			int level) {
 		super(name, location, parent, level);
 	}
 
-	public VirtualizedInnerNode(String name, String location) {
+	public InnerNodeWithNodeGroup(String name, String location) {
 		super(name, location);
 	}
 
-	public VirtualizedInnerNode(String path) {
+	public InnerNodeWithNodeGroup(String path) {
 		super(path);
 	}
 
@@ -56,7 +56,7 @@ class VirtualizedInnerNode extends InnerNode {
 	}
 
 	/**
-	 * Judge if this node represents a node group (hypervisor)
+	 * Judge if this node represents a node group
 	 * 
 	 * @return true if it has no child or its children are not InnerNodes
 	 */
@@ -75,7 +75,7 @@ class VirtualizedInnerNode extends InnerNode {
 
 	@Override
 	protected InnerNode doCreateParentNode(String parentName) {
-		return new VirtualizedInnerNode(parentName, getPath(this), this,
+		return new InnerNodeWithNodeGroup(parentName, getPath(this), this,
 				this.getLevel() + 1);
 	}
 

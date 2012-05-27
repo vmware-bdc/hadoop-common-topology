@@ -16,20 +16,20 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler;
 
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
-import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImplOnVirtualization;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImplWithNodeGroup;
 
-public class VirtualizedSchedulerNode extends SchedulerNode {
+public class SchedulerNodeWithNodeGroup extends SchedulerNode {
 
-  public VirtualizedSchedulerNode(RMNode node) {
+  public SchedulerNodeWithNodeGroup(RMNode node) {
 	super(node);
   }
 	
   public String getNodeGroup() {
-	if (!(rmNode instanceof RMNodeImplOnVirtualization)) {
+	if (!(rmNode instanceof RMNodeImplWithNodeGroup)) {
 	  // TODO throw a exception here may be better.
 	  return null;
 	}
-	RMNodeImplOnVirtualization rmNodeV = (RMNodeImplOnVirtualization) rmNode;
+	RMNodeImplWithNodeGroup rmNodeV = (RMNodeImplWithNodeGroup) rmNode;
 	return rmNodeV.getNodeGroupName();
   }
 }

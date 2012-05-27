@@ -38,9 +38,9 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.Node;
-import org.apache.hadoop.net.VirtualizationNetworkTopology;
+import org.apache.hadoop.net.NetworkTopologyWithNodeGroup;
 
-public class TestReplicationPolicyOnVirtualization extends TestCase {
+public class TestReplicationPolicyWithNodeGroup extends TestCase {
   private static final int BLOCK_SIZE = 1024;
   private static final int NUM_OF_DATANODES = 8;
   private static final Configuration CONF = new HdfsConfiguration();
@@ -67,9 +67,9 @@ public class TestReplicationPolicyOnVirtualization extends TestCase {
     try {
       FileSystem.setDefaultUri(CONF, "hdfs://localhost:0");
       CONF.set(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY, "0.0.0.0:0");
-      CONF.setBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_ENVIRONMENT_TYPE_KEY, true);
-      CONF.set("dfs.block.replicator.classname", "org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyVirtualization");
-      CONF.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY, "org.apache.hadoop.net.VirtualizationNetworkTopology");
+      CONF.setBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, true);
+      CONF.set("dfs.block.replicator.classname", "org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyWithNodeGroup");
+      CONF.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY, "org.apache.hadoop.net.NetworkTopologyWithNodeGroup");
       DFSTestUtil.formatNameNode(CONF);
       namenode = new NameNode(CONF);
     } catch (IOException e) {
@@ -207,7 +207,7 @@ public class TestReplicationPolicyOnVirtualization extends TestCase {
     assertEquals(targets[0], dataNodes[0]);
     assertTrue(cluster.isNodeGroupAware());
     for(int i=1; i<4; i++) {
-      assertFalse(((VirtualizationNetworkTopology)cluster).isOnSameNodeGroup(targets[0], targets[i]));
+      assertFalse(((NetworkTopologyWithNodeGroup)cluster).isOnSameNodeGroup(targets[0], targets[i]));
     }
     assertTrue(cluster.isOnSameRack(targets[1], targets[2]) ||
                cluster.isOnSameRack(targets[2], targets[3]));
@@ -270,7 +270,7 @@ public class TestReplicationPolicyOnVirtualization extends TestCase {
     assertEquals(targets[0], dataNodes[1]);
     assertTrue(cluster.isNodeGroupAware());    
     for(int i=1; i<4; i++) {
-      assertFalse(((VirtualizationNetworkTopology)cluster).isOnSameNodeGroup(targets[0], targets[i]));
+      assertFalse(((NetworkTopologyWithNodeGroup)cluster).isOnSameNodeGroup(targets[0], targets[i]));
     }
     assertTrue(cluster.isOnSameRack(targets[1], targets[2]) ||
                cluster.isOnSameRack(targets[2], targets[3]));
