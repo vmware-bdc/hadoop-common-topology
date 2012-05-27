@@ -224,7 +224,9 @@ public class DatanodeManager {
 	// As it is possible for the separation of node manager and datanode, here we should get node but not datanode only .
     Node client = getDatanodeByHost(targethost);
     if (client == null) {
-      String rName = dnsToSwitchMapping.resolve(targethost);
+      List<String> hosts = new ArrayList<String> (1);
+      hosts.add(targethost);
+      String rName = dnsToSwitchMapping.resolve(hosts).get(0);
       if (rName != null)
         client = new NodeBase(rName + NodeBase.PATH_SEPARATOR_STR + targethost);
     }

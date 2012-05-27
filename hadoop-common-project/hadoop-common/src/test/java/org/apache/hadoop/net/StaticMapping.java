@@ -114,11 +114,6 @@ public class StaticMapping extends AbstractDNSToSwitchMapping  {
       return m;
     }
   }
-  
-  @Override
-  public String resolve(String name) {
-    return nameToRackMap.get(name);
-  }
 
   /**
    * The switch policy of this mapping is driven by the same policy
