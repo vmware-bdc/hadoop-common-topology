@@ -108,7 +108,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
   private final static List<Container> EMPTY_CONTAINER_LIST = Arrays.asList(EMPTY_CONTAINER_ARRAY);
   private RMContext rmContext;
 
-  private Map<NodeId, SchedulerNode> nodes = new ConcurrentHashMap<NodeId, SchedulerNode>();
+  protected Map<NodeId, SchedulerNode> nodes = new ConcurrentHashMap<NodeId, SchedulerNode>();
 
   private static final int MINIMUM_MEMORY = 1024;
 
@@ -748,7 +748,7 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
      
   }
   
-  private Resource clusterResource = recordFactory.newRecordInstance(Resource.class);
+  protected Resource clusterResource = recordFactory.newRecordInstance(Resource.class);
   private Resource usedResource = recordFactory.newRecordInstance(Resource.class);
 
   private synchronized void removeNode(RMNode nodeInfo) {
@@ -783,12 +783,8 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
     return DEFAULT_QUEUE.getQueueUserAclInfo(null); 
   }
 
-  private synchronized void addNode(RMNode nodeManager) {
-	if (conf.getBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, false)) {
-	  this.nodes.put(nodeManager.getNodeID(), new SchedulerNodeWithNodeGroup(nodeManager));
-	} else {
-      this.nodes.put(nodeManager.getNodeID(), new SchedulerNode(nodeManager));
-	}
+  protected synchronized void addNode(RMNode nodeManager) {
+    this.nodes.put(nodeManager.getNodeID(), new SchedulerNode(nodeManager));
     Resources.addTo(clusterResource, nodeManager.getTotalCapability());
   }
 

@@ -39,6 +39,7 @@ import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
@@ -105,9 +106,15 @@ public class TestLeafQueueWithNodeGroup {
   private static final String A = "a";
   private static final String B = "b";
   private void setupQueueConfiguration(CapacitySchedulerConfiguration conf) {
-	// Set topology with nodegroup here.
-	conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, "true");
-	
+	// Set related implementation classes with NodeGroup.
+    conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, "true");
+	conf.set(YarnConfiguration.RM_SCHEDULED_REQUESTS_CLASS_KEY, 
+        "org.apache.hadoop.mapreduce.v2.app.rm.ScheduledRequests");
+	conf.set(YarnConfiguration.RM_SCHEDULER_NODE_CLASS_KEY, 
+        "org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup");
+	conf.set(YarnConfiguration.RM_CAPACITY_SCHEDULER_LEAFQUEUE_CLASS_KEY, 
+        "org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.LeafQueueWithNodeGroup");
+
     // Define top-level queues
     conf.setQueues(CapacitySchedulerConfiguration.ROOT, new String[] {A, B});
     conf.setCapacity(CapacitySchedulerConfiguration.ROOT, 100);

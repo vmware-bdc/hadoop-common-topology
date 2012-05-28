@@ -35,8 +35,6 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AccessControlList;
@@ -69,7 +67,6 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup;
 import org.apache.hadoop.yarn.server.security.ContainerTokenSecretManager;
 import org.apache.hadoop.yarn.util.BuilderUtils;
 
@@ -88,7 +85,6 @@ public class LeafQueue implements CSQueue {
   private int userLimit;
   private float userLimitFactor;
 
-  private Configuration conf;
   private int maxApplications;
   private int maxApplicationsPerUser;
   
@@ -127,15 +123,14 @@ public class LeafQueue implements CSQueue {
   private final RecordFactory recordFactory = 
     RecordFactoryProvider.getRecordFactory(null);
 
-  private CapacitySchedulerContext scheduler;
+  protected CapacitySchedulerContext scheduler;
   
   private final ActiveUsersManager activeUsersManager;
   
-  public LeafQueue(CapacitySchedulerContext cs, Configuration conf,
+  public LeafQueue(CapacitySchedulerContext cs,
       String queueName, CSQueue parent, 
       Comparator<SchedulerApp> applicationComparator, CSQueue old) {
     this.scheduler = cs;
-    this.conf = conf;
     this.queueName = queueName;
     this.parent = parent;
     // must be after parent and queueName are initialized
@@ -1155,18 +1150,6 @@ public class LeafQueue implements CSQueue {
     // If we are here, we do need containers on this rack for RACK_LOCAL req
     if (type == NodeType.RACK_LOCAL) {
       return true;
-    }
-
-    // Check if we need containers on this nodegroup
-    if (type == NodeType.NODEGROUP_LOCAL) {
-      // Now check if we need containers on this nodegroup...
-      if (node instanceof SchedulerNodeWithNodeGroup) {
-    	ResourceRequest nodegroupLocalRequest = 
-    		application.getResourceRequest(priority, ((SchedulerNodeWithNodeGroup)node).getNodeGroup());
-        if (nodegroupLocalRequest != null) {
-    	  return nodegroupLocalRequest.getNumContainers() > 0;
-        }  
-      }      
     }
     
     // Check if we need containers on this host

@@ -1,7 +1,10 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo;
 
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
@@ -66,5 +69,10 @@ public class FifoSchedulerWithNodeGroup extends FifoScheduler {
             assignableContainers, request, NodeType.NODEGROUP_LOCAL);
     }
     return assignedContainers;
+  }
+  @Override
+  protected synchronized void addNode(RMNode nodeManager) {
+	this.nodes.put(nodeManager.getNodeID(), new SchedulerNodeWithNodeGroup(nodeManager));
+    Resources.addTo(clusterResource, nodeManager.getTotalCapability());
   }
 }

@@ -72,6 +72,7 @@ import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.DrainDispatcher;
 import org.apache.hadoop.yarn.event.Event;
@@ -455,8 +456,14 @@ public class TestRMContainerAllocator {
     LOG.info("Running testMapTaskSchedulingWithNodeGroup");
 
     Configuration conf = new Configuration();
-    // set net topology with nodegroup layer here.
+    // Set related implementation classes with NodeGroup.
     conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, "true");
+    conf.set(YarnConfiguration.RM_SCHEDULED_REQUESTS_CLASS_KEY, 
+        "org.apache.hadoop.mapreduce.v2.app.rm.ScheduledRequests");
+    conf.set(YarnConfiguration.RM_SCHEDULER_NODE_CLASS_KEY, 
+        "org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup");
+    conf.set(YarnConfiguration.RM_CAPACITY_SCHEDULER_LEAFQUEUE_CLASS_KEY, 
+        "org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.LeafQueueWithNodeGroup");
     MyResourceManager rm = new MyResourceManager(conf);
     rm.start();
     DrainDispatcher dispatcher = (DrainDispatcher) rm.getRMContext()

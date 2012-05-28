@@ -8,6 +8,7 @@ import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
@@ -16,9 +17,9 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWith
 public class LeafQueueWithNodeGroup extends LeafQueue {
 	
   public LeafQueueWithNodeGroup(CapacitySchedulerContext cs,
-      Configuration conf, String queueName, CSQueue parent,
+      String queueName, CSQueue parent,
       Comparator<SchedulerApp> applicationComparator, CSQueue old) {
-    super(cs, conf, queueName, parent, applicationComparator, old);
+    super(cs, queueName, parent, applicationComparator, old);
   }
 
   @Override
@@ -77,4 +78,29 @@ public class LeafQueueWithNodeGroup extends LeafQueue {
     }
     return Resources.none();
   }
+
+  @Override 
+  boolean canAssign(SchedulerApp application, Priority priority, 
+      SchedulerNode node, NodeType type, RMContainer reservedContainer) {
+
+    // Reserved... 
+    if (reservedContainer != null) {
+      return true;
+    }
+
+    // Check if we need containers on this nodegroup
+    if (type == NodeType.NODEGROUP_LOCAL) {
+      // Now check if we need containers on this nodegroup...
+      if (node instanceof SchedulerNodeWithNodeGroup) {
+        ResourceRequest nodegroupLocalRequest = 
+            application.getResourceRequest(priority, ((SchedulerNodeWithNodeGroup)node).getNodeGroup());
+        if (nodegroupLocalRequest != null) {
+          return nodegroupLocalRequest.getNumContainers() > 0;
+        }
+      }
+    }
+
+    return super.canAssign(application, priority, node, type, reservedContainer); 
+  }
+
 }

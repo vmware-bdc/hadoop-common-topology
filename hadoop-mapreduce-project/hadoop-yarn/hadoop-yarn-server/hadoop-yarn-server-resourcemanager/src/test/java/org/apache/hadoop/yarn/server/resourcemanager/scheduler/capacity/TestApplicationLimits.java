@@ -79,7 +79,7 @@ public class TestApplicationLimits {
 
     
     queue = spy(
-        new LeafQueue(csContext, csConf, A, root, 
+        new LeafQueue(csContext, A, root, 
                       CapacityScheduler.applicationComparator, null)
         );
 

@@ -186,10 +186,20 @@
     <description>The class to use as scheduled requests.</description>
     <name>yarn.resourcemanager.scheduled.requests.class</name>
   </property>
-  
+
+  <property>
+    <description>The class to use as scheduler node.</description>
+    <name>yarn.resourcemanager.scheduler.node.class</name>
+  </property>
+
   <property>
     <description>The class to use as the resource scheduler.</description>
     <name>yarn.resourcemanager.scheduler.class</name>
+  </property>
+  
+  <property>
+    <description>The class to use as LeafQueue in capacity scheduler.</description>
+    <name>yarn.resourcemanager.scheduler.leafqueue.class</name>
   </property>
 
   <property>

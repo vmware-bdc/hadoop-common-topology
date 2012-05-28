@@ -178,14 +178,7 @@ public class ResourceTrackerService extends AbstractService implements
     }
     
     RMNode rmNode = null;
-    if (super.getConfig().getBoolean(
-        CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, false)) {
-      rmNode = new RMNodeImplWithNodeGroup(nodeId, rmContext, host, cmPort, httpPort,
-      resolve(host), capability);
-    } else {
-      rmNode = new RMNodeImpl(nodeId, rmContext, host, cmPort, httpPort,
-          resolve(host), capability);
-    }
+    rmNode = instantiateRMNode(nodeId, this.rmContext, host, cmPort, httpPort, capability);
 
     RMNode oldNode = this.rmContext.getRMNodes().putIfAbsent(nodeId, rmNode);
     if (oldNode == null) {
@@ -207,6 +200,20 @@ public class ResourceTrackerService extends AbstractService implements
     regResponse.setNodeAction(NodeAction.NORMAL);
     response.setRegistrationResponse(regResponse);
     return response;
+  }
+
+  private RMNode instantiateRMNode(NodeId nodeId, RMContext rmContext, String host, 
+      int cmPort, int httpPort, Resource capability) {
+    RMNode rmNode;
+    if (super.getConfig().getBoolean(
+        CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, false)) {
+      rmNode = new RMNodeImplWithNodeGroup(nodeId, rmContext, host, cmPort, httpPort,
+      resolve(host), capability);
+    } else {
+      rmNode = new RMNodeImpl(nodeId, rmContext, host, cmPort, httpPort,
+          resolve(host), capability);
+    }
+    return rmNode;
   }
 
   @SuppressWarnings("unchecked")

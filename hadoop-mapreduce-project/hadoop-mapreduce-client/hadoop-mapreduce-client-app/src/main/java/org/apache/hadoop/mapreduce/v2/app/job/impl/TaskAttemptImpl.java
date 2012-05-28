@@ -1138,13 +1138,13 @@ public abstract class TaskAttemptImpl implements
               new ContainerRequestWithNodeGroupEvent(taskAttempt.attemptId,
                   taskAttempt.resourceCapability, taskAttempt.resolveHosts(taskAttempt.dataLocalHosts),
                   nodegroups, racks.toArray(new String[racks.size()])));
-          } else {
-            taskAttempt.eventHandler.handle(
-                new ContainerRequestEvent(taskAttempt.attemptId,
-                    taskAttempt.resourceCapability,
-                    taskAttempt.resolveHosts(taskAttempt.dataLocalHosts),
-                    racks.toArray(new String[racks.size()])));
-          }
+        } else {
+          taskAttempt.eventHandler.handle(
+              new ContainerRequestEvent(taskAttempt.attemptId,
+                  taskAttempt.resourceCapability,
+                  taskAttempt.resolveHosts(taskAttempt.dataLocalHosts),
+                  racks.toArray(new String[racks.size()])));
+        }
       }
     }
   }
