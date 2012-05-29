@@ -127,6 +127,7 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
 	 *                when either node1 or node2 is null, or node1 or node2 do
 	 *                not belong to the cluster
 	 */
+	@Override
 	public boolean isOnSameNodeGroup(Node node1, Node node2) {
 		if (node1 == null || node2 == null) {
 			return false;

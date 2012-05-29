@@ -993,14 +993,8 @@ public class Balancer {
     return false;
   }
 
-  protected boolean areDataNodesOnSameNodeGroup(DatanodeInfo sourceDatanode, DatanodeInfo targetDatanode) {
-	  if (cluster.isNodeGroupAware()) {
-          // choose from on-rack nodes
-          if ( ((NetworkTopologyWithNodeGroup)cluster).isOnSameNodeGroup(sourceDatanode, targetDatanode)) {
-            return true;
-          }
-  	    }
-	  return false;
+  protected boolean areDataNodesOnSameNodeGroup(DatanodeInfo sourceDatanode, DatanodeInfo targetDatanode) { 
+    return cluster.isOnSameNodeGroup(sourceDatanode, targetDatanode);
   }
 
   private void chooseTargetsOnSameNodeGroup(Iterator<BalancerDatanode> targetCandidates) {

@@ -498,4 +498,9 @@ public class NetworkTopology {
       swap(nodes, 0, r.nextInt(nodes.length));
     }
   }
+
+  // Return false directly as not aware of NodeGroup, to be override in sub-class
+  public boolean isOnSameNodeGroup(Node node1, Node node2) {
+	return false;
+  }
 }
