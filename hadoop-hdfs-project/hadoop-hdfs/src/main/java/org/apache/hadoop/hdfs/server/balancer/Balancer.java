@@ -49,6 +49,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
@@ -70,7 +71,9 @@ import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.BlockWithLocat
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.NetworkTopology;
+import org.apache.hadoop.net.NetworkTopologyWithNodeGroup;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
@@ -776,6 +779,9 @@ public class Balancer {
     this.threshold = p.threshold;
     this.policy = p.policy;
     this.nnc = theblockpool;
+	cluster = ReflectionUtils.newInstance(conf.getClass(
+        CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY,
+		    NetworkTopology.class, NetworkTopology.class), conf);
   }
   
   /* Shuffle datanode array */
@@ -886,6 +892,9 @@ public class Balancer {
    * Return total number of bytes to move in this iteration
    */
   private long chooseNodes() {
+	  
+	// Match nodes taking into consideration a custom fault domain
+	chooseNodesForCustomFaultDomain();
     // Match nodes on the same rack first
     chooseNodes(true);
     // Then match nodes on different racks
@@ -902,6 +911,101 @@ public class Balancer {
       bytesToMove += src.scheduledSize;
     }
     return bytesToMove;
+  }
+
+  protected void chooseNodesForCustomFaultDomain() {
+	if (cluster.isNodeGroupAware()) {
+        chooseNodesOnSameNodeGroup();	  
+    }
+  }
+  
+  /* Decide all <source, target> pairs where source and target are 
+   * on the same NodeGroup
+   */
+  private void chooseNodesOnSameNodeGroup() {
+
+	/* first step: match each overUtilized datanode (source) to
+	 * one or more underUtilized datanodes within same NodeGroup(targets).
+	 */
+    chooseTargetsOnSameNodeGroup(underUtilizedDatanodes.iterator());	    
+
+	/* match each remaining overutilized datanode (source) to below average 
+	 * utilized datanodes within the same NodeGroup(targets).
+	 * Note only overutilized datanodes that haven't had that max bytes to move
+	 * satisfied in step 1 are selected
+	 */
+    chooseTargetsOnSameNodeGroup(belowAvgUtilizedDatanodes.iterator());
+
+    /* match each remaining underutilized datanode to above average utilized 
+     * datanodes within the same NodeGroup.
+     * Note only underutilized datanodes that have not had that max bytes to
+     * move satisfied in step 1 are selected.
+     */
+    chooseSourcesOnSameNodeGroup(aboveAvgUtilizedDatanodes.iterator());
+  }
+
+  private void chooseSourcesOnSameNodeGroup(Iterator<Source> sourceCandidates) {
+    for (Iterator<BalancerDatanode> targetIterator = underUtilizedDatanodes.iterator(); 
+    		targetIterator.hasNext();) {
+	  BalancerDatanode target = targetIterator.next();
+	  while (chooseSourceOnSameNodeGroup(target, sourceCandidates)) {
+	  }
+	  if (!target.isMoveQuotaFull()) {
+	    targetIterator.remove();
+	  }
+    }
+	return;
+  }
+
+  private boolean chooseSourceOnSameNodeGroup(BalancerDatanode target,
+		Iterator<Source> sourceCandidates) {
+    if (!target.isMoveQuotaFull()) {
+      return false;
+    }
+    boolean foundSource = false;
+    Source source = null;
+    while (!foundSource && sourceCandidates.hasNext()) {
+      source = sourceCandidates.next();
+      if (!source.isMoveQuotaFull()) {
+        sourceCandidates.remove();
+        continue;
+      }
+  	  foundSource = areDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
+    }
+    if (foundSource) {
+      assert(source != null):"Choose a null source";
+      long size = Math.min(source.availableSizeToMove(),
+          target.availableSizeToMove());
+      NodeTask nodeTask = new NodeTask(target, size);
+      source.addNodeTask(nodeTask);
+      target.incScheduledSize(nodeTask.getSize());
+      sources.add(source);
+      targets.add(target);
+      if ( !source.isMoveQuotaFull()) {
+        sourceCandidates.remove();
+      }
+      LOG.info("Decided to move "+StringUtils.byteDesc(size)+" bytes from "
+          +source.datanode.getName() + " to " + target.datanode.getName());
+      return true;
+    }
+    return false;
+  }
+
+  protected boolean areDataNodesOnSameNodeGroup(DatanodeInfo sourceDatanode, DatanodeInfo targetDatanode) { 
+    return cluster.isOnSameNodeGroup(sourceDatanode, targetDatanode);
+  }
+
+  private void chooseTargetsOnSameNodeGroup(Iterator<BalancerDatanode> targetCandidates) {
+    for (Iterator<Source> srcIterator = overUtilizedDatanodes.iterator();
+        srcIterator.hasNext();) {
+      Source source = srcIterator.next();
+      while (chooseTargetOnSameNodeGroup(source, targetCandidates)) {
+      }
+      if (!source.isMoveQuotaFull()) {
+        srcIterator.remove();
+      }
+    }
+    return;
   }
 
   /* if onRack is true, decide all <source, target> pairs
@@ -1014,6 +1118,45 @@ public class Balancer {
     return false;
   }
   
+  /* For the given source, choose targets from the target candidate list.
+   * OnRackTarget determines if the chosen target 
+   * should be on the same rack as the source
+   */
+  private boolean chooseTargetOnSameNodeGroup(Source source,
+      Iterator<BalancerDatanode> targetCandidates) {
+    if (!source.isMoveQuotaFull()) {
+      return false;
+    }
+    boolean foundTarget = false;
+    BalancerDatanode target = null;
+    while (!foundTarget && targetCandidates.hasNext()) {
+      target = targetCandidates.next();
+      if (!target.isMoveQuotaFull()) {
+        targetCandidates.remove();
+        continue;
+      }
+  	  foundTarget = areDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
+
+    }
+    if (foundTarget) {
+      assert(target != null):"Choose a null target";
+      long size = Math.min(source.availableSizeToMove(),
+          target.availableSizeToMove());
+      NodeTask nodeTask = new NodeTask(target, size);
+      source.addNodeTask(nodeTask);
+      target.incScheduledSize(nodeTask.getSize());
+      sources.add(source);
+      targets.add(target);
+      if (!target.isMoveQuotaFull()) {
+        targetCandidates.remove();
+      }
+      LOG.info("Decided to move "+StringUtils.byteDesc(size)+" bytes from "
+          +source.datanode.getName() + " to " + target.datanode.getName());
+      return true;
+    }
+    return false;
+  }
+
   /* For the given target, choose sources from the source candidate list.
    * OnRackSource determines if the chosen source 
    * should be on the same rack as the target
