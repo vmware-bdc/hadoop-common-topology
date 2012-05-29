@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.net;
 
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Random;
 import java.util.concurrent.locks.ReadWriteLock;
@@ -52,281 +51,19 @@ public class NetworkTopology {
     }
   }
 
-  /** InnerNode represents a switch/router of a data center or rack.
-   * Different from a leaf node, it has non-null children.
-   */
-  private class InnerNode extends NodeBase {
-    private ArrayList<Node> children=new ArrayList<Node>();
-    private int numOfLeaves;
-        
-    /** Construct an InnerNode from a path-like string */
-    InnerNode(String path) {
-      super(path);
-    }
-        
-    /** Construct an InnerNode from its name and its network location */
-    InnerNode(String name, String location) {
-      super(name, location);
-    }
-        
-    /** Construct an InnerNode
-     * from its name, its network location, its parent, and its level */
-    InnerNode(String name, String location, InnerNode parent, int level) {
-      super(name, location, parent, level);
-    }
-        
-    /** @return its children */
-    Collection<Node> getChildren() {return children;}
-        
-    /** @return the number of children this node has */
-    int getNumOfChildren() {
-      return children.size();
-    }
-        
-    /** Judge if this node represents a rack 
-     * @return true if it has no child or its children are not InnerNodes
-     */ 
-    boolean isRack() {
-      if (children.isEmpty()) {
-        return true;
-      }
-            
-      Node firstChild = children.get(0);
-      if (firstChild instanceof InnerNode) {
-        return false;
-      }
-            
-      return true;
-    }
-        
-    /** Judge if this node is an ancestor of node <i>n</i>
-     * 
-     * @param n a node
-     * @return true if this node is an ancestor of <i>n</i>
-     */
-    boolean isAncestor(Node n) {
-      return getPath(this).equals(NodeBase.PATH_SEPARATOR_STR) ||
-        (n.getNetworkLocation()+NodeBase.PATH_SEPARATOR_STR).
-        startsWith(getPath(this)+NodeBase.PATH_SEPARATOR_STR);
-    }
-        
-    /** Judge if this node is the parent of node <i>n</i>
-     * 
-     * @param n a node
-     * @return true if this node is the parent of <i>n</i>
-     */
-    boolean isParent(Node n) {
-      return n.getNetworkLocation().equals(getPath(this));
-    }
-        
-    /* Return a child name of this node who is an ancestor of node <i>n</i> */
-    private String getNextAncestorName(Node n) {
-      if (!isAncestor(n)) {
-        throw new IllegalArgumentException(
-                                           this + "is not an ancestor of " + n);
-      }
-      String name = n.getNetworkLocation().substring(getPath(this).length());
-      if (name.charAt(0) == PATH_SEPARATOR) {
-        name = name.substring(1);
-      }
-      int index=name.indexOf(PATH_SEPARATOR);
-      if (index !=-1)
-        name = name.substring(0, index);
-      return name;
-    }
-        
-    /** Add node <i>n</i> to the subtree of this node 
-     * @param n node to be added
-     * @return true if the node is added; false otherwise
-     */
-    boolean add(Node n) {
-      if (!isAncestor(n))
-        throw new IllegalArgumentException(n.getName()+", which is located at "
-                +n.getNetworkLocation()+", is not a decendent of "
-                +getPath(this));
-      if (isParent(n)) {
-        // this node is the parent of n; add n directly
-        n.setParent(this);
-        n.setLevel(this.level+1);
-        for(int i=0; i<children.size(); i++) {
-          if (children.get(i).getName().equals(n.getName())) {
-            children.set(i, n);
-            return false;
-          }
-        }
-        children.add(n);
-        numOfLeaves++;
-        return true;
-      } else {
-        // find the next ancestor node
-        String parentName = getNextAncestorName(n);
-        InnerNode parentNode = null;
-        for(int i=0; i<children.size(); i++) {
-          if (children.get(i).getName().equals(parentName)) {
-            parentNode = (InnerNode)children.get(i);
-            break;
-          }
-        }
-        if (parentNode == null) {
-          // create a new InnerNode
-          parentNode = new InnerNode(parentName, getPath(this),
-                                     this, this.getLevel()+1);
-          children.add(parentNode);
-        }
-        // add n to the subtree of the next ancestor node
-        if (parentNode.add(n)) {
-          numOfLeaves++;
-          return true;
-        } else {
-          return false;
-        }
-      }
-    }
-        
-    /** Remove node <i>n</i> from the subtree of this node
-     * @param n node to be deleted 
-     * @return true if the node is deleted; false otherwise
-     */
-    boolean remove(Node n) {
-      String parent = n.getNetworkLocation();
-      String currentPath = getPath(this);
-      if (!isAncestor(n))
-        throw new IllegalArgumentException(n.getName()
-                                           +", which is located at "
-                                           +parent+", is not a descendent of "+currentPath);
-      if (isParent(n)) {
-        // this node is the parent of n; remove n directly
-        for(int i=0; i<children.size(); i++) {
-          if (children.get(i).getName().equals(n.getName())) {
-            children.remove(i);
-            numOfLeaves--;
-            n.setParent(null);
-            return true;
-          }
-        }
-        return false;
-      } else {
-        // find the next ancestor node: the parent node
-        String parentName = getNextAncestorName(n);
-        InnerNode parentNode = null;
-        int i;
-        for(i=0; i<children.size(); i++) {
-          if (children.get(i).getName().equals(parentName)) {
-            parentNode = (InnerNode)children.get(i);
-            break;
-          }
-        }
-        if (parentNode==null) {
-          return false;
-        }
-        // remove n from the parent node
-        boolean isRemoved = parentNode.remove(n);
-        // if the parent node has no children, remove the parent node too
-        if (isRemoved) {
-          if (parentNode.getNumOfChildren() == 0) {
-            children.remove(i);
-          }
-          numOfLeaves--;
-        }
-        return isRemoved;
-      }
-    } // end of remove
-        
-    /** Given a node's string representation, return a reference to the node
-     * @param loc string location of the form /rack/node
-     * @return null if the node is not found or the childnode is there but
-     * not an instance of {@link InnerNode}
-     */
-    private Node getLoc(String loc) {
-      if (loc == null || loc.length() == 0) return this;
-            
-      String[] path = loc.split(PATH_SEPARATOR_STR, 2);
-      Node childnode = null;
-      for(int i=0; i<children.size(); i++) {
-        if (children.get(i).getName().equals(path[0])) {
-          childnode = children.get(i);
-        }
-      }
-      if (childnode == null) return null; // non-existing node
-      if (path.length == 1) return childnode;
-      if (childnode instanceof InnerNode) {
-        return ((InnerNode)childnode).getLoc(path[1]);
-      } else {
-        return null;
-      }
-    }
-        
-    /** get <i>leafIndex</i> leaf of this subtree 
-     * if it is not in the <i>excludedNode</i>
-     *
-     * @param leafIndex an indexed leaf of the node
-     * @param excludedNode an excluded node (can be null)
-     * @return
-     */
-    private Node getLeaf(int leafIndex, Node excludedNode) {
-      int count=0;
-      // check if the excluded node a leaf
-      boolean isLeaf =
-        excludedNode == null || !(excludedNode instanceof InnerNode);
-      // calculate the total number of excluded leaf nodes
-      int numOfExcludedLeaves =
-        isLeaf ? 1 : ((InnerNode)excludedNode).getNumOfLeaves();
-      if (isRack()) { // children are leaves
-        if (isLeaf) { // excluded node is a leaf node
-          int excludedIndex = children.indexOf(excludedNode);
-          if (excludedIndex != -1 && leafIndex >= 0) {
-            // excluded node is one of the children so adjust the leaf index
-            leafIndex = leafIndex>=excludedIndex ? leafIndex+1 : leafIndex;
-          }
-        }
-        // range check
-        if (leafIndex<0 || leafIndex>=this.getNumOfChildren()) {
-          return null;
-        }
-        return children.get(leafIndex);
-      } else {
-        for(int i=0; i<children.size(); i++) {
-          InnerNode child = (InnerNode)children.get(i);
-          if (excludedNode == null || excludedNode != child) {
-            // not the excludedNode
-            int numOfLeaves = child.getNumOfLeaves();
-            if (excludedNode != null && child.isAncestor(excludedNode)) {
-              numOfLeaves -= numOfExcludedLeaves;
-            }
-            if (count+numOfLeaves > leafIndex) {
-              // the leaf is in the child subtree
-              return child.getLeaf(leafIndex-count, excludedNode);
-            } else {
-              // go to the next child
-              count = count+numOfLeaves;
-            }
-          } else { // it is the excluededNode
-            // skip it and set the excludedNode to be null
-            excludedNode = null;
-          }
-        }
-        return null;
-      }
-    }
-        
-    int getNumOfLeaves() {
-      return numOfLeaves;
-    }
-  } // end of InnerNode
-
   /**
    * the root cluster map
    */
-  InnerNode clusterMap = new InnerNode(InnerNode.ROOT);
+  InnerNode clusterMap;
   /** Depth of all leaf nodes */
   private int depthOfAllLeaves = -1;
   /** rack counter */
-  private int numOfRacks = 0;
+  protected int numOfRacks = 0;
   /** the lock used to manage access */
-  private ReadWriteLock netlock;
+  protected ReadWriteLock netlock = new ReentrantReadWriteLock();
     
   public NetworkTopology() {
-    netlock = new ReentrantReadWriteLock();
+	clusterMap = new InnerNode(InnerNode.ROOT);
   }
     
   /** Add a leaf node
@@ -344,7 +81,7 @@ public class NetworkTopology {
     }
     netlock.writeLock().lock();
     try {
-      Node rack = getNode(node.getNetworkLocation());
+      Node rack = getNodeForNetworkLocation(node);
       if (rack != null && !(rack instanceof InnerNode)) {
         throw new IllegalArgumentException("Unexpected data node " 
                                            + node.toString() 
@@ -376,6 +113,24 @@ public class NetworkTopology {
       netlock.writeLock().unlock();
     }
   }
+
+  /**
+   * Return a reference to the node given its string representation.  Default implementation
+   * delegates to {@link #getNode(String)}.
+   * 
+   * <p>To be overridden in subclasses for specific NetworkTopology implementations,
+   * as alternative to overriding the full {@link #add(Node)} method.
+   * 
+   * @param node The string representation of this node's network location is used to retrieve a Node object. 
+   * @return a reference to the node; null if the node is not in the tree
+   * 
+   * @see #add(Node)
+   * @see #getNode(String)
+   */
+  protected Node getNodeForNetworkLocation(Node node) {
+  	return getNode(node.getNetworkLocation());
+  }
+  
     
   /** Remove a node
    * Update node counter and rack counter if necessary
@@ -443,7 +198,29 @@ public class NetworkTopology {
       netlock.readLock().unlock();
     }
   }
-    
+  
+  /** Given a string representation of a rack for a specific network location
+   * 
+   * @param loc
+   *          a path-like string representation of a network location
+   * @return a rack string
+   */
+  public String getRack(String loc) {
+	  return doGetRack(loc);
+  }  
+  
+  /**
+   * Returns the string representation of a network location.  Default implementation returns the passed in argument
+   * 
+   * To be overridden in subclasses for specific NetworkTopology implementations,
+   * as alternative to overriding the full {@link #getRack(String)} method.
+   * @param loc tring representation of a network location
+   * @return a rack string
+   */
+  protected String doGetRack(String loc) {
+	  return loc;
+  }
+  
   /** @return the total number of racks */
   public int getNumOfRacks() {
     netlock.readLock().lock();
@@ -525,13 +302,36 @@ public class NetworkTopology {
       
     netlock.readLock().lock();
     try {
-      return node1.getParent()==node2.getParent();
+      return compareParents(node1, node2);
     } finally {
       netlock.readLock().unlock();
     }
   }
+  
+  /**
+   * Check if network topology is aware of NodeGroup
+   */
+  public boolean isNodeGroupAware() {
+    return false;
+  }
+
+  /**
+   * Compare the parents of each node for equality
+   * 
+   * <p>To be overridden in subclasses for specific NetworkTopology implementations,
+   * as alternative to overriding the full {@link #isOnSameRack(Node, Node)} method.
+   * 
+   * @param node1 the first node to compare
+   * @param node2 the second node to compare
+   * @return true if equal, false otherwise
+   * 
+   * @see #isOnSameRack(Node, Node)
+   */
+  protected boolean compareParents(Node node1, Node node2) {
+	return node1.getParent()==node2.getParent();
+  }
     
-  final private static Random r = new Random();
+  final protected static Random r = new Random();
   /** randomly choose one node from <i>scope</i>
    * if scope starts with ~, choose one from the all nodes except for the
    * ones in <i>scope</i>; otherwise, choose one from <i>scope</i>
@@ -641,7 +441,7 @@ public class NetworkTopology {
   }
 
   /* swap two array items */
-  static private void swap(Node[] nodes, int i, int j) {
+  static protected void swap(Node[] nodes, int i, int j) {
     Node tempNode;
     tempNode = nodes[j];
     nodes[j] = nodes[i];
@@ -696,5 +496,10 @@ public class NetworkTopology {
     if(tempIndex == 0 && localRackNode == -1 && nodes.length != 0) {
       swap(nodes, 0, r.nextInt(nodes.length));
     }
+  }
+
+  // Return false directly as not aware of NodeGroup, to be override in sub-class
+  public boolean isOnSameNodeGroup(Node node1, Node node2) {
+	return false;
   }
 }

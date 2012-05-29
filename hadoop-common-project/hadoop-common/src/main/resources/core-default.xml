@@ -671,6 +671,13 @@
 </property>
 
 <property>
+	<name>net.topology.class.name</name>
+  <value>org.apache.hadoop.net.NetworkTopology</value>
+  <description> The default implementation of NetworkTopology which is classic three layer one.
+  </description>
+</property>
+
+<property>
   <name>net.topology.script.file.name</name>
   <value></value>
   <description> The script name that should be invoked to resolve DNS names to
