@@ -659,9 +659,17 @@
 </property>
 
 <!-- Rack Configuration -->
+<property>
+  <name>net.topology.with.nodegroup</name>
+  <value>false</value>
+  <description> The boolean value to identify if the cluster is deployed on
+    an environment which needs an additional layer (node group) between
+    node and rack for network topology.
+  </description>
+</property>
 
 <property>
-	<name>net.topology.node.switch.mapping.impl</name>
+  <name>net.topology.node.switch.mapping.impl</name>
   <value>org.apache.hadoop.net.ScriptBasedMapping</value>
   <description> The default implementation of the DNSToSwitchMapping. It
     invokes a script specified in net.topology.script.file.name to resolve

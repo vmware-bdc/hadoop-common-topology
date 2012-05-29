@@ -64,6 +64,8 @@ public class CommonConfigurationKeysPublic {
   public static final String  NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY =
     "net.topology.node.switch.mapping.impl";
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  NET_TOPOLOGY_WITH_NODEGROUP =
+    "net.topology.with.nodegroup";
   public static final String  NET_TOPOLOGY_CLASS_NAME_KEY =
 	"net.topology.class.name";
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
