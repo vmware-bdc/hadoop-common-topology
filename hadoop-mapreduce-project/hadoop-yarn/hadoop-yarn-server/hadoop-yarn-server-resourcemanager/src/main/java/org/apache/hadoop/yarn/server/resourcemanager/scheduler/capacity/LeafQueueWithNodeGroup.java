@@ -63,10 +63,9 @@ public class LeafQueueWithNodeGroup extends LeafQueue {
       RMContainer reservedContainer) {
 
     ResourceRequest request = null;
-    if (node instanceof SchedulerNodeWithNodeGroup ) {
-      SchedulerNodeWithNodeGroup vNode = (SchedulerNodeWithNodeGroup) node;
+    if (node.isNodeGroupAware()) {
       request = application.getResourceRequest(
-          priority, vNode.getNodeGroup());
+          priority, node.getNodeGroupName());
     }
 
     if (request != null) {
@@ -91,9 +90,9 @@ public class LeafQueueWithNodeGroup extends LeafQueue {
     // Check if we need containers on this nodegroup
     if (type == NodeType.NODEGROUP_LOCAL) {
       // Now check if we need containers on this nodegroup...
-      if (node instanceof SchedulerNodeWithNodeGroup) {
+      if (node.isNodeGroupAware()) {
         ResourceRequest nodegroupLocalRequest = 
-            application.getResourceRequest(priority, ((SchedulerNodeWithNodeGroup)node).getNodeGroup());
+            application.getResourceRequest(priority, node.getNodeGroupName());
         if (nodegroupLocalRequest != null) {
           return nodegroupLocalRequest.getNumContainers() > 0;
         }

@@ -259,15 +259,8 @@ public class AppSchedulingInfo {
       this.requests.get(priority).remove(node.getHostName());
     }
 
-    if (node instanceof SchedulerNodeWithNodeGroup) {
-      ResourceRequest nodegroupLocalRequest = requests.get(priority).get(
-    	  ((SchedulerNodeWithNodeGroup)node).getNodeGroup());
-      if (nodegroupLocalRequest != null) {
-        nodegroupLocalRequest.setNumContainers(nodegroupLocalRequest.getNumContainers() - 1);
-        if (nodegroupLocalRequest.getNumContainers() == 0) {
-    	  this.requests.get(priority).remove(((SchedulerNodeWithNodeGroup)node).getNodeGroup());
-        }
-      }
+    if (node.isNodeGroupAware()) {
+      updateNodeGroupLocalRequests(node, priority);
     }
 
     ResourceRequest rackLocalRequest = requests.get(priority).get(
@@ -278,6 +271,18 @@ public class AppSchedulingInfo {
     }
 
     decrementOutstanding(requests.get(priority).get(RMNode.ANY));
+  }
+
+  // Update requests on specific NodeGroup that node belongs to.
+  private void updateNodeGroupLocalRequests(SchedulerNode node, Priority priority) {
+    ResourceRequest nodegroupLocalRequest = requests.get(priority).get(
+        node.getNodeGroupName());
+    if (nodegroupLocalRequest != null) {
+      nodegroupLocalRequest.setNumContainers(nodegroupLocalRequest.getNumContainers() - 1);
+      if (nodegroupLocalRequest.getNumContainers() == 0) {
+        this.requests.get(priority).remove(node.getNodeGroupName());
+      }
+    }
   }
 
   /**
@@ -296,9 +301,9 @@ public class AppSchedulingInfo {
     // Update future requirements
     nodegroupLocalRequest.setNumContainers(nodegroupLocalRequest.getNumContainers() - 1);
     if (nodegroupLocalRequest.getNumContainers() == 0) {
-      if (!(node instanceof SchedulerNodeWithNodeGroup))
+      if (!node.isNodeGroupAware())
     	throw new RuntimeException("Node type exception for node: " + node.getNodeID());
-      this.requests.get(priority).remove(((SchedulerNodeWithNodeGroup)node).getNodeGroup());
+      this.requests.get(priority).remove(node.getNodeGroupName());
     }
     
     ResourceRequest rackLocalRequest = requests.get(priority).get(
@@ -312,8 +317,7 @@ public class AppSchedulingInfo {
     ResourceRequest offSwitchRequest = requests.get(priority).get(
         RMNode.ANY);
     offSwitchRequest.setNumContainers(offSwitchRequest.getNumContainers() - 1);
-  }  
-  
+  }
   
   /**
    * The {@link ResourceScheduler} is allocating rack-local resources to the

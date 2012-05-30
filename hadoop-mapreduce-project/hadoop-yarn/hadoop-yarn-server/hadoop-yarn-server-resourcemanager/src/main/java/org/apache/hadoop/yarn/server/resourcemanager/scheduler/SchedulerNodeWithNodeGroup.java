@@ -23,13 +23,25 @@ public class SchedulerNodeWithNodeGroup extends SchedulerNode {
   public SchedulerNodeWithNodeGroup(RMNode node) {
 	super(node);
   }
-	
-  public String getNodeGroup() {
+
+  /**
+   * Get NodeGroup name.
+   */
+  @Override
+  public String getNodeGroupName() {
 	if (!(rmNode instanceof RMNodeImplWithNodeGroup)) {
-	  // TODO throw a exception here may be better.
 	  return null;
 	}
-	RMNodeImplWithNodeGroup rmNodeV = (RMNodeImplWithNodeGroup) rmNode;
-	return rmNodeV.getNodeGroupName();
+	RMNodeImplWithNodeGroup rmNodeWithNodeGroup = (RMNodeImplWithNodeGroup) rmNode;
+	return rmNodeWithNodeGroup.getNodeGroupName();
   }
+  
+  /**
+   * Check if this implementation of SchedulerNode is aware of NodeGroup
+   */
+  @Override
+  public boolean isNodeGroupAware() {
+    return true;
+  }
+
 }

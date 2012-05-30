@@ -238,5 +238,18 @@ public class SchedulerNode {
   public synchronized RMContainer getReservedContainer() {
     return reservedContainer;
   }
+  
+  /**
+   * Check if SchedulerNode is aware of NodeGroup
+   */
+  public boolean isNodeGroupAware() {
+    return false;
+  }
 
+  /**
+   * Get name of NodeGroup, return null if not aware of NodeGroup
+   */
+  public String getNodeGroupName() {
+	return null;
+  }
 }

@@ -43,14 +43,13 @@ public class FifoSchedulerWithNodeGroup extends FifoScheduler {
   private int assignNodeGroupLocalContainers(SchedulerNode node, 
 	  SchedulerApp application, Priority priority) {
     int assignedContainers = 0;
-    if (!(node instanceof SchedulerNodeWithNodeGroup)) {
+    if (!node.isNodeGroupAware()) {
 	  return 0;
     }
-    SchedulerNodeWithNodeGroup vNode = (SchedulerNodeWithNodeGroup)node; 
-	if (vNode.getNodeGroup() == null)
+	if (node.getNodeGroupName() == null)
       return 0;
     ResourceRequest request = 
-        application.getResourceRequest(priority, vNode.getNodeGroup());
+        application.getResourceRequest(priority, node.getNodeGroupName());
     if (request != null) {
     // Don't allocate on this nodegroup if the application doens't need containers on this rack
     ResourceRequest rackRequest =

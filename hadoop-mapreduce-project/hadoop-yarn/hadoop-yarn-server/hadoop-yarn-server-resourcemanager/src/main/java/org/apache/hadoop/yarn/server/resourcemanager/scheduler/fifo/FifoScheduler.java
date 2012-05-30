@@ -421,10 +421,9 @@ public class FifoScheduler implements ResourceScheduler, Configurable {
     
     if (type == NodeType.NODEGROUP_LOCAL) {
       ResourceRequest nodegroupLocalRequest = null;
-      if (node instanceof SchedulerNodeWithNodeGroup) {
-    	
+      if (node.isNodeGroupAware()) {
         nodegroupLocalRequest = 
-          application.getResourceRequest(priority, ((SchedulerNodeWithNodeGroup)node).getNodeGroup());
+          application.getResourceRequest(priority, node.getNodeGroupName());
       }
       if (nodegroupLocalRequest == null) {
         return maxContainers;
