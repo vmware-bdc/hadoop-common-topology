@@ -40,8 +40,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.RMContextImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.resource.Resources;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImplWithNodeGroup;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup;
 
 public class TestUtils {
   private static final Log LOG = LogFactory.getLog(TestUtils.class);
@@ -150,6 +152,27 @@ public class TestUtils {
     SchedulerNode node = spy(new SchedulerNode(rmNode));
     LOG.info("node = " + host + " avail=" + node.getAvailableResource());
     return node;
+  }
+  
+  public static SchedulerNode getMockVNode(
+	  String host, String nodegroup, String rack, int port, int capability) {
+	NodeId nodeId = mock(NodeId.class);
+	when(nodeId.getHost()).thenReturn(host);
+	when(nodeId.getPort()).thenReturn(port);
+	
+	
+	RMNodeImplWithNodeGroup rmNode = mock(RMNodeImplWithNodeGroup.class);
+	when(rmNode.getNodeID()).thenReturn(nodeId);
+	when(rmNode.getTotalCapability()).thenReturn(
+	    Resources.createResource(capability));
+	when(rmNode.getNodeAddress()).thenReturn(host+":"+port);
+	when(rmNode.getHostName()).thenReturn(host);
+	when(rmNode.getNodeGroupName()).thenReturn(nodegroup);
+	when(rmNode.getRackName()).thenReturn(rack);
+	    
+	SchedulerNodeWithNodeGroup node = spy(new SchedulerNodeWithNodeGroup(rmNode));
+	LOG.info("node = " + host + " avail=" + node.getAvailableResource());
+	return node;
   }
   
   public static ContainerId getMockContainerId(SchedulerApp application) {

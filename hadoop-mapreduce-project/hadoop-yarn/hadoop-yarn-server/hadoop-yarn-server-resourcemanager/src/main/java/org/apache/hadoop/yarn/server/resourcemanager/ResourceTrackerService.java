@@ -51,6 +51,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImpl;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImplWithNodeGroup;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeReconnectEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeStatusEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.security.authorize.RMPolicyProvider;
@@ -174,9 +175,9 @@ public class ResourceTrackerService extends AbstractService implements
       response.setRegistrationResponse(regResponse);
       return response;
     }
-
-    RMNode rmNode = new RMNodeImpl(nodeId, rmContext, host, cmPort, httpPort,
-        resolve(host), capability);
+    
+    RMNode rmNode = null;
+    rmNode = instantiateRMNode(nodeId, this.rmContext, host, cmPort, httpPort, capability);
 
     RMNode oldNode = this.rmContext.getRMNodes().putIfAbsent(nodeId, rmNode);
     if (oldNode == null) {
@@ -198,6 +199,20 @@ public class ResourceTrackerService extends AbstractService implements
     regResponse.setNodeAction(NodeAction.NORMAL);
     response.setRegistrationResponse(regResponse);
     return response;
+  }
+
+  private RMNode instantiateRMNode(NodeId nodeId, RMContext rmContext, String host, 
+      int cmPort, int httpPort, Resource capability) {
+    RMNode rmNode;
+    if (super.getConfig().getBoolean(
+        CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, false)) {
+      rmNode = new RMNodeImplWithNodeGroup(nodeId, rmContext, host, cmPort, httpPort,
+      resolve(host), capability);
+    } else {
+      rmNode = new RMNodeImpl(nodeId, rmContext, host, cmPort, httpPort,
+          resolve(host), capability);
+    }
+    return rmNode;
   }
 
   @SuppressWarnings("unchecked")
