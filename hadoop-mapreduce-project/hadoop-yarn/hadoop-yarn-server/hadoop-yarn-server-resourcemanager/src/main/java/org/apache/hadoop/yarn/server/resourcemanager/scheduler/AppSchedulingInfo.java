@@ -221,6 +221,8 @@ public class AppSchedulingInfo {
       Priority priority, ResourceRequest request, Container container) {
     if (type == NodeType.NODE_LOCAL) {
       allocateNodeLocal(node, priority, request, container);
+    } else if (type == NodeType.NODEGROUP_LOCAL) {
+      allocateNodeGroupLocal(node, priority, request, container);
     } else if (type == NodeType.RACK_LOCAL) {
       allocateRackLocal(node, priority, request, container);
     } else {
@@ -256,6 +258,10 @@ public class AppSchedulingInfo {
       this.requests.get(priority).remove(node.getHostName());
     }
 
+    if (node.isNodeGroupAware()) {
+      updateNodeGroupLocalRequests(node, priority);
+    }
+
     ResourceRequest rackLocalRequest = requests.get(priority).get(
         node.getRackName());
     rackLocalRequest.setNumContainers(rackLocalRequest.getNumContainers() - 1);
@@ -266,8 +272,54 @@ public class AppSchedulingInfo {
     decrementOutstanding(requests.get(priority).get(RMNode.ANY));
   }
 
+  // Update requests on specific NodeGroup that node belongs to.
+  private void updateNodeGroupLocalRequests(SchedulerNode node, Priority priority) {
+    ResourceRequest nodegroupLocalRequest = requests.get(priority).get(
+        node.getNodeGroupName());
+    if (nodegroupLocalRequest != null) {
+      nodegroupLocalRequest.setNumContainers(nodegroupLocalRequest.getNumContainers() - 1);
+      if (nodegroupLocalRequest.getNumContainers() == 0) {
+        this.requests.get(priority).remove(node.getNodeGroupName());
+      }
+    }
+  }
+
   /**
-   * The {@link ResourceScheduler} is allocating data-local resources to the
+   * The {@link ResourceScheduler} is allocating nodegroup-local resources to the
+   * application.
+   * 
+   * @param allocatedContainers
+   *          resources allocated to the application
+   */
+  synchronized private void allocateNodeGroupLocal(SchedulerNode node, Priority priority,
+      ResourceRequest nodegroupLocalRequest, Container container) {
+
+    // Update consumption and track allocations
+    allocate(container);
+
+    // Update future requirements
+    nodegroupLocalRequest.setNumContainers(nodegroupLocalRequest.getNumContainers() - 1);
+    if (nodegroupLocalRequest.getNumContainers() == 0) {
+      if (!node.isNodeGroupAware())
+    	throw new RuntimeException("Node type exception for node: " + node.getNodeID());
+      this.requests.get(priority).remove(node.getNodeGroupName());
+    }
+    
+    ResourceRequest rackLocalRequest = requests.get(priority).get(
+        node.getRackName());
+    rackLocalRequest.setNumContainers(rackLocalRequest.getNumContainers() - 1);
+    if (rackLocalRequest.getNumContainers() == 0) {
+      this.requests.get(priority).remove(node.getRackName());
+    }
+    
+    // Do not remove ANY
+    ResourceRequest offSwitchRequest = requests.get(priority).get(
+        RMNode.ANY);
+    offSwitchRequest.setNumContainers(offSwitchRequest.getNumContainers() - 1);
+  }
+  
+  /**
+   * The {@link ResourceScheduler} is allocating rack-local resources to the
    * application.
    * 
    * @param allocatedContainers
@@ -289,7 +341,7 @@ public class AppSchedulingInfo {
   }
 
   /**
-   * The {@link ResourceScheduler} is allocating data-local resources to the
+   * The {@link ResourceScheduler} is allocating rack-off resources to the
    * application.
    * 
    * @param allocatedContainers

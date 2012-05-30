@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 
 import java.io.IOException;
+import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -310,9 +311,20 @@ implements ResourceScheduler, CapacitySchedulerContext, Configurable {
         throw new IllegalStateException(
             "Queue configuration missing child queue names for " + queueName);
       }
-      queue = new LeafQueue(csContext, queueName, parent, applicationComparator,
-                            oldQueues.get(queueName));
-      
+      Class<? extends LeafQueue> leafQueueClass =
+          conf.getClass(YarnConfiguration.RM_CAPACITY_SCHEDULER_LEAFQUEUE_CLASS_KEY,
+              LeafQueue.class, LeafQueue.class);
+      Class<?>[] classArray = new Class[] { csContext.getClass(),
+          parent.getClass(), applicationComparator.getClass(),
+          oldQueues.get(queueName).getClass() };
+      try {
+		Constructor<? extends LeafQueue> meth = leafQueueClass.getDeclaredConstructor(classArray);
+		meth.setAccessible(true);
+		queue = meth.newInstance(csContext, queueName, parent, applicationComparator,
+            oldQueues.get(queueName));
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
       // Used only for unit tests
       queue = hook.hook(queue);
     } else {
@@ -672,7 +684,18 @@ implements ResourceScheduler, CapacitySchedulerContext, Configurable {
   }
 
   private synchronized void addNode(RMNode nodeManager) {
-    this.nodes.put(nodeManager.getNodeID(), new SchedulerNode(nodeManager));
+    Class<? extends SchedulerNode> schedulerNodeClass =
+        conf.getClass(YarnConfiguration.RM_SCHEDULER_NODE_CLASS_KEY,
+            SchedulerNode.class, SchedulerNode.class);
+    Class<?>[] classArray = new Class[] {nodeManager.getClass()};
+    try {
+      Constructor<? extends SchedulerNode> meth = schedulerNodeClass.getDeclaredConstructor(classArray);
+      meth.setAccessible(true);
+      this.nodes.put(nodeManager.getNodeID(), meth.newInstance(nodeManager));
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+
     Resources.addTo(clusterResource, nodeManager.getTotalCapability());
     root.updateClusterResource(clusterResource);
     ++numNodeManagers;

@@ -56,7 +56,7 @@ public class SchedulerNode {
   private final Map<ContainerId, RMContainer> launchedContainers = 
     new HashMap<ContainerId, RMContainer>();
   
-  private final RMNode rmNode;
+  protected final RMNode rmNode;
 
   public static final String ANY = "*";
 
@@ -237,5 +237,18 @@ public class SchedulerNode {
   public synchronized RMContainer getReservedContainer() {
     return reservedContainer;
   }
+  
+  /**
+   * Check if SchedulerNode is aware of NodeGroup
+   */
+  public boolean isNodeGroupAware() {
+    return false;
+  }
 
+  /**
+   * Get name of NodeGroup, return null if not aware of NodeGroup
+   */
+  public String getNodeGroupName() {
+	return null;
+  }
 }
