@@ -82,9 +82,13 @@ public class TestLeafQueueWithNodeGroup {
     
     csConf = 
         new CapacitySchedulerConfiguration();
+    csConf.setBoolean("yarn.scheduler.capacity.user-metrics.enable", true);
     setupQueueConfiguration(csConf);
+    YarnConfiguration conf = new YarnConfiguration();
+    cs.setConf(conf);
     
     csContext = mock(CapacitySchedulerContext.class);
+    when(csContext.getConf()).thenReturn(conf);
     when(csContext.getConfiguration()).thenReturn(csConf);
     when(csContext.getMinimumResourceCapability()).
         thenReturn(Resources.createResource(GB));

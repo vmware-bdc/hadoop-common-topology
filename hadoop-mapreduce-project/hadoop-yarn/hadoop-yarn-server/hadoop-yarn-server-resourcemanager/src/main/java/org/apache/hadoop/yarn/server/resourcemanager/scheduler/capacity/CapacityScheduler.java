@@ -314,9 +314,9 @@ implements ResourceScheduler, CapacitySchedulerContext, Configurable {
       Class<? extends LeafQueue> leafQueueClass =
           conf.getClass(YarnConfiguration.RM_CAPACITY_SCHEDULER_LEAFQUEUE_CLASS_KEY,
               LeafQueue.class, LeafQueue.class);
-      Class<?>[] classArray = new Class[] { csContext.getClass(),
-          parent.getClass(), applicationComparator.getClass(),
-          oldQueues.get(queueName).getClass() };
+      Class<?>[] classArray = new Class[] {
+          CapacitySchedulerContext.class, String.class,
+              CSQueue.class, Comparator.class, CSQueue.class };
       try {
 		Constructor<? extends LeafQueue> meth = leafQueueClass.getDeclaredConstructor(classArray);
 		meth.setAccessible(true);
