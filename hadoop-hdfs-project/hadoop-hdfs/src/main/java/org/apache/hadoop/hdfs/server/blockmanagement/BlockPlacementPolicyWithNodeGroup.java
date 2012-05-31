@@ -20,10 +20,7 @@ package org.apache.hadoop.hdfs.server.blockmanagement;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicy.NotEnoughReplicasException;
 import org.apache.hadoop.hdfs.server.namenode.FSClusterStats;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.NetworkTopologyWithNodeGroup;
@@ -107,10 +104,10 @@ public class BlockPlacementPolicyWithNodeGroup extends
                           blocksize, maxNodesPerRack, results);
     }
       
-    // choose one from the local rack
+    // choose one from the local rack, but off-nodegroup
     try {
-      //clusterMap.g
       return chooseRandom(clusterMap.getRack(localMachine.getNetworkLocation()),
+                          TopologyResolver.getNodeGroup(localMachine.getNetworkLocation(), true),
                           excludedNodes, blocksize, maxNodesPerRack, results);
     } catch (NotEnoughReplicasException e1) {
       // find the second replica
@@ -126,6 +123,7 @@ public class BlockPlacementPolicyWithNodeGroup extends
       if (newLocal != null) {
         try {
           return chooseRandom(clusterMap.getRack(newLocal.getNetworkLocation()),
+                              TopologyResolver.getNodeGroup(localMachine.getNetworkLocation(), true),
                               excludedNodes, blocksize, maxNodesPerRack, results);
         } catch(NotEnoughReplicasException e2) {
           //otherwise randomly choose one from the network
@@ -159,7 +157,7 @@ public class BlockPlacementPolicyWithNodeGroup extends
       }
   }
 	
-  private DatanodeDescriptor chooseLocalNodeGroup(NetworkTopologyWithNodeGroup virtClusterMap,
+  private DatanodeDescriptor chooseLocalNodeGroup(NetworkTopologyWithNodeGroup clusterMap,
       DatanodeDescriptor localMachine, HashMap<Node, Node> excludedNodes, long blocksize, 
       int maxNodesPerRack, List<DatanodeDescriptor> results) throws NotEnoughReplicasException {
     // no local machine, so choose a random machine
@@ -170,7 +168,7 @@ public class BlockPlacementPolicyWithNodeGroup extends
 
     // choose one from the local node group
     try {
-      return chooseRandom(virtClusterMap.getNodeGroup(localMachine.getNetworkLocation()),
+      return chooseRandom(clusterMap.getNodeGroup(localMachine.getNetworkLocation()),
       excludedNodes, blocksize, maxNodesPerRack, results);
     } catch (NotEnoughReplicasException e1) {
       // find the second replica
@@ -185,7 +183,7 @@ public class BlockPlacementPolicyWithNodeGroup extends
       }
       if (newLocal != null) {
         try {
-          return chooseRandom(virtClusterMap.getNodeGroup(newLocal.getNetworkLocation()),
+          return chooseRandom(clusterMap.getNodeGroup(newLocal.getNetworkLocation()),
             excludedNodes, blocksize, maxNodesPerRack, results);
         } catch(NotEnoughReplicasException e2) {
           //otherwise randomly choose one from the network
@@ -198,6 +196,45 @@ public class BlockPlacementPolicyWithNodeGroup extends
             blocksize, maxNodesPerRack, results);
       }
     }
+  }
+  
+  protected DatanodeDescriptor chooseRandom(
+      String nodes, String excludeScope, HashMap<Node, Node> excludedNodes,
+      long blocksize, int maxNodesPerRack, 
+      List<DatanodeDescriptor> results) throws NotEnoughReplicasException {
+    int numOfAvailableNodes =
+        clusterMap.countNumOfAvailableNodes(nodes, excludedNodes.keySet());
+    StringBuilder builder = null;
+    if (LOG.isDebugEnabled()) {
+      builder = threadLocalBuilder.get();
+      builder.setLength(0);
+      builder.append("[");
+    }
+    boolean badTarget = false;
+    while(numOfAvailableNodes > 0) {
+      DatanodeDescriptor chosenNode = 
+      (DatanodeDescriptor)(clusterMap.chooseRandom(nodes, excludeScope));
+
+      Node oldNode = excludedNodes.put(chosenNode, chosenNode);
+      if (oldNode == null) { // choosendNode was not in the excluded list
+        numOfAvailableNodes--;
+        if (isGoodTarget(chosenNode, blocksize, maxNodesPerRack, super.considerLoad, results)) {
+          results.add(chosenNode);
+          return chosenNode;
+        } else {
+          badTarget = true;
+        }
+      }
+    }
+
+    String detail = enableDebugLogging;
+    if (LOG.isDebugEnabled()) {
+      if (badTarget && builder != null) {
+        detail = builder.append("]").toString();
+        builder.setLength(0);
+      } else detail = "";
+    }
+    throw new NotEnoughReplicasException(detail);
   }
 
 }

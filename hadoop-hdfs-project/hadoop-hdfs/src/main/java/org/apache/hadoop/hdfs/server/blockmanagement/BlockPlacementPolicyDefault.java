@@ -50,7 +50,7 @@ import com.google.common.annotations.VisibleForTesting;
  */
 @InterfaceAudience.Private
 public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
-  private boolean considerLoad; 
+  protected boolean considerLoad; 
   private boolean preferLocalNode = true;
   protected NetworkTopology clusterMap;
   private FSClusterStats stats;
@@ -74,7 +74,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
     this.clusterMap = clusterMap;
   }
 
-  private ThreadLocal<StringBuilder> threadLocalBuilder =
+  protected ThreadLocal<StringBuilder> threadLocalBuilder =
     new ThreadLocal<StringBuilder>() {
     @Override
     protected StringBuilder initialValue() {
