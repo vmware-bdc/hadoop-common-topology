@@ -28,40 +28,33 @@ import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 
 public class TestNetworkTopologyWithNodeGroup extends TestCase {
   private final static NetworkTopologyWithNodeGroup cluster = new NetworkTopologyWithNodeGroup();
-  
+
   private final static DatanodeDescriptor dataNodes[] = new DatanodeDescriptor[] {
-	new DatanodeDescriptor(new DatanodeID("h1", 5020), "/d1/r1/s1"),
-	new DatanodeDescriptor(new DatanodeID("h2", 5020), "/d1/r1/s1"),
-	new DatanodeDescriptor(new DatanodeID("h3", 5020), "/d1/r1/s2"),
-	new DatanodeDescriptor(new DatanodeID("h4", 5020), "/d1/r2/s3"),
-	new DatanodeDescriptor(new DatanodeID("h5", 5020), "/d1/r2/s3"),
-	new DatanodeDescriptor(new DatanodeID("h6", 5020), "/d1/r2/s4"),
-	new DatanodeDescriptor(new DatanodeID("h7", 5020), "/d2/r3/s5"),
-	new DatanodeDescriptor(new DatanodeID("h8", 5020), "/d2/r3/s6")
+    new DatanodeDescriptor(new DatanodeID("h1", 5020), "/d1/r1/s1"),
+    new DatanodeDescriptor(new DatanodeID("h2", 5020), "/d1/r1/s1"),
+    new DatanodeDescriptor(new DatanodeID("h3", 5020), "/d1/r1/s2"),
+    new DatanodeDescriptor(new DatanodeID("h4", 5020), "/d1/r2/s3"),
+    new DatanodeDescriptor(new DatanodeID("h5", 5020), "/d1/r2/s3"),
+    new DatanodeDescriptor(new DatanodeID("h6", 5020), "/d1/r2/s4"),
+    new DatanodeDescriptor(new DatanodeID("h7", 5020), "/d2/r3/s5"),
+    new DatanodeDescriptor(new DatanodeID("h8", 5020), "/d2/r3/s6")
   };
-  
+
   private final static NodeBase computeNode = new NodeBase("/d1/r1/s1/h9");
-  
+
   private final static DatanodeDescriptor NODE = 
     new DatanodeDescriptor(new DatanodeID("h8", 5020), "/d2/r4");
-  
+
   static {
     for(int i=0; i<dataNodes.length; i++) {
       cluster.add(dataNodes[i]);
     }
   }
-  
-  public void testContains() throws Exception {
-    for(int i = 0; i < dataNodes.length; i++) {
-      assertTrue(cluster.contains(dataNodes[i]));
-    }
-    assertFalse(cluster.contains(NODE));
-  }
-  
+
   public void testNumOfChildren() throws Exception {
     assertEquals(cluster.getNumOfLeaves(), dataNodes.length);
   }
-  
+
   public void testNumOfRacks() throws Exception {
     assertEquals(cluster.getNumOfRacks(), 3);
   }
@@ -87,7 +80,7 @@ public class TestNetworkTopologyWithNodeGroup extends TestCase {
     assertFalse(cluster.isOnSameNodeGroup(dataNodes[5], dataNodes[6]));
     assertFalse(cluster.isOnSameNodeGroup(dataNodes[6], dataNodes[7]));
   }
-  
+
   public void testGetDistance() throws Exception {
     assertEquals(cluster.getDistance(dataNodes[0], dataNodes[0]), 0);
     assertEquals(cluster.getDistance(dataNodes[0], dataNodes[1]), 2);
@@ -98,7 +91,7 @@ public class TestNetworkTopologyWithNodeGroup extends TestCase {
 
   public void testPseudoSortByDistance() throws Exception {
     DatanodeDescriptor[] testNodes = new DatanodeDescriptor[4];
-    
+
     // array contains both local node, local node group & local rack node
     testNodes[0] = dataNodes[1];
     testNodes[1] = dataNodes[2];
@@ -127,8 +120,8 @@ public class TestNetworkTopologyWithNodeGroup extends TestCase {
     cluster.pseudoSortByDistance(dataNodes[0], testNodes );
     assertTrue(testNodes[0] == dataNodes[0]);
     assertTrue(testNodes[1] == dataNodes[2]);
-    
-    // array contains local node & rack node
+
+    // array contains local-nodegroup node (not a data node also) & rack node
     testNodes[0] = dataNodes[6];
     testNodes[1] = dataNodes[7];
     testNodes[2] = dataNodes[2];
@@ -136,23 +129,9 @@ public class TestNetworkTopologyWithNodeGroup extends TestCase {
     cluster.pseudoSortByDistance(computeNode, testNodes );
     assertTrue(testNodes[0] == dataNodes[0]);
     assertTrue(testNodes[1] == dataNodes[2]);
-    
-    
+
   }
-  
-  public void testRemove() throws Exception {
-    for(int i=0; i<dataNodes.length; i++) {
-      cluster.remove(dataNodes[i]);
-    }
-    for(int i=0; i<dataNodes.length; i++) {
-      assertFalse(cluster.contains(dataNodes[i]));
-    }
-    assertEquals(0, cluster.getNumOfLeaves());
-    for(int i=0; i<dataNodes.length; i++) {
-      cluster.add(dataNodes[i]);
-    }
-  }
-  
+
   /**
    * This picks a large number of nodes at random in order to ensure coverage
    * 
@@ -187,19 +166,4 @@ public class TestNetworkTopologyWithNodeGroup extends TestCase {
     }
   }
 
-  /**
-   * This test checks that chooseRandom works for an excluded rack.
-   */
-  public void testChooseRandomExcludedRack() {
-    Map<Node, Integer> frequency = pickNodesAtRandom(100, "~" + "/d2");
-    // all the nodes on the second rack should be zero
-    for (int j = 0; j < dataNodes.length; j++) {
-      int freq = frequency.get(dataNodes[j]);
-      if (dataNodes[j].getNetworkLocation().startsWith("/d2")) {
-        assertEquals(0, freq);
-      } else {
-        assertTrue(freq > 0);
-      }
-    }
-  }
 }
