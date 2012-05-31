@@ -458,7 +458,7 @@ public class TestRMContainerAllocator {
     // Set related implementation classes with NodeGroup.
     conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, "true");
     conf.set(YarnConfiguration.RM_SCHEDULED_REQUESTS_CLASS_KEY, 
-        "org.apache.hadoop.mapreduce.v2.app.rm.ScheduledRequests");
+        "org.apache.hadoop.mapreduce.v2.app.rm.ScheduledRequestsWithNodeGroup");
     conf.set(YarnConfiguration.RM_SCHEDULER_NODE_CLASS_KEY, 
         "org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup");
     conf.set(YarnConfiguration.RM_CAPACITY_SCHEDULER_LEAFQUEUE_CLASS_KEY, 

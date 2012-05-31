@@ -18,6 +18,7 @@
 
 package org.apache.hadoop.mapreduce.v2.app.rm;
 
+import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -58,6 +59,9 @@ import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSQueue;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerContext;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.LeafQueue;
 import org.apache.hadoop.yarn.util.RackResolver;
 
 /**
@@ -155,11 +159,18 @@ public class RMContainerAllocator extends RMContainerRequestor
         MRJobConfig.MR_AM_JOB_REDUCE_PREEMPTION_LIMIT,
         MRJobConfig.DEFAULT_MR_AM_JOB_REDUCE_PREEMPTION_LIMIT);
     RackResolver.init(conf);
-    
-    scheduledRequests = ReflectionUtils.newInstance(
-        conf.getClass(YarnConfiguration.RM_SCHEDULED_REQUESTS_CLASS_KEY, 
-            ScheduledRequests.class, ScheduledRequests.class), conf);
-    
+
+    Class<? extends ScheduledRequests> scheduledRequestsClass =
+        conf.getClass(YarnConfiguration.RM_SCHEDULED_REQUESTS_CLASS_KEY,
+            ScheduledRequests.class, ScheduledRequests.class);
+    try {
+      Constructor<? extends ScheduledRequests> meth = scheduledRequestsClass.getDeclaredConstructor(new Class[] {RMContainerAllocator.class});
+      meth.setAccessible(true);
+      scheduledRequests = meth.newInstance(this);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+
     retryInterval = getConfig().getLong(MRJobConfig.MR_AM_TO_RM_WAIT_INTERVAL_MS,
                                 MRJobConfig.DEFAULT_MR_AM_TO_RM_WAIT_INTERVAL_MS);
     // Init startTime to current time. If all goes well, it will be reset after
