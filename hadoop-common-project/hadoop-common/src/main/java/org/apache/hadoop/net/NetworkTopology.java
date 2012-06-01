@@ -17,7 +17,9 @@
  */
 package org.apache.hadoop.net;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -379,7 +381,25 @@ public class NetworkTopology {
     int leaveIndex = r.nextInt(numOfDatanodes);
     return innerNode.getLeaf(leaveIndex, node);
   }
-       
+
+  /** return leaves in <i>scope</i>
+   * @param scope a path string
+   * @return leaves nodes under specific scope
+   */
+  public List<Node> getLeaves(String scope) {
+    Node node = getNode(scope);
+    List<Node> leafNodes = new ArrayList<Node>();
+    if (!(node instanceof InnerNode)) {
+      leafNodes.add(node);
+    } else {
+      InnerNode innerNode = (InnerNode) node;
+      for (int i=0;i<innerNode.getNumOfLeaves();i++) {
+        leafNodes.add(innerNode.getLeaf(i, null));
+      }
+    }
+    return leafNodes;
+  }
+
   /** return the number of leaves in <i>scope</i> but not in <i>excludedNodes</i>
    * if scope starts with ~, return the number of nodes that are not
    * in <i>scope</i> and <i>excludedNodes</i>; 

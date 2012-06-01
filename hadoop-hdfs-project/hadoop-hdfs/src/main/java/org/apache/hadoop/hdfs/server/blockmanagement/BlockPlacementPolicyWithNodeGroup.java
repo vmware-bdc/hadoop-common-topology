@@ -28,17 +28,16 @@ import org.apache.hadoop.net.Node;
 import org.apache.hadoop.net.NodeBase;
 import org.apache.hadoop.net.TopologyResolver;
 
-public class BlockPlacementPolicyWithNodeGroup extends
-		BlockPlacementPolicyDefault {
-	
+public class BlockPlacementPolicyWithNodeGroup extends BlockPlacementPolicyDefault {
+
   BlockPlacementPolicyWithNodeGroup(Configuration conf,  FSClusterStats stats,
       NetworkTopology clusterMap) {
     initialize(conf, stats, clusterMap);
   }
-  
+
   BlockPlacementPolicyWithNodeGroup() {
   }
-  
+
   public void initialize(Configuration conf,  FSClusterStats stats,
           NetworkTopology clusterMap) {
 	super.initialize(conf, stats, clusterMap);
@@ -51,38 +50,38 @@ public class BlockPlacementPolicyWithNodeGroup extends
    */
   @Override
   protected DatanodeDescriptor chooseLocalNode(
-	  DatanodeDescriptor localMachine,
-	  HashMap<Node, Node> excludedNodes,
-	  long blocksize,
-	  int maxNodesPerRack,
-	  List<DatanodeDescriptor> results)
-	    throws NotEnoughReplicasException {
+      DatanodeDescriptor localMachine,
+      HashMap<Node, Node> excludedNodes,
+      long blocksize,
+      int maxNodesPerRack,
+      List<DatanodeDescriptor> results)
+        throws NotEnoughReplicasException {
     // if no local machine, randomly choose one node
-	if (localMachine == null)
-	  return chooseRandom(NodeBase.ROOT, excludedNodes, 
-	      blocksize, maxNodesPerRack, results);
-	      
-	// otherwise try local machine first
-	Node oldNode = excludedNodes.put(localMachine, localMachine);
-	if (oldNode == null) { // was not in the excluded list
-	  if (isGoodTarget(localMachine, blocksize,
-	      maxNodesPerRack, false, results)) {
-	    results.add(localMachine);
-	    return localMachine;
-	  }
-	} 
+    if (localMachine == null)
+      return chooseRandom(NodeBase.ROOT, excludedNodes, 
+          blocksize, maxNodesPerRack, results);
 
-	  // try a node on local node group
-	DatanodeDescriptor chosenNode = chooseLocalNodeGroup((NetworkTopologyWithNodeGroup)clusterMap, localMachine, excludedNodes, 
-	    blocksize, maxNodesPerRack, results);
-	if (chosenNode != null) {
-	  return chosenNode;
-	}
-	// try a node on local rack
-	return chooseLocalRack(localMachine, excludedNodes, 
-	    blocksize, maxNodesPerRack, results);
+    // otherwise try local machine first
+    Node oldNode = excludedNodes.put(localMachine, localMachine);
+    if (oldNode == null) { // was not in the excluded list
+      if (isGoodTarget(localMachine, blocksize,
+          maxNodesPerRack, false, results)) {
+        results.add(localMachine);
+        return localMachine;
+      }
+    } 
+
+    // try a node on local node group
+    DatanodeDescriptor chosenNode = chooseLocalNodeGroup((NetworkTopologyWithNodeGroup)clusterMap, localMachine, excludedNodes, 
+        blocksize, maxNodesPerRack, results);
+    if (chosenNode != null) {
+      return chosenNode;
+    }
+    // try a node on local rack
+    return chooseLocalRack(localMachine, excludedNodes, 
+        blocksize, maxNodesPerRack, results);
   }
-  
+
   /* choose one node from the rack that <i>localMachine</i> is on.
    * if no such node is available, choose one node from the rack where
    * a second replica is on.
@@ -103,12 +102,18 @@ public class BlockPlacementPolicyWithNodeGroup extends
       return chooseRandom(NodeBase.ROOT, excludedNodes, 
                           blocksize, maxNodesPerRack, results);
     }
-      
+
+    // Nodes under same nodegroup should be excluded.
+    String nodeGroupScope = localMachine.getNetworkLocation();
+    List<Node> leafNodes = clusterMap.getLeaves(nodeGroupScope);
+    for (Node node : leafNodes) {
+      excludedNodes.put(node, node);
+    }
     // choose one from the local rack, but off-nodegroup
     try {
-      return chooseRandom(clusterMap.getRack(localMachine.getNetworkLocation()),
-                          TopologyResolver.getNodeGroup(localMachine.getNetworkLocation(), true),
-                          excludedNodes, blocksize, maxNodesPerRack, results);
+      return chooseRandom(TopologyResolver.getRack(localMachine.getNetworkLocation(), true),
+                          excludedNodes, blocksize, 
+                          maxNodesPerRack, results);
     } catch (NotEnoughReplicasException e1) {
       // find the second replica
       DatanodeDescriptor newLocal=null;
@@ -123,7 +128,6 @@ public class BlockPlacementPolicyWithNodeGroup extends
       if (newLocal != null) {
         try {
           return chooseRandom(clusterMap.getRack(newLocal.getNetworkLocation()),
-                              TopologyResolver.getNodeGroup(localMachine.getNetworkLocation(), true),
                               excludedNodes, blocksize, maxNodesPerRack, results);
         } catch(NotEnoughReplicasException e2) {
           //otherwise randomly choose one from the network
@@ -137,7 +141,7 @@ public class BlockPlacementPolicyWithNodeGroup extends
       }
     }
   }
-  
+
   protected void chooseRemoteRack(int numOfReplicas,
           DatanodeDescriptor localMachine,
           HashMap<Node, Node> excludedNodes,
@@ -150,13 +154,13 @@ public class BlockPlacementPolicyWithNodeGroup extends
     try {
       chooseRandom(numOfReplicas, "~"+TopologyResolver.getRack(localMachine.getNetworkLocation(), true),
       excludedNodes, blocksize, maxReplicasPerRack, results);
-      } catch (NotEnoughReplicasException e) {
-        chooseRandom(numOfReplicas-(results.size()-oldNumOfReplicas),
-        localMachine.getNetworkLocation(), excludedNodes, blocksize, 
-        maxReplicasPerRack, results);
-      }
+    } catch (NotEnoughReplicasException e) {
+      chooseRandom(numOfReplicas-(results.size()-oldNumOfReplicas),
+      localMachine.getNetworkLocation(), excludedNodes, blocksize, 
+      maxReplicasPerRack, results);
+    }
   }
-	
+
   private DatanodeDescriptor chooseLocalNodeGroup(NetworkTopologyWithNodeGroup clusterMap,
       DatanodeDescriptor localMachine, HashMap<Node, Node> excludedNodes, long blocksize, 
       int maxNodesPerRack, List<DatanodeDescriptor> results) throws NotEnoughReplicasException {
@@ -196,45 +200,6 @@ public class BlockPlacementPolicyWithNodeGroup extends
             blocksize, maxNodesPerRack, results);
       }
     }
-  }
-  
-  protected DatanodeDescriptor chooseRandom(
-      String nodes, String excludeScope, HashMap<Node, Node> excludedNodes,
-      long blocksize, int maxNodesPerRack, 
-      List<DatanodeDescriptor> results) throws NotEnoughReplicasException {
-    int numOfAvailableNodes =
-        clusterMap.countNumOfAvailableNodes(nodes, excludedNodes.keySet());
-    StringBuilder builder = null;
-    if (LOG.isDebugEnabled()) {
-      builder = threadLocalBuilder.get();
-      builder.setLength(0);
-      builder.append("[");
-    }
-    boolean badTarget = false;
-    while(numOfAvailableNodes > 0) {
-      DatanodeDescriptor chosenNode = 
-      (DatanodeDescriptor)(clusterMap.chooseRandom(nodes, excludeScope));
-
-      Node oldNode = excludedNodes.put(chosenNode, chosenNode);
-      if (oldNode == null) { // choosendNode was not in the excluded list
-        numOfAvailableNodes--;
-        if (isGoodTarget(chosenNode, blocksize, maxNodesPerRack, super.considerLoad, results)) {
-          results.add(chosenNode);
-          return chosenNode;
-        } else {
-          badTarget = true;
-        }
-      }
-    }
-
-    String detail = enableDebugLogging;
-    if (LOG.isDebugEnabled()) {
-      if (badTarget && builder != null) {
-        detail = builder.append("]").toString();
-        builder.setLength(0);
-      } else detail = "";
-    }
-    throw new NotEnoughReplicasException(detail);
   }
 
 }
