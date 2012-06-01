@@ -33,7 +33,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup;
 
 public class LeafQueueWithNodeGroup extends LeafQueue {
-	
+
   public LeafQueueWithNodeGroup(CapacitySchedulerContext cs,
       String queueName, CSQueue parent,
       Comparator<SchedulerApp> applicationComparator, CSQueue old) {
@@ -62,7 +62,7 @@ public class LeafQueueWithNodeGroup extends LeafQueue {
     if (Resources.greaterThan(assigned, Resources.none())) {
       return new CSAssignment(assigned, NodeType.NODEGROUP_LOCAL);
     }
-	         
+
     // Rack-local
     assigned = 
         assignRackLocalContainers(clusterResource, node, application, priority, 
@@ -70,12 +70,12 @@ public class LeafQueueWithNodeGroup extends LeafQueue {
     if (Resources.greaterThan(assigned, Resources.none())) {
       return new CSAssignment(assigned, NodeType.RACK_LOCAL);
     }
-	             
+
     // Off-switch
     return new CSAssignment(assignOffSwitchContainers(clusterResource, node, application, 
         priority, reservedContainer), NodeType.OFF_SWITCH);
   }
-	
+
   private Resource assignNodeGroupLocalContainers(Resource clusterResource,  
       SchedulerNode node, SchedulerApp application, Priority priority,
       RMContainer reservedContainer) {

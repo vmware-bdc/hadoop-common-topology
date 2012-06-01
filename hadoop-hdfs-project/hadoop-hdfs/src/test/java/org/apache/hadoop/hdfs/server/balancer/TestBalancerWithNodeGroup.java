@@ -261,8 +261,10 @@ public class TestBalancerWithNodeGroup extends TestCase {
    * @param conf - configuration
    * @param capacities - array of capacities of original nodes in cluster
    * @param racks - array of racks for original nodes in cluster
+   * @param nodeGroups - array of nodeGroups for original nodes in cluster
    * @param newCapacity - new node's capacity
    * @param newRack - new node's rack
+   * @param newNodeGroiup - new node's nodegroup
    * @throws Exception
    */
   private void doTest(Configuration conf, long[] capacities, String[] racks, 
