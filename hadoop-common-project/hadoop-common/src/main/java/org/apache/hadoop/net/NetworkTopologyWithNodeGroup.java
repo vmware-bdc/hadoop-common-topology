@@ -240,7 +240,7 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
   @Override
   public void pseudoSortByDistance( Node reader, Node[] nodes ) {
 
-    if (!this.contains(reader)) {
+    if (reader != null && !this.contains(reader)) {
       // if reader is not a datanode (not in NetworkTopology tree), we will replace this 
       // reader with a sibling leaf node in tree.
       Node nodeGroup = getNode(reader.getNetworkLocation());
