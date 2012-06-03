@@ -239,12 +239,18 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
    */
   @Override
   public void pseudoSortByDistance( Node reader, Node[] nodes ) {
-    boolean readerInTree = true;  
+
     if (!this.contains(reader)) {
-      // If reader is not a datanode, we temporary add this node and will remove it at last.
-      // TODO Need to resolve racing for same reader that not in tree.
-      this.add(reader);
-      readerInTree = false;
+      // if reader is not a datanode (not in NetworkTopology tree), we will replace this 
+      // reader with a sibling leaf node in tree.
+      Node nodeGroup = getNode(reader.getNetworkLocation());
+      if (nodeGroup != null && nodeGroup instanceof InnerNode) {
+        InnerNode parentNode = (InnerNode) nodeGroup;
+        // replace reader with the first children of its parent in tree
+        reader = parentNode.getLeaf(0, null);
+      } else {
+        return;
+      }
     }
     int tempIndex = 0;
     int localRackNode = -1;
@@ -299,10 +305,6 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
     if (tempIndex == 0 && localNodeGroupNode == -1 && localRackNode == -1
         && nodes.length != 0) {
       swap(nodes, 0, r.nextInt(nodes.length));
-    }
-    // If reader is not a datanode, we temporary add this node at the beginning and will remove it here.
-    if (!readerInTree) {
-        this.remove(reader);
     }
   }
 }
