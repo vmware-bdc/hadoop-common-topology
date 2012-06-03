@@ -71,7 +71,6 @@ import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.BlockWithLocat
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.NetworkTopology;
-import org.apache.hadoop.net.NetworkTopologyWithNodeGroup;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
@@ -779,9 +778,10 @@ public class Balancer {
     this.threshold = p.threshold;
     this.policy = p.policy;
     this.nnc = theblockpool;
-	cluster = ReflectionUtils.newInstance(conf.getClass(
-        CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY,
-		    NetworkTopology.class, NetworkTopology.class), conf);
+    cluster = ReflectionUtils.newInstance(
+        conf.getClass(
+            CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY,
+            NetworkTopology.class, NetworkTopology.class), conf);
   }
   
   /* Shuffle datanode array */
@@ -892,9 +892,9 @@ public class Balancer {
    * Return total number of bytes to move in this iteration
    */
   private long chooseNodes() {
-	  
-	// Match nodes taking into consideration a custom fault domain
-	chooseNodesForCustomFaultDomain();
+
+    // Match nodes taking into consideration a custom fault domain
+    chooseNodesForCustomFaultDomain();
     // Match nodes on the same rack first
     chooseNodes(true);
     // Then match nodes on different racks
@@ -914,8 +914,8 @@ public class Balancer {
   }
 
   protected void chooseNodesForCustomFaultDomain() {
-	if (cluster.isNodeGroupAware()) {
-        chooseNodesOnSameNodeGroup();	  
+    if (cluster.isNodeGroupAware()) {
+      chooseNodesOnSameNodeGroup();
     }
   }
   
@@ -924,16 +924,16 @@ public class Balancer {
    */
   private void chooseNodesOnSameNodeGroup() {
 
-	/* first step: match each overUtilized datanode (source) to
-	 * one or more underUtilized datanodes within same NodeGroup(targets).
-	 */
+    /* first step: match each overUtilized datanode (source) to
+     * one or more underUtilized datanodes within same NodeGroup(targets).
+     */
     chooseTargetsOnSameNodeGroup(underUtilizedDatanodes.iterator());	    
 
-	/* match each remaining overutilized datanode (source) to below average 
-	 * utilized datanodes within the same NodeGroup(targets).
-	 * Note only overutilized datanodes that haven't had that max bytes to move
-	 * satisfied in step 1 are selected
-	 */
+    /* match each remaining overutilized datanode (source) to below average 
+     * utilized datanodes within the same NodeGroup(targets).
+     * Note only overutilized datanodes that haven't had that max bytes to move
+     * satisfied in step 1 are selected
+     */
     chooseTargetsOnSameNodeGroup(belowAvgUtilizedDatanodes.iterator());
 
     /* match each remaining underutilized datanode to above average utilized 
@@ -946,19 +946,19 @@ public class Balancer {
 
   private void chooseSourcesOnSameNodeGroup(Iterator<Source> sourceCandidates) {
     for (Iterator<BalancerDatanode> targetIterator = underUtilizedDatanodes.iterator(); 
-    		targetIterator.hasNext();) {
-	  BalancerDatanode target = targetIterator.next();
-	  while (chooseSourceOnSameNodeGroup(target, sourceCandidates)) {
-	  }
-	  if (!target.isMoveQuotaFull()) {
-	    targetIterator.remove();
-	  }
+         targetIterator.hasNext();) {
+      BalancerDatanode target = targetIterator.next();
+      while (chooseSourceOnSameNodeGroup(target, sourceCandidates)) {
+      }
+      if (!target.isMoveQuotaFull()) {
+        targetIterator.remove();
+      }
     }
-	return;
+    return;
   }
 
   private boolean chooseSourceOnSameNodeGroup(BalancerDatanode target,
-		Iterator<Source> sourceCandidates) {
+      Iterator<Source> sourceCandidates) {
     if (!target.isMoveQuotaFull()) {
       return false;
     }
@@ -970,7 +970,7 @@ public class Balancer {
         sourceCandidates.remove();
         continue;
       }
-  	  foundSource = areDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
+      foundSource = areDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
     }
     if (foundSource) {
       assert(source != null):"Choose a null source";
@@ -1135,8 +1135,7 @@ public class Balancer {
         targetCandidates.remove();
         continue;
       }
-  	  foundTarget = areDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
-
+      foundTarget = areDataNodesOnSameNodeGroup(source.getDatanode(), target.getDatanode());
     }
     if (foundTarget) {
       assert(target != null):"Choose a null target";

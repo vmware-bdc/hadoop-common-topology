@@ -65,9 +65,9 @@ public class NetworkTopology {
   protected ReadWriteLock netlock = new ReentrantReadWriteLock();
     
   public NetworkTopology() {
-	clusterMap = new InnerNode(InnerNode.ROOT);
+    clusterMap = new InnerNode(InnerNode.ROOT);
   }
-    
+
   /** Add a leaf node
    * Update node counter & rack counter if necessary
    * @param node node to be added; can be null
@@ -130,10 +130,9 @@ public class NetworkTopology {
    * @see #getNode(String)
    */
   protected Node getNodeForNetworkLocation(Node node) {
-  	return getNode(node.getNetworkLocation());
+    return getNode(node.getNetworkLocation());
   }
-  
-    
+
   /** Remove a node
    * Update node counter and rack counter if necessary
    * @param node node to be removed; can be null
@@ -330,7 +329,7 @@ public class NetworkTopology {
    * @see #isOnSameRack(Node, Node)
    */
   protected boolean compareParents(Node node1, Node node2) {
-	return node1.getParent()==node2.getParent();
+    return node1.getParent()==node2.getParent();
   }
     
   final protected static Random r = new Random();
@@ -520,6 +519,6 @@ public class NetworkTopology {
 
   // Return false directly as not aware of NodeGroup, to be override in sub-class
   public boolean isOnSameNodeGroup(Node node1, Node node2) {
-	return false;
+    return false;
   }
 }

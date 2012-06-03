@@ -24,7 +24,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImplWithNodeGr
 public class SchedulerNodeWithNodeGroup extends SchedulerNode {
 
   public SchedulerNodeWithNodeGroup(RMNode node) {
-	super(node);
+    super(node);
   }
 
   /**
@@ -32,13 +32,13 @@ public class SchedulerNodeWithNodeGroup extends SchedulerNode {
    */
   @Override
   public String getNodeGroupName() {
-	if (!(rmNode instanceof RMNodeImplWithNodeGroup)) {
-	  return null;
-	}
-	RMNodeImplWithNodeGroup rmNodeWithNodeGroup = (RMNodeImplWithNodeGroup) rmNode;
-	return rmNodeWithNodeGroup.getNodeGroupName();
+    if (!(rmNode instanceof RMNodeImplWithNodeGroup)) {
+      return null;
+    }
+    RMNodeImplWithNodeGroup rmNodeWithNodeGroup = (RMNodeImplWithNodeGroup) rmNode;
+    return rmNodeWithNodeGroup.getNodeGroupName();
   }
-  
+
   /**
    * Check if this implementation of SchedulerNode is aware of NodeGroup
    */

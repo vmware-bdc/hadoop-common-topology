@@ -32,18 +32,18 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.StaticMapping;
 
 public class MiniDFSClusterWithNodeGroup extends MiniDFSCluster {
-	
+
   private static String[] NODE_GROUPS = null;
   private static final Log LOG = LogFactory.getLog(MiniDFSClusterWithNodeGroup.class);
   
   public MiniDFSClusterWithNodeGroup(Builder builder) throws IOException {
-	super(builder);
+    super(builder);
   }
-  
+
   public static void setNodeGroups (String[] nodeGroups) {
-	NODE_GROUPS = nodeGroups;
+    NODE_GROUPS = nodeGroups;
   }
-  
+
   public synchronized void startDataNodes(Configuration conf, int numDataNodes,
       boolean manageDfsDirs, StartupOption operation, 
       String[] racks, String[] nodeGroups, String[] hosts,
@@ -169,15 +169,15 @@ public class MiniDFSClusterWithNodeGroup extends MiniDFSCluster {
     this.numDataNodes += numDataNodes;
     waitActive();
   }
-  
+
   public void startDataNodes(Configuration conf, int numDataNodes, 
-	  boolean manageDfsDirs, StartupOption operation, 
-	  String[] racks, String[] nodeGroups
-	  ) throws IOException {
-	startDataNodes(conf, numDataNodes, manageDfsDirs, operation, racks, nodeGroups,
-	    null, null, false);
+      boolean manageDfsDirs, StartupOption operation, 
+      String[] racks, String[] nodeGroups
+      ) throws IOException {
+    startDataNodes(conf, numDataNodes, manageDfsDirs, operation, racks, nodeGroups,
+        null, null, false);
   }
-  
+
   public synchronized void startDataNodes(Configuration conf, int numDataNodes, 
       boolean manageDfsDirs, StartupOption operation, 
       String[] racks, String[] nodeGroups, String[] hosts,
@@ -186,7 +186,7 @@ public class MiniDFSClusterWithNodeGroup extends MiniDFSCluster {
     startDataNodes(conf, numDataNodes, manageDfsDirs, operation, racks, nodeGroups, 
         hosts, simulatedCapacities, setupHostsFile, false);
   }
-  
+
   public void startDataNodes(Configuration conf, int numDataNodes, 
       boolean manageDfsDirs, StartupOption operation, 
       String[] racks, long[] simulatedCapacities,
@@ -194,7 +194,7 @@ public class MiniDFSClusterWithNodeGroup extends MiniDFSCluster {
     startDataNodes(conf, numDataNodes, manageDfsDirs, operation, racks, nodeGroups,
         null, simulatedCapacities, false);
   }
-  
+
   // This is for initialize from parent class.
   @Override
   public synchronized void startDataNodes(Configuration conf, int numDataNodes, 
@@ -205,5 +205,5 @@ public class MiniDFSClusterWithNodeGroup extends MiniDFSCluster {
     startDataNodes(conf, numDataNodes, manageDfsDirs, operation, racks, NODE_GROUPS, hosts,
         simulatedCapacities, setupHostsFile, false);
   }
-  
+
 }

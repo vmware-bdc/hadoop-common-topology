@@ -31,54 +31,54 @@ import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.util.RackResolver;
 
 public class ScheduledRequestsWithNodeGroup extends ScheduledRequests {
-  
+
   private final Map<String, LinkedList<TaskAttemptId>> mapsNodeGroupMapping = 
-	new HashMap<String, LinkedList<TaskAttemptId>>();
-	
+      new HashMap<String, LinkedList<TaskAttemptId>>();
+
   ScheduledRequestsWithNodeGroup(RMContainerAllocator rmContainerAllocator) {
     super(rmContainerAllocator);
   }
-  
+
   @Override
   void addMap(ContainerRequestEvent event) {
     ContainerRequest request = null;
-	      
-	if (event.getEarlierAttemptFailed()) {
-	  earlierFailedMaps.add(event.getAttemptID());
-	  request = new ContainerRequest(event, RMContainerAllocator.PRIORITY_FAST_FAIL_MAP);
-	  RMContainerAllocator.LOG.info("Added "+event.getAttemptID()+" to list of failed maps");
-	} else {
-	  for (String host : event.getHosts()) {
-	    LinkedList<TaskAttemptId> list = mapsHostMapping.get(host);
-	    if (list == null) {
-	      list = new LinkedList<TaskAttemptId>();
-	      mapsHostMapping.put(host, list);
-	    }
-	    list.add(event.getAttemptID());
-	    if (RMContainerAllocator.LOG.isDebugEnabled()) {
-	      RMContainerAllocator.LOG.debug("Added attempt req to host " + host);
-	    }
-	  }
 
-	  doNodeGroupMapping(event);
+    if (event.getEarlierAttemptFailed()) {
+      earlierFailedMaps.add(event.getAttemptID());
+      request = new ContainerRequest(event, RMContainerAllocator.PRIORITY_FAST_FAIL_MAP);
+      RMContainerAllocator.LOG.info("Added "+event.getAttemptID()+" to list of failed maps");
+    } else {
+      for (String host : event.getHosts()) {
+        LinkedList<TaskAttemptId> list = mapsHostMapping.get(host);
+        if (list == null) {
+          list = new LinkedList<TaskAttemptId>();
+          mapsHostMapping.put(host, list);
+        }
+        list.add(event.getAttemptID());
+        if (RMContainerAllocator.LOG.isDebugEnabled()) {
+          RMContainerAllocator.LOG.debug("Added attempt req to host " + host);
+        }
+      }
 
-	  for (String rack: event.getRacks()) {
-	    LinkedList<TaskAttemptId> list = mapsRackMapping.get(rack);
-	    if (list == null) {
-	      list = new LinkedList<TaskAttemptId>();
-	      mapsRackMapping.put(rack, list);
-	    }
-	    list.add(event.getAttemptID());
-	    if (RMContainerAllocator.LOG.isDebugEnabled()) {
-	      RMContainerAllocator.LOG.debug("Added attempt req to rack " + rack);
-	    }
-	  }
-	  request = new ContainerRequest(event, RMContainerAllocator.PRIORITY_MAP);
-	}
-	maps.put(event.getAttemptID(), request);
-	this.rmContainerAllocator.addContainerReq(request);
+      doNodeGroupMapping(event);
+
+      for (String rack: event.getRacks()) {
+        LinkedList<TaskAttemptId> list = mapsRackMapping.get(rack);
+        if (list == null) {
+          list = new LinkedList<TaskAttemptId>();
+          mapsRackMapping.put(rack, list);
+        }
+        list.add(event.getAttemptID());
+        if (RMContainerAllocator.LOG.isDebugEnabled()) {
+          RMContainerAllocator.LOG.debug("Added attempt req to rack " + rack);
+        }
+      }
+      request = new ContainerRequest(event, RMContainerAllocator.PRIORITY_MAP);
+    }
+    maps.put(event.getAttemptID(), request);
+    this.rmContainerAllocator.addContainerReq(request);
   }
-  
+
   protected ContainerRequest assignToNodeGroup(String host, LinkedList<TaskAttemptId> list) {
     ContainerRequest assigned = null;
     // Try to assign nodegroup-local		
@@ -114,12 +114,12 @@ public class ScheduledRequestsWithNodeGroup extends ScheduledRequests {
       }
     }
   }
-  
+
   @Override
   @SuppressWarnings("unchecked")
   protected ContainerRequest assignToMap(Container allocated) {
     //try to assign to maps if present 
-    //first by host, then by rack, followed by *
+    //first by host, then by nodegroup, rack, followed by *
     ContainerRequest assigned = null;
     while (assigned == null && maps.size() > 0) {
       String host = allocated.getNodeId().getHost();
@@ -143,9 +143,7 @@ public class ScheduledRequestsWithNodeGroup extends ScheduledRequests {
         }
       }
       if (assigned == null) {
-        	
         assigned = assignToNodeGroup(host, list);
-
         // Try to assign rack-local
         if (assigned == null && maps.size() > 0) {
           String rack = TopologyResolver.getRack(RackResolver.resolve(host), true);

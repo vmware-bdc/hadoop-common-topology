@@ -18,9 +18,7 @@
 package org.apache.hadoop.hdfs.server.balancer;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.net.URI;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
@@ -48,8 +46,6 @@ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
-import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
-import org.apache.hadoop.hdfs.server.namenode.NameNode;
 
 /**
  * This class tests if a balancer schedules tasks correctly.
@@ -82,8 +78,8 @@ public class TestBalancerWithNodeGroup extends TestCase {
   }
 
   static Configuration createConf() {
-	Configuration conf = new HdfsConfiguration();
-	TestBalancer.initConf(conf);
+    Configuration conf = new HdfsConfiguration();
+    TestBalancer.initConf(conf);
     conf.setBoolean(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, true);
     conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_CLASS_NAME_KEY, "org.apache.hadoop.net.NetworkTopologyWithNodeGroup");
     return conf;
@@ -98,13 +94,12 @@ public class TestBalancerWithNodeGroup extends TestCase {
     DFSTestUtil.waitReplication(fs, filePath, replicationFactor);
   }
 
-
   /* fill up a cluster with <code>numNodes</code> datanodes 
    * whose used space to be <code>size</code>
    */
   private ExtendedBlock[] generateBlocks(Configuration conf, long size,
       short numNodes) throws IOException {
-	MiniDFSCluster.Builder builder = new MiniDFSCluster.Builder(conf).numDataNodes(numNodes);
+    MiniDFSCluster.Builder builder = new MiniDFSCluster.Builder(conf).numDataNodes(numNodes);
     cluster = new MiniDFSClusterWithNodeGroup (builder);
     try {
       cluster.waitActive();
@@ -125,7 +120,6 @@ public class TestBalancerWithNodeGroup extends TestCase {
         blocks[i] = new ExtendedBlock(b.getBlockPoolId(), b.getBlockId(), b
             .getNumBytes(), b.getGenerationStamp());
       }
-
       return blocks;
     } finally {
       cluster.shutdown();
@@ -187,7 +181,7 @@ public class TestBalancerWithNodeGroup extends TestCase {
     long timeout = TIMEOUT;
     long failtime = (timeout <= 0L) ? Long.MAX_VALUE
              : System.currentTimeMillis() + timeout;
-    
+
     while (true) {
       long[] status = client.getStats();
       double totalSpaceVariance = Math.abs((double)status[0] - expectedTotalSpace) 
@@ -212,7 +206,7 @@ public class TestBalancerWithNodeGroup extends TestCase {
       }
     }
   }
-  
+
   /**
    * Wait until balanced: each datanode gives utilization within 
    * BALANCE_ALLOWED_VARIANCE of average
@@ -319,7 +313,7 @@ public class TestBalancerWithNodeGroup extends TestCase {
   private void oneNodeTest(Configuration conf) throws Exception {
     // add an empty node with half of the CAPACITY & the same rack
     doTest(conf, new long[]{CAPACITY}, new String[]{RACK0}, new String[]{NODEGROUP0}, 
-    	CAPACITY/2, RACK0, NODEGROUP0);
+        CAPACITY/2, RACK0, NODEGROUP0);
   }
   
   /** two-node cluster test */
@@ -327,7 +321,7 @@ public class TestBalancerWithNodeGroup extends TestCase {
     doTest(conf, new long[]{CAPACITY, CAPACITY}, new String[]{RACK0, RACK1},
         new String[]{NODEGROUP0, NODEGROUP1}, CAPACITY, RACK2, NODEGROUP2);
   }
-  
+
   /** Test a cluster with even distribution, 
    * then a new empty node is added to the cluster*/
   public void testBalancer0() throws Exception {
@@ -344,7 +338,7 @@ public class TestBalancerWithNodeGroup extends TestCase {
         new long[]{CAPACITY, CAPACITY}, new String[] {RACK0, RACK1}, 
         new String[]{NODEGROUP0, NODEGROUP1});
   }
-  
+
   public void testBalancer2() throws Exception {
     Configuration conf = createConf();
     testBalancerDefaultConstructor(conf, new long[]{CAPACITY, CAPACITY},

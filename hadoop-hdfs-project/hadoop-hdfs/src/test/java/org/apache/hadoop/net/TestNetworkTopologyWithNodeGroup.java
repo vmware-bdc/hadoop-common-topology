@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.net;
 
-
 import java.util.HashMap;
 import java.util.Map;
 
@@ -41,9 +40,6 @@ public class TestNetworkTopologyWithNodeGroup extends TestCase {
   };
 
   private final static NodeBase computeNode = new NodeBase("/d1/r1/s1/h9");
-
-  private final static DatanodeDescriptor NODE = 
-    new DatanodeDescriptor(new DatanodeID("h8", 5020), "/d2/r4");
 
   static {
     for(int i=0; i<dataNodes.length; i++) {
@@ -129,7 +125,6 @@ public class TestNetworkTopologyWithNodeGroup extends TestCase {
     cluster.pseudoSortByDistance(computeNode, testNodes );
     assertTrue(testNodes[0] == dataNodes[0]);
     assertTrue(testNodes[1] == dataNodes[2]);
-
   }
 
   /**

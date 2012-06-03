@@ -325,7 +325,7 @@ public class TestRMContainerAllocator {
           .getContainer().getNodeId().getHost()));
     }
   }
-  
+
   @Test
   public void testMapTaskSchedulingWithLocality() throws Exception {
 
@@ -358,32 +358,31 @@ public class TestRMContainerAllocator {
     MyContainerAllocator allocator = new MyContainerAllocator(rm, conf,
         appAttemptId, mockJob);
 
-    
     String host1 = "h1:1234";
     String host2 = "h2:1234";
     String host3 = "h3:1234";
     String host4 = "h4:1234";
     String host5 = "h5:1234";
-    
+
     String rack1 = "/rack1";
     String rack2 = "/rack2";
-    
+
     StaticMapping.addNodeToRack(host1, rack1);
     StaticMapping.addNodeToRack("h1", rack1);
-    
+
     StaticMapping.addNodeToRack(host2, rack2);
     StaticMapping.addNodeToRack("h2", rack2);
-    
+
     StaticMapping.addNodeToRack(host3, rack1);
     StaticMapping.addNodeToRack("h3", rack1);
-    
+
     StaticMapping.addNodeToRack(host4, rack2);
     StaticMapping.addNodeToRack("h4", rack2);
-    
+
     StaticMapping.addNodeToRack(host5, rack1);
     StaticMapping.addNodeToRack("h5", rack1);
     setRackResolverToUseStaticMapping();
-    
+
     // add resources to scheduler
     MockNM nodeManager1 = rm.registerNode(host1, 1024);
     MockNM nodeManager2 = rm.registerNode(host2, 2048);
@@ -396,7 +395,7 @@ public class TestRMContainerAllocator {
     ContainerRequestEvent event1 = createReq(jobId, 3, 2048,
             new String[] { "h3" }, new String[] { rack1 }, false);
     allocator.sendRequest(event1);
-    
+
     ContainerRequestEvent event2 = createReq(jobId, 4, 2048,
             new String[] { "h2" }, new String[] { rack2 }, false);
     allocator.sendRequest(event2);
@@ -415,7 +414,7 @@ public class TestRMContainerAllocator {
 
     assigned = allocator.schedule();
     dispatcher.await();
-    
+
     // Check host locality
     checkAssignments(new ContainerRequestEvent[] { event1, event2 },
         assigned, true);
@@ -424,16 +423,16 @@ public class TestRMContainerAllocator {
     ContainerRequestEvent event3 = createReq(jobId, 5, 2048,
             new String[] { "h1" }, new String[] { rack1 }, false);
     allocator.sendRequest(event3);
-    
+
     ContainerRequestEvent event4 = createReq(jobId, 6, 2048,
             new String[] { "h2" }, new String[] { rack2 }, false);
     allocator.sendRequest(event4);
-    
+
     // tells the scheduler again about the requests
     // as no new nodes are added, no allocations also
     assigned = allocator.schedule();
     dispatcher.await();
-    
+
     // each node can meet one request only
     nodeManager4.nodeHeartbeat(true); // Node heartbeat, allocate container
     nodeManager5.nodeHeartbeat(true);
@@ -447,8 +446,7 @@ public class TestRMContainerAllocator {
     checkAssignments(new ContainerRequestEvent[] { event3, event4 },
         assigned, checkHostMatch, checkRackMatch);
   }
-  
-  
+
   @Test
   public void testMapTaskSchedulingWithNodeGroup() throws Exception {
 
@@ -495,34 +493,34 @@ public class TestRMContainerAllocator {
     String host4 = "h4:1234";
     String host5 = "h5:1234";
     String host6 = "h6:1234";
-    
+
     String rack1 = "/rack1";
     String rack2 = "/rack2";
-    
+
     String nodegroup1 = "/nodegroup1";
     String nodegroup2 = "/nodegroup2";
     String nodegroup3 = "/nodegroup3";
     String nodegroup4 = "/nodegroup4";
-    
+
     StaticMapping.addNodeToRack(host1, rack1 + nodegroup1);
     StaticMapping.addNodeToRack("h1", rack1 + nodegroup1);
-    
+
     StaticMapping.addNodeToRack(host2, rack2 + nodegroup2);
     StaticMapping.addNodeToRack("h2", rack2 + nodegroup2);
-    
+
     StaticMapping.addNodeToRack(host3, rack1 + nodegroup1);
     StaticMapping.addNodeToRack("h3", rack1 + nodegroup1);
-    
+
     StaticMapping.addNodeToRack(host4, rack2 + nodegroup2);
     StaticMapping.addNodeToRack("h4", rack2 + nodegroup2);
-    
+
     StaticMapping.addNodeToRack(host5, rack1 + nodegroup3);
     StaticMapping.addNodeToRack("h5", rack1 + nodegroup3);
-    
+
     StaticMapping.addNodeToRack(host6, rack2 + nodegroup4);
     StaticMapping.addNodeToRack("h6", rack2 + nodegroup4);
     setRackResolverToUseStaticMapping();
-    
+
     // add resources to scheduler
     MockNM nodeManager1 = rm.registerNode(host1, 2048);
     MockNM nodeManager2 = rm.registerNode(host2, 2048);
@@ -535,17 +533,17 @@ public class TestRMContainerAllocator {
             new String[] { "h3" }, new String[] { nodegroup1 },
                 new String[] { rack1 }, false);
     allocator.sendRequest(event1);
-    
+
     ContainerRequestEvent event2 = createReq(jobId, 4, 2048,
             new String[] { "h4" }, new String[] { nodegroup2 },
                 new String[] { rack2 }, false);
     allocator.sendRequest(event2);
-    
+
     ContainerRequestEvent event3 = createReq(jobId, 5, 2048,
             new String[] { "h5" }, new String[] { nodegroup3 },
                 new String[] { rack1 }, false);
     allocator.sendRequest(event3);
-    
+
     ContainerRequestEvent event4 = createReq(jobId, 6, 2048,
             new String[] { "h6" }, new String[] { nodegroup4 },
                 new String[] { rack2 }, false);
@@ -592,15 +590,14 @@ public class TestRMContainerAllocator {
     checkRackMatch = true;
     checkAssignments(new ContainerRequestEvent[] { event4 },
         assigned, checkHostMatch, checkRackMatch);
-
   }
-  
+
   private void setRackResolverToUseStaticMapping() throws SecurityException, 
       NoSuchFieldException, IllegalArgumentException, IllegalAccessException {
-	Field field = RackResolver.class.getDeclaredField("dnsToSwitchMapping");
-	field.setAccessible(true);
-	field.set(null, new StaticMapping());
-	}
+    Field field = RackResolver.class.getDeclaredField("dnsToSwitchMapping");
+    field.setAccessible(true);
+    field.set(null, new StaticMapping());
+  }
 
 private static class MyResourceManager extends MockRM {
 
@@ -623,6 +620,7 @@ private static class MyResourceManager extends MockRM {
         }
       };
     }
+
     @Override
     protected ResourceScheduler createScheduler() {
       return new MyFifoScheduler(getRMContext());
@@ -943,9 +941,9 @@ private static class MyResourceManager extends MockRM {
     Assert.assertEquals("No of assignments must be 0", 0, assigned.size());
 
     // Send events to blacklist nodes h1 and h2
-    ContainerFailedEvent f1 = createFailEvent(jobId, 1, "h1", false);            
+    ContainerFailedEvent f1 = createFailEvent(jobId, 1, "h1", false);
     allocator.sendFailure(f1);
-    ContainerFailedEvent f2 = createFailEvent(jobId, 1, "h2", false);            
+    ContainerFailedEvent f2 = createFailEvent(jobId, 1, "h2", false);
     allocator.sendFailure(f2);
 
     // update resources in scheduler
@@ -955,7 +953,7 @@ private static class MyResourceManager extends MockRM {
 
     assigned = allocator.schedule();
     dispatcher.await();
-    Assert.assertEquals("No of assignments must be 0", 0, assigned.size());    
+    Assert.assertEquals("No of assignments must be 0", 0, assigned.size());
 
     // mark h1/h2 as bad nodes
     nodeManager1.nodeHeartbeat(false);
@@ -964,22 +962,22 @@ private static class MyResourceManager extends MockRM {
 
     assigned = allocator.schedule();
     dispatcher.await();
-    Assert.assertEquals("No of assignments must be 0", 0, assigned.size());    
+    Assert.assertEquals("No of assignments must be 0", 0, assigned.size());
 
     nodeManager3.nodeHeartbeat(true); // Node heartbeat
     dispatcher.await();
-    assigned = allocator.schedule();    
+    assigned = allocator.schedule();
     dispatcher.await();
-        
+
     Assert.assertTrue("No of assignments must be 3", assigned.size() == 3);
-    
+
     // validate that all containers are assigned to h3
     for (TaskAttemptContainerAssignedEvent assig : assigned) {
       Assert.assertTrue("Assigned container host not correct", "h3".equals(assig
           .getContainer().getNodeId().getHost()));
     }
   }
-  
+
   @Test
   public void testIgnoreBlacklisting() throws Exception {
     LOG.info("Running testIgnoreBlacklisting");
@@ -1148,7 +1146,7 @@ private static class MyResourceManager extends MockRM {
     dispatcher.await();
     return assigned;
   }
- 
+
   @Test
   public void testBlackListedNodesWithSchedulingToThatNode() throws Exception {
     LOG.info("Running testBlackListedNodesWithSchedulingToThatNode");
@@ -1158,7 +1156,7 @@ private static class MyResourceManager extends MockRM {
     conf.setInt(MRJobConfig.MAX_TASK_FAILURES_PER_TRACKER, 1);
     conf.setInt(
         MRJobConfig.MR_AM_IGNORE_BLACKLISTING_BLACKLISTED_NODE_PERECENT, -1);
-    
+
     MyResourceManager rm = new MyResourceManager(conf);
     rm.start();
     DrainDispatcher dispatcher = (DrainDispatcher) rm.getRMContext()
@@ -1176,7 +1174,7 @@ private static class MyResourceManager extends MockRM {
         .getAppAttemptId();
     rm.sendAMLaunched(appAttemptId);
     dispatcher.await();
-    
+
     JobId jobId = MRBuilderUtils.newJobId(appAttemptId.getApplicationId(), 0);
     Job mockJob = mock(Job.class);
     when(mockJob.getReport()).thenReturn(
@@ -1207,12 +1205,12 @@ private static class MyResourceManager extends MockRM {
     // update resources in scheduler
     nodeManager1.nodeHeartbeat(true); // Node heartbeat
     dispatcher.await();
-    
+
     LOG.info("RM Heartbeat (To process the scheduled containers)");
     assigned = allocator.schedule();
     dispatcher.await();
-    Assert.assertEquals("No of assignments must be 1", 1, assigned.size());    
-    
+    Assert.assertEquals("No of assignments must be 1", 1, assigned.size());
+
     LOG.info("Failing container _1 on H1 (should blacklist the node)");
     // Send events to blacklist nodes h1 and h2
     ContainerFailedEvent f1 = createFailEvent(jobId, 1, "h1", false);
@@ -1233,20 +1231,20 @@ private static class MyResourceManager extends MockRM {
     ContainerRequestEvent event3 = createReq(jobId, 3, 1024,
         new String[] { "h1", "h3" });
     allocator.sendRequest(event3);
-    
+
     //Allocator is aware of prio:5 container, and prio:20 (h1+h3) container.
     //RM is only aware of the prio:5 container
-    
+
     LOG.info("h1 Heartbeat (To actually schedule the containers)");
     // update resources in scheduler
     nodeManager1.nodeHeartbeat(true); // Node heartbeat
     dispatcher.await();
-    
+
     LOG.info("RM Heartbeat (To process the scheduled containers)");
     assigned = allocator.schedule();
     dispatcher.await();
-    Assert.assertEquals("No of assignments must be 0", 0, assigned.size());    
-    
+    Assert.assertEquals("No of assignments must be 0", 0, assigned.size());
+
     //RMContainerAllocator gets assigned a p:5 on a blacklisted node.
 
     //Send a release for the p:5 container + another request.
@@ -1254,32 +1252,32 @@ private static class MyResourceManager extends MockRM {
     assigned = allocator.schedule();
     dispatcher.await();
     Assert.assertEquals("No of assignments must be 0", 0, assigned.size());
-    
+
     //Hearbeat from H3 to schedule on this host.
     LOG.info("h3 Heartbeat (To re-schedule the containers)");
     nodeManager3.nodeHeartbeat(true); // Node heartbeat
     dispatcher.await();
-    
+
     LOG.info("RM Heartbeat (To process the re-scheduled containers for H3)");
     assigned = allocator.schedule();
     dispatcher.await();
-     
+
     // For debugging
     for (TaskAttemptContainerAssignedEvent assig : assigned) {
       LOG.info(assig.getTaskAttemptID() +
           " assgined to " + assig.getContainer().getId() +
           " with priority " + assig.getContainer().getPriority());
     }
-    
+
     Assert.assertEquals("No of assignments must be 2", 2, assigned.size());
-    
+
     // validate that all containers are assigned to h3
     for (TaskAttemptContainerAssignedEvent assig : assigned) {
       Assert.assertEquals("Assigned container " + assig.getContainer().getId()
           + " host not correct", "h3", assig.getContainer().getNodeId().getHost());
     }
   }
-  
+
   private static class MyFifoScheduler extends FifoScheduler {
 
     public MyFifoScheduler(RMContext rmContext) {
@@ -1335,7 +1333,7 @@ private static class MyResourceManager extends MockRM {
     return new ContainerRequestEvent(attemptId, containerNeed, hosts,
         new String[] { NetworkTopology.DEFAULT_RACK });
   }
-  
+
   private ContainerRequestEvent
       createReq(JobId jobId, int taskAttemptId, int memory, String[] hosts,
           String[] racks, boolean reduce) {
@@ -1352,7 +1350,7 @@ private static class MyResourceManager extends MockRM {
     return new ContainerRequestEvent(attemptId, containerNeed, hosts,
         racks);
  }
-  
+
   private ContainerRequestEvent
       createReq(JobId jobId, int taskAttemptId, int memory, String[] hosts,
           String[] nodegroups, String[] racks, boolean reduce) {
@@ -1382,82 +1380,81 @@ private static class MyResourceManager extends MockRM {
         taskAttemptId);
     return new ContainerFailedEvent(attemptId, host);    
   }
-  
+
   private void checkAssignments(ContainerRequestEvent[] requests,
       List<TaskAttemptContainerAssignedEvent> assignments,
       boolean checkHostMatch) {
     checkAssignments(requests, assignments, checkHostMatch, false);
   }
-  
+
   private void checkAssignments(ContainerRequestEvent[] requests,
-	  List<TaskAttemptContainerAssignedEvent> assignments,
-	  boolean checkHostMatch, boolean checkRackMatch) {
-	checkAssignments(requests, assignments, checkHostMatch, false, checkRackMatch);
+      List<TaskAttemptContainerAssignedEvent> assignments,
+      boolean checkHostMatch, boolean checkRackMatch) {
+    checkAssignments(requests, assignments, checkHostMatch, false, checkRackMatch);
   }
-  
+
   private void checkAssignments(ContainerRequestEvent[] requests,
-	  List<TaskAttemptContainerAssignedEvent> assignments,
-	  boolean checkHostMatch, boolean checkNodeGroupMatch, 
-	  boolean checkRackMatch) {
-	Assert.assertNotNull("Container not assigned", assignments);
-	Assert.assertEquals("Assigned count not correct", requests.length,
-	    assignments.size());
+      List<TaskAttemptContainerAssignedEvent> assignments,
+      boolean checkHostMatch, boolean checkNodeGroupMatch, 
+      boolean checkRackMatch) {
+    Assert.assertNotNull("Container not assigned", assignments);
+    Assert.assertEquals("Assigned count not correct", requests.length,
+        assignments.size());
 
-	// check for uniqueness of containerIDs
-	Set<ContainerId> containerIds = new HashSet<ContainerId>();
-	for (TaskAttemptContainerAssignedEvent assigned : assignments) {
-	  containerIds.add(assigned.getContainer().getId());
-	}
-	Assert.assertEquals("Assigned containers must be different", assignments
-		.size(), containerIds.size());
+    // check for uniqueness of containerIDs
+    Set<ContainerId> containerIds = new HashSet<ContainerId>();
+    for (TaskAttemptContainerAssignedEvent assigned : assignments) {
+      containerIds.add(assigned.getContainer().getId());
+    }
+    Assert.assertEquals("Assigned containers must be different", assignments
+        .size(), containerIds.size());
 
-	// check for all assignment
-	for (ContainerRequestEvent req : requests) {
-	  TaskAttemptContainerAssignedEvent assigned = null;
-	  for (TaskAttemptContainerAssignedEvent ass : assignments) {
-		if (ass.getTaskAttemptID().equals(req.getAttemptID())) {
-		  assigned = ass;
-		  break;
-		}
-	  }
-	  checkAssignment(req, assigned, checkHostMatch, checkNodeGroupMatch, checkRackMatch);
-	}
+    // check for all assignment
+    for (ContainerRequestEvent req : requests) {
+      TaskAttemptContainerAssignedEvent assigned = null;
+      for (TaskAttemptContainerAssignedEvent ass : assignments) {
+        if (ass.getTaskAttemptID().equals(req.getAttemptID())) {
+          assigned = ass;
+          break;
+        }
+      }
+      checkAssignment(req, assigned, checkHostMatch, checkNodeGroupMatch, checkRackMatch);
+    }
   }
 
   private void checkAssignment(ContainerRequestEvent request,
-	  TaskAttemptContainerAssignedEvent assigned, boolean checkHostMatch,
+      TaskAttemptContainerAssignedEvent assigned, boolean checkHostMatch,
       boolean checkNodeGroupMatch, boolean checkRackMatch) {
     Assert.assertNotNull("Nothing assigned to attempt "
         + request.getAttemptID(), assigned);
-	Assert.assertEquals("assigned to wrong attempt", request.getAttemptID(),
+    Assert.assertEquals("assigned to wrong attempt", request.getAttemptID(),
         assigned.getTaskAttemptID());
-	if (checkHostMatch) {
-	  List<String> requestHosts = Arrays.asList(request.getHosts());
-	  NodeId assignedNode = assigned.getContainer().getNodeId();
+    if (checkHostMatch) {
+      List<String> requestHosts = Arrays.asList(request.getHosts());
+      NodeId assignedNode = assigned.getContainer().getNodeId();
       Assert.assertTrue("Not assigned to requested host", requestHosts.contains(
-		  assignedNode.toString()) || requestHosts.contains(
-		  assignedNode.getHost()));
-	}
-	if (checkNodeGroupMatch) {
-	  Assert.assertTrue("Request type error: not a request with nodegroup.", request instanceof ContainerRequestWithNodeGroupEvent);
-	  
+          assignedNode.toString()) || requestHosts.contains(
+          assignedNode.getHost()));
+    }
+    if (checkNodeGroupMatch) {
+      Assert.assertTrue("Request type error: not a request with nodegroup.", request instanceof ContainerRequestWithNodeGroupEvent);
       List<String> requestNodeGroups = Arrays.asList(((ContainerRequestWithNodeGroupEvent)request).getNodeGroups());
-	  NodeId assignedNode = assigned.getContainer().getNodeId();
-	  Assert.assertTrue(
-		  "Not assigned to requested rack", requestNodeGroups.contains(
-	          TopologyResolver.getNodeGroup(
-	    	      RackResolver.resolve(assignedNode.getHost())
-	    	      , true)));
+      NodeId assignedNode = assigned.getContainer().getNodeId();
+      Assert.assertTrue(
+          "Not assigned to requested rack", requestNodeGroups.contains(
+              TopologyResolver.getNodeGroup(
+                  RackResolver.resolve(assignedNode.getHost())
+                  , true)));
     }
     if (checkRackMatch) {
-	  List<String> requestRacks = Arrays.asList(request.getRacks());
-	  NodeId assignedNode = assigned.getContainer().getNodeId();
+      List<String> requestRacks = Arrays.asList(request.getRacks());
+      NodeId assignedNode = assigned.getContainer().getNodeId();
       Assert.assertTrue(
-		  "Not assigned to requested rack", requestRacks.contains(
-		      TopologyResolver.getRack(
-		          RackResolver.resolve(assignedNode.getHost()),
-		          request instanceof ContainerRequestWithNodeGroupEvent)));
-	}
+          "Not assigned to requested rack", requestRacks.contains(
+              TopologyResolver.getRack(
+                  RackResolver.resolve(assignedNode.getHost()),
+                  request instanceof ContainerRequestWithNodeGroupEvent)));
+    }
   }
 
   // Mock RMContainerAllocator
@@ -1572,7 +1569,6 @@ private static class MyResourceManager extends MockRM {
     protected void startAllocatorThread() {
       // override to NOT start thread
     }
-        
   }
 
   @Test
@@ -1588,12 +1584,12 @@ private static class MyResourceManager extends MockRM {
     int numPendingReduces = 4;
     float maxReduceRampupLimit = 0.5f;
     float reduceSlowStart = 0.2f;
-    
+
     RMContainerAllocator allocator = mock(RMContainerAllocator.class);
     doCallRealMethod().when(allocator).
         scheduleReduces(anyInt(), anyInt(), anyInt(), anyInt(), anyInt(), 
             anyInt(), anyInt(), anyInt(), anyInt(), anyFloat(), anyFloat());
-    
+
     // Test slow-start
     allocator.scheduleReduces(
         totalMaps, succeededMaps, 
@@ -1603,7 +1599,7 @@ private static class MyResourceManager extends MockRM {
         numPendingReduces, 
         maxReduceRampupLimit, reduceSlowStart);
     verify(allocator, never()).setIsReduceStarted(true);
-    
+
     succeededMaps = 3;
     allocator.scheduleReduces(
         totalMaps, succeededMaps, 
@@ -1613,7 +1609,7 @@ private static class MyResourceManager extends MockRM {
         numPendingReduces, 
         maxReduceRampupLimit, reduceSlowStart);
     verify(allocator, times(1)).setIsReduceStarted(true);
-    
+
     // Test reduce ramp-up
     doReturn(100 * 1024).when(allocator).getMemLimit();
     allocator.scheduleReduces(
@@ -1638,7 +1634,7 @@ private static class MyResourceManager extends MockRM {
         maxReduceRampupLimit, reduceSlowStart);
     verify(allocator).rampDownReduces(anyInt());
   }
-  
+
   public static void main(String[] args) throws Exception {
     TestRMContainerAllocator t = new TestRMContainerAllocator();
     t.testSimple();

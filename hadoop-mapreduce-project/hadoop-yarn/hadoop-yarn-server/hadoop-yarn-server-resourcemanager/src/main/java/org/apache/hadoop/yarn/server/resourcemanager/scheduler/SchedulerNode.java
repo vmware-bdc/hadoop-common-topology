@@ -249,6 +249,6 @@ public class SchedulerNode {
    * Get name of NodeGroup, return null if not aware of NodeGroup
    */
   public String getNodeGroupName() {
-	return null;
+    return null;
   }
 }

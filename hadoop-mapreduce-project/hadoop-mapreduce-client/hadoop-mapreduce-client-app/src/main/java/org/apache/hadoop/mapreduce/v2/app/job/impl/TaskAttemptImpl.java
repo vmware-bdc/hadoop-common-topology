@@ -911,7 +911,7 @@ public abstract class TaskAttemptImpl implements
   }
 
   public Configuration getConf() {
-	return conf;
+    return conf;
   }
   @Override
   public float getProgress() {
@@ -1126,7 +1126,7 @@ public abstract class TaskAttemptImpl implements
         for (String host : taskAttempt.dataLocalHosts) {
           racks.add(TopologyResolver.getRack(RackResolver.resolve(host), withNodeGroup));
         }
-        
+
         if (withNodeGroup) {
           String[] nodegroups = new String[taskAttempt.dataLocalHosts.length];
           int i = 0;

@@ -318,9 +318,9 @@ implements ResourceScheduler, CapacitySchedulerContext, Configurable {
           CapacitySchedulerContext.class, String.class,
               CSQueue.class, Comparator.class, CSQueue.class };
       try {
-		Constructor<? extends LeafQueue> meth = leafQueueClass.getDeclaredConstructor(classArray);
-		meth.setAccessible(true);
-		queue = meth.newInstance(csContext, queueName, parent, applicationComparator,
+        Constructor<? extends LeafQueue> meth = leafQueueClass.getDeclaredConstructor(classArray);
+        meth.setAccessible(true);
+        queue = meth.newInstance(csContext, queueName, parent, applicationComparator,
             oldQueues.get(queueName));
       } catch (Exception e) {
         throw new RuntimeException(e);

@@ -17,37 +17,36 @@
  */
 package org.apache.hadoop.net;
 
-
 public class TopologyResolver {
   /** Path separator as a string {@value} */
   public final static String PATH_SEPARATOR_STR = "/";
-  
+
   public static String getRack(Node host, boolean withNodeGroupLayer) {
-	return withNodeGroupLayer ? getFirstHalf(host.getNetworkLocation()) 
-	    : host.getNetworkLocation();
+    return withNodeGroupLayer ? getFirstHalf(host.getNetworkLocation()) 
+        : host.getNetworkLocation();
   }
-  
+
   public static String getNodeGroup(Node host, boolean withNodeGroupLayer) {
-	return withNodeGroupLayer ? getLastHalf(host.getNetworkLocation()) : null;
+    return withNodeGroupLayer ? getLastHalf(host.getNetworkLocation()) : null;
   }
-  
+
   public static String getRack(String networkLocation, boolean withNodeGroupLayer) {
-	return withNodeGroupLayer ? getFirstHalf(networkLocation) 
-	    : networkLocation;
+    return withNodeGroupLayer ? getFirstHalf(networkLocation) 
+        : networkLocation;
   }
-  
+
   public static String getNodeGroup(String networkLocation, boolean withNodeGroupLayer) {
-	return withNodeGroupLayer ? getLastHalf(networkLocation) : null;
+    return withNodeGroupLayer ? getLastHalf(networkLocation) : null;
   }
-  
+
   private static String getFirstHalf(String wholeString) {
-	  int index = wholeString.lastIndexOf(PATH_SEPARATOR_STR);
-	  return wholeString.substring(0, index);
+    int index = wholeString.lastIndexOf(PATH_SEPARATOR_STR);
+    return wholeString.substring(0, index);
   }
-  
+
   private static String getLastHalf(String wholeString) {
-	  int index = wholeString.lastIndexOf(PATH_SEPARATOR_STR);
-	  return wholeString.substring(index);
+    int index = wholeString.lastIndexOf(PATH_SEPARATOR_STR);
+    return wholeString.substring(index);
   }
 
 }

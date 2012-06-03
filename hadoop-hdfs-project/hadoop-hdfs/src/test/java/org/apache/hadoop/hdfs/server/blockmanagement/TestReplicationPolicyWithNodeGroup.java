@@ -45,14 +45,14 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
   private static final String filename = "/dummyfile.txt";
 
   private final static DatanodeDescriptor dataNodes[] = new DatanodeDescriptor[] {
-	new DatanodeDescriptor(new DatanodeID("h1", 5020), "/d1/r1/s1"),
-	new DatanodeDescriptor(new DatanodeID("h2", 5020), "/d1/r1/s1"),
-	new DatanodeDescriptor(new DatanodeID("h3", 5020), "/d1/r1/s2"),
-	new DatanodeDescriptor(new DatanodeID("h4", 5020), "/d1/r2/s3"),
-	new DatanodeDescriptor(new DatanodeID("h5", 5020), "/d1/r2/s3"),
-	new DatanodeDescriptor(new DatanodeID("h6", 5020), "/d1/r2/s4"),
-	new DatanodeDescriptor(new DatanodeID("h7", 5020), "/d2/r3/s5"),
-	new DatanodeDescriptor(new DatanodeID("h8", 5020), "/d2/r3/s6")
+    new DatanodeDescriptor(new DatanodeID("h1", 5020), "/d1/r1/s1"),
+    new DatanodeDescriptor(new DatanodeID("h2", 5020), "/d1/r1/s1"),
+    new DatanodeDescriptor(new DatanodeID("h3", 5020), "/d1/r1/s2"),
+    new DatanodeDescriptor(new DatanodeID("h4", 5020), "/d1/r2/s3"),
+    new DatanodeDescriptor(new DatanodeID("h5", 5020), "/d1/r2/s3"),
+    new DatanodeDescriptor(new DatanodeID("h6", 5020), "/d1/r2/s4"),
+    new DatanodeDescriptor(new DatanodeID("h7", 5020), "/d2/r3/s5"),
+    new DatanodeDescriptor(new DatanodeID("h8", 5020), "/d2/r3/s6")
   };
 
   private final static DatanodeDescriptor NODE = 
@@ -82,13 +82,13 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
     setupDataNodeCapacity();
   }
 
-private static void setupDataNodeCapacity() {
-	for(int i=0; i<NUM_OF_DATANODES; i++) {
+  private static void setupDataNodeCapacity() {
+    for(int i=0; i<NUM_OF_DATANODES; i++) {
       dataNodes[i].updateHeartbeat(
           2*HdfsConstants.MIN_BLOCKS_FOR_WRITE*BLOCK_SIZE, 0L,
           2*HdfsConstants.MIN_BLOCKS_FOR_WRITE*BLOCK_SIZE, 0L, 0, 0);
     }
-}
+  }
 
   /**
    * In this testcase, client is dataNodes[0]. So the 1st replica should be

@@ -40,7 +40,7 @@ public class BlockPlacementPolicyWithNodeGroup extends BlockPlacementPolicyDefau
 
   public void initialize(Configuration conf,  FSClusterStats stats,
           NetworkTopology clusterMap) {
-	super.initialize(conf, stats, clusterMap);
+    super.initialize(conf, stats, clusterMap);
   }
 
   /* choose <i>localMachine</i> as the target.

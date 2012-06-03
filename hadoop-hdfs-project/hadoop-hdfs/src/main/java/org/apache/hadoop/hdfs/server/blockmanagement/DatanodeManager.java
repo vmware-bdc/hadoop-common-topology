@@ -219,7 +219,7 @@ public class DatanodeManager {
   public void sortLocatedBlocks(final String targethost,
       final List<LocatedBlock> locatedblocks) {
     //sort the blocks
-	// As it is possible for the separation of node manager and datanode, here we should get node but not datanode only .
+    // As it is possible for the separation of node manager and datanode, here we should get node but not datanode only .
     Node client = getDatanodeByHost(targethost);
     if (client == null) {
       List<String> hosts = new ArrayList<String> (1);

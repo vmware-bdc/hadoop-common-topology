@@ -1038,7 +1038,6 @@ public class MiniDFSCluster {
         String name = hosts[i - curDatanodesNum];
         LOG.info("Adding node with hostname : " + name + " to rack " +
                             racks[i-curDatanodesNum]);
-        // TODO need to change for vNetworkTopology
         StaticMapping.addNodeToRack(name,
                                     racks[i-curDatanodesNum]);
       }

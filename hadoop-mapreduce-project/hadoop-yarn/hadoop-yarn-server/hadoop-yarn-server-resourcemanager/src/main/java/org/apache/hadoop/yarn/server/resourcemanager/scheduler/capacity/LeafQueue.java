@@ -126,7 +126,7 @@ public class LeafQueue implements CSQueue {
   
   private final ActiveUsersManager activeUsersManager;
   
-  public LeafQueue(CapacitySchedulerContext cs,
+  public LeafQueue(CapacitySchedulerContext cs, 
       String queueName, CSQueue parent, 
       Comparator<SchedulerApp> applicationComparator, CSQueue old) {
     this.scheduler = cs;
@@ -135,8 +135,8 @@ public class LeafQueue implements CSQueue {
     // must be after parent and queueName are initialized
     this.metrics = old != null ? old.getMetrics() :
         QueueMetrics.forQueue(getQueuePath(), parent,
-			      cs.getConfiguration().getEnableUserMetrics(),
-			      cs.getConf());
+        cs.getConfiguration().getEnableUserMetrics(),
+        cs.getConf());
     this.activeUsersManager = new ActiveUsersManager(metrics);
     this.minimumAllocation = cs.getMinimumResourceCapability();
     this.maximumAllocation = cs.getMaximumResourceCapability();

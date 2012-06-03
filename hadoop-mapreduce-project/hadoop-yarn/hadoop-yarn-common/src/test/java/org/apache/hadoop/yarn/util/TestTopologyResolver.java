@@ -25,7 +25,7 @@ import org.junit.Test;
 
 public class TestTopologyResolver {
   private static boolean withNodeGroup;
-  
+
   @Test
   public void testResolverWithoutNodeGroup() {
     String host1 = "h1";
@@ -38,13 +38,13 @@ public class TestTopologyResolver {
 
   @Test
   public void testResolverWithNodeGroup() {
-	String host1 = "h1";
-	String rack1 = "/rack1";
-	String nodegroup1 = "/nodegroup1";
-	withNodeGroup = true;
-	Node node1 = new NodeBase(host1, rack1 + nodegroup1);
-	Assert.assertTrue("Get rack failed.", rack1.equals(TopologyResolver.getRack(node1, withNodeGroup)));
-	Assert.assertTrue("Get nodegroup failed.", nodegroup1.equals(TopologyResolver.getNodeGroup(node1, withNodeGroup)));
+    String host1 = "h1";
+    String rack1 = "/rack1";
+    String nodegroup1 = "/nodegroup1";
+    withNodeGroup = true;
+    Node node1 = new NodeBase(host1, rack1 + nodegroup1);
+    Assert.assertTrue("Get rack failed.", rack1.equals(TopologyResolver.getRack(node1, withNodeGroup)));
+    Assert.assertTrue("Get nodegroup failed.", nodegroup1.equals(TopologyResolver.getNodeGroup(node1, withNodeGroup)));
   }
 
 }

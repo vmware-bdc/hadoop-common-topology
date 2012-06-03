@@ -155,26 +155,25 @@ public class TestUtils {
   }
   
   public static SchedulerNode getMockVNode(
-	  String host, String nodegroup, String rack, int port, int capability) {
-	NodeId nodeId = mock(NodeId.class);
-	when(nodeId.getHost()).thenReturn(host);
-	when(nodeId.getPort()).thenReturn(port);
-	
-	
-	RMNodeImplWithNodeGroup rmNode = mock(RMNodeImplWithNodeGroup.class);
-	when(rmNode.getNodeID()).thenReturn(nodeId);
-	when(rmNode.getTotalCapability()).thenReturn(
-	    Resources.createResource(capability));
-	when(rmNode.getNodeAddress()).thenReturn(host+":"+port);
-	when(rmNode.getHostName()).thenReturn(host);
-	when(rmNode.getNodeGroupName()).thenReturn(nodegroup);
-	when(rmNode.getRackName()).thenReturn(rack);
-	    
-	SchedulerNodeWithNodeGroup node = spy(new SchedulerNodeWithNodeGroup(rmNode));
-	LOG.info("node = " + host + " avail=" + node.getAvailableResource());
-	return node;
+      String host, String nodegroup, String rack, int port, int capability) {
+    NodeId nodeId = mock(NodeId.class);
+    when(nodeId.getHost()).thenReturn(host);
+    when(nodeId.getPort()).thenReturn(port);
+
+    RMNodeImplWithNodeGroup rmNode = mock(RMNodeImplWithNodeGroup.class);
+    when(rmNode.getNodeID()).thenReturn(nodeId);
+    when(rmNode.getTotalCapability()).thenReturn(
+        Resources.createResource(capability));
+    when(rmNode.getNodeAddress()).thenReturn(host+":"+port);
+    when(rmNode.getHostName()).thenReturn(host);
+    when(rmNode.getNodeGroupName()).thenReturn(nodegroup);
+    when(rmNode.getRackName()).thenReturn(rack);
+        
+    SchedulerNodeWithNodeGroup node = spy(new SchedulerNodeWithNodeGroup(rmNode));
+    LOG.info("node = " + host + " avail=" + node.getAvailableResource());
+    return node;
   }
-  
+
   public static ContainerId getMockContainerId(SchedulerApp application) {
     ContainerId containerId = mock(ContainerId.class);
     doReturn(application.getApplicationAttemptId()).
@@ -182,7 +181,7 @@ public class TestUtils {
     doReturn(application.getNewContainerId()).when(containerId).getId();
     return containerId;
   }
-  
+
   public static Container getMockContainer(
       ContainerId containerId, NodeId nodeId, 
       Resource resource, Priority priority) {

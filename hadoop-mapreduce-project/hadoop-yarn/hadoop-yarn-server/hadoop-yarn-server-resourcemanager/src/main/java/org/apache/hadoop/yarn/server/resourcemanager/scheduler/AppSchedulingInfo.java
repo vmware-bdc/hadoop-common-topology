@@ -301,23 +301,23 @@ public class AppSchedulingInfo {
     nodegroupLocalRequest.setNumContainers(nodegroupLocalRequest.getNumContainers() - 1);
     if (nodegroupLocalRequest.getNumContainers() == 0) {
       if (!node.isNodeGroupAware())
-    	throw new RuntimeException("Node type exception for node: " + node.getNodeID());
+        throw new RuntimeException("Node type exception for node: " + node.getNodeID());
       this.requests.get(priority).remove(node.getNodeGroupName());
     }
-    
+
     ResourceRequest rackLocalRequest = requests.get(priority).get(
         node.getRackName());
     rackLocalRequest.setNumContainers(rackLocalRequest.getNumContainers() - 1);
     if (rackLocalRequest.getNumContainers() == 0) {
       this.requests.get(priority).remove(node.getRackName());
     }
-    
+
     // Do not remove ANY
     ResourceRequest offSwitchRequest = requests.get(priority).get(
         RMNode.ANY);
     offSwitchRequest.setNumContainers(offSwitchRequest.getNumContainers() - 1);
   }
-  
+
   /**
    * The {@link ResourceScheduler} is allocating rack-local resources to the
    * application.

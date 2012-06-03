@@ -50,7 +50,7 @@ import com.google.common.annotations.VisibleForTesting;
  */
 @InterfaceAudience.Private
 public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
-  protected boolean considerLoad; 
+  protected boolean considerLoad;
   private boolean preferLocalNode = true;
   protected NetworkTopology clusterMap;
   private FSClusterStats stats;

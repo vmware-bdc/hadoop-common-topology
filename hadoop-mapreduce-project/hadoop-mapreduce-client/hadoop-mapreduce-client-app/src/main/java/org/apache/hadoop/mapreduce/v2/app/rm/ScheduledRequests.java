@@ -38,10 +38,7 @@ import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.util.RackResolver;
 
 public class ScheduledRequests {
-    
-  /**
-   * 
-   */
+
   protected final RMContainerAllocator rmContainerAllocator;
 
   /**
@@ -72,7 +69,7 @@ public class ScheduledRequests {
     } else {
       req = reduces.remove(tId);
     }
-      
+
     if (req == null) {
       return false;
     } else {
@@ -80,7 +77,7 @@ public class ScheduledRequests {
       return true;
     }
   }
-    
+
   ContainerRequest removeReduce() {
     Iterator<Entry<TaskAttemptId, ContainerRequest>> it = reduces.entrySet().iterator();
     if (it.hasNext()) {
@@ -91,7 +88,7 @@ public class ScheduledRequests {
     }
     return null;
   }
-    
+
   void addMap(ContainerRequestEvent event) {
     ContainerRequest request = null;
       
@@ -134,7 +131,8 @@ public class ScheduledRequests {
     this.rmContainerAllocator.addContainerReq(req);
   }
     
-  @SuppressWarnings("unchecked") void assign(List<Container> allocatedContainers) {
+  @SuppressWarnings("unchecked") 
+  void assign(List<Container> allocatedContainers) {
     Iterator<Container> it = allocatedContainers.iterator();
     RMContainerAllocator.LOG.info("Got allocated containers " + allocatedContainers.size());
     this.rmContainerAllocator.containersAllocated += allocatedContainers.size();
@@ -145,7 +143,7 @@ public class ScheduledRequests {
             + " with priority " + allocated.getPriority() + " to NM "
             + allocated.getNodeId());
       }
-        
+
       // check if allocated container meets memory requirements 
       // and whether we have any scheduled tasks that need 
       // a container to be assigned
@@ -163,7 +161,7 @@ public class ScheduledRequests {
               + maps.isEmpty()); 
           isAssignable = false; 
         }
-      } 
+      }
       else if (RMContainerAllocator.PRIORITY_REDUCE.equals(priority)) {
         if (allocatedMemory < this.rmContainerAllocator.reduceResourceReqt
             || reduces.isEmpty()) {
@@ -174,11 +172,11 @@ public class ScheduledRequests {
               + reduces.isEmpty()); 
           isAssignable = false;
         }
-      }          
-        
-      boolean blackListed = false;         
+      }
+
+      boolean blackListed = false;
       ContainerRequest assigned = null;
-        
+
       ContainerId allocatedContainerId = allocated.getId();
       if (isAssignable) {
         // do not assign if allocated container is on a  
@@ -242,7 +240,7 @@ public class ScheduledRequests {
           }
         }
       }
-        
+
       // release container if it was blacklisted 
       // or if we could not assign it 
       if (blackListed || assigned == null) {
@@ -251,10 +249,10 @@ public class ScheduledRequests {
       }
     }
   }
-    
+
   private ContainerRequest assign(Container allocated) {
     ContainerRequest assigned = null;
-      
+
     Priority priority = allocated.getPriority();
     if (RMContainerAllocator.PRIORITY_FAST_FAIL_MAP.equals(priority)) {
       RMContainerAllocator.LOG.info("Assigning container " + allocated + " to fast fail map");
@@ -273,10 +271,9 @@ public class ScheduledRequests {
       RMContainerAllocator.LOG.warn("Container allocated at unwanted priority: " + priority + 
           ". Returning to RM...");
     }
-    
     return assigned;
   }
-    
+
   private ContainerRequest getContainerReqToReplace(Container allocated) {
     RMContainerAllocator.LOG.info("Finding containerReq for allocated container: " + allocated);
     Priority priority = allocated.getPriority();
@@ -303,18 +300,17 @@ public class ScheduledRequests {
       }
       else {
         TaskAttemptId tId = maps.keySet().iterator().next();
-        toBeReplaced = maps.remove(tId);          
-      }        
+        toBeReplaced = maps.remove(tId);
+      }
     }
     else if (RMContainerAllocator.PRIORITY_REDUCE.equals(priority)) {
       TaskAttemptId tId = reduces.keySet().iterator().next();
-      toBeReplaced = reduces.remove(tId);    
+      toBeReplaced = reduces.remove(tId);
     }
     RMContainerAllocator.LOG.info("Found replacement: " + toBeReplaced);
     return toBeReplaced;
   }
-    
-    
+
   @SuppressWarnings("unchecked")
   private ContainerRequest assignToFailedMap(Container allocated) {
     //try to assign to earlierFailedMaps if present
@@ -333,7 +329,7 @@ public class ScheduledRequests {
     }
     return assigned;
   }
-    
+
   private ContainerRequest assignToReduce(Container allocated) {
     ContainerRequest assigned = null;
     //try to assign to reduces if present
@@ -344,7 +340,7 @@ public class ScheduledRequests {
     }
     return assigned;
   }
-    
+
   @SuppressWarnings("unchecked")
   protected ContainerRequest assignToMap(Container allocated) {
     //try to assign to maps if present 

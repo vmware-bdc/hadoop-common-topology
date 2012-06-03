@@ -102,7 +102,7 @@ class InnerNode extends NodeBase {
       name = name.substring(0, index);
     return name;
   }
-      
+
   /** Add node <i>n</i> to the subtree of this node 
    * @param n node to be added
    * @return true if the node is added; false otherwise
@@ -137,7 +137,7 @@ class InnerNode extends NodeBase {
       }
       if (parentNode == null) {
         // create a new InnerNode
-        parentNode = doCreateParentNode(parentName);
+        parentNode = createParentNode(parentName);
         children.add(parentNode);
       }
       // add n to the subtree of the next ancestor node
@@ -162,8 +162,8 @@ class InnerNode extends NodeBase {
    * @return A new inner node
    * @see InnerNode#InnerNode(String, String, InnerNode, int)
    */
-  protected InnerNode doCreateParentNode(String parentName) {
-	return new InnerNode(parentName, getPath(this), this, this.getLevel()+1);
+  protected InnerNode createParentNode(String parentName) {
+    return new InnerNode(parentName, getPath(this), this, this.getLevel()+1);
   }
       
   /** Remove node <i>n</i> from the subtree of this node
@@ -214,7 +214,7 @@ class InnerNode extends NodeBase {
       return isRemoved;
     }
   } // end of remove
-      
+
   /** Given a node's string representation, return a reference to the node
    * @param loc string location of the form /rack/node
    * @return null if the node is not found or the childnode is there but
@@ -222,7 +222,7 @@ class InnerNode extends NodeBase {
    */
   Node getLoc(String loc) {
     if (loc == null || loc.length() == 0) return this;
-          
+
     String[] path = loc.split(PATH_SEPARATOR_STR, 2);
     Node childnode = null;
     for(int i=0; i<children.size(); i++) {
@@ -238,7 +238,7 @@ class InnerNode extends NodeBase {
       return null;
     }
   }
-      
+
   /** get <i>leafIndex</i> leaf of this subtree 
    * if it is not in the <i>excludedNode</i>
    *
@@ -254,7 +254,7 @@ class InnerNode extends NodeBase {
     // calculate the total number of excluded leaf nodes
     int numOfExcludedLeaves =
       isLeaf ? 1 : ((InnerNode)excludedNode).getNumOfLeaves();
-    if (doAreChildrenLeaves()) { // children are leaves
+    if (areChildrenLeaves()) { // children are leaves
       if (isLeaf) { // excluded node is a leaf node
         int excludedIndex = children.indexOf(excludedNode);
         if (excludedIndex != -1 && leafIndex >= 0) {
@@ -291,7 +291,7 @@ class InnerNode extends NodeBase {
       return null;
     }
   }
-      
+
   /**
    * Determine if children a leaves, default implementation calls {@link #isRack()}
    * 
@@ -301,8 +301,8 @@ class InnerNode extends NodeBase {
    * @return true if children are leaves, false otherwise
    * 
    */
-  protected boolean doAreChildrenLeaves() {
-	return isRack();
+  protected boolean areChildrenLeaves() {
+    return isRack();
   }
 
   int getNumOfLeaves() {

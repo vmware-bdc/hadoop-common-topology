@@ -32,38 +32,38 @@ public class FifoSchedulerWithNodeGroup extends FifoScheduler {
   protected int assignContainersOnNode(SchedulerNode node, 
       SchedulerApp application, Priority priority) {
     // Data-local
-	int nodeLocalContainers = 
-	    assignNodeLocalContainers(node, application, priority);
-	
-	// NodeGroup-local
-	int nodegroupLocalContainers = 
-	  assignNodeGroupLocalContainers(node, application, priority);
-		    
+    int nodeLocalContainers = 
+        assignNodeLocalContainers(node, application, priority);
+
+    // NodeGroup-local
+    int nodegroupLocalContainers = 
+      assignNodeGroupLocalContainers(node, application, priority);
+
     // Rack-local
-	int rackLocalContainers = 
-	    assignRackLocalContainers(node, application, priority);
+    int rackLocalContainers = 
+        assignRackLocalContainers(node, application, priority);
 
     // Off-switch
     int offSwitchContainers =
-	    assignOffSwitchContainers(node, application, priority);
+        assignOffSwitchContainers(node, application, priority);
     LOG.debug("assignContainersOnNode:" +
         " node=" + node.getRMNode().getNodeAddress() + 
-		" application=" + application.getApplicationId().getId() +
-		" priority=" + priority.getPriority() + 
-		" #assigned=" + 
-		(nodeLocalContainers + + nodegroupLocalContainers + 
-		    rackLocalContainers + offSwitchContainers));
+        " application=" + application.getApplicationId().getId() +
+        " priority=" + priority.getPriority() + 
+        " #assigned=" + 
+        (nodeLocalContainers + + nodegroupLocalContainers + 
+            rackLocalContainers + offSwitchContainers));
     return (nodeLocalContainers + nodegroupLocalContainers
         + rackLocalContainers + offSwitchContainers);
   }
-  
+
   private int assignNodeGroupLocalContainers(SchedulerNode node, 
-	  SchedulerApp application, Priority priority) {
+      SchedulerApp application, Priority priority) {
     int assignedContainers = 0;
     if (!node.isNodeGroupAware()) {
-	  return 0;
+      return 0;
     }
-	if (node.getNodeGroupName() == null)
+    if (node.getNodeGroupName() == null)
       return 0;
     ResourceRequest request = 
         application.getResourceRequest(priority, node.getNodeGroupName());
@@ -74,7 +74,7 @@ public class FifoSchedulerWithNodeGroup extends FifoScheduler {
     if (rackRequest.getNumContainers() <= 0) {
       return 0;
     }
-		      
+
     int assignableContainers = 
         Math.min(
             getMaxAllocatableContainers(application, priority, node, 
@@ -86,9 +86,10 @@ public class FifoSchedulerWithNodeGroup extends FifoScheduler {
     }
     return assignedContainers;
   }
+
   @Override
   protected synchronized void addNode(RMNode nodeManager) {
-	this.nodes.put(nodeManager.getNodeID(), new SchedulerNodeWithNodeGroup(nodeManager));
+    this.nodes.put(nodeManager.getNodeID(), new SchedulerNodeWithNodeGroup(nodeManager));
     Resources.addTo(clusterResource, nodeManager.getTotalCapability());
   }
 }

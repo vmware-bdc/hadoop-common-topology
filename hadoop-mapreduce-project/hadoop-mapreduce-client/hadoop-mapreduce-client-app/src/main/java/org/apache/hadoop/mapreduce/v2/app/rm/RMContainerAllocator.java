@@ -131,9 +131,6 @@ public class RMContainerAllocator extends RMContainerRequestor
   private float reduceSlowStart = 0;
   private long retryInterval;
   private long retrystartTime;
-/*  
-  // Mark if cluster is deployed on environment with nodegroup layer in topology, default is not
-  boolean topologyWithNodeGroup = false;*/
 
   BlockingQueue<ContainerAllocatorEvent> eventQueue
     = new LinkedBlockingQueue<ContainerAllocatorEvent>();

@@ -60,7 +60,7 @@ import org.mockito.stubbing.Answer;
 
 public class TestLeafQueueWithNodeGroup {
   private static final Log LOG = LogFactory.getLog(TestLeafQueue.class);
-  
+
   private final RecordFactory recordFactory = 
       RecordFactoryProvider.getRecordFactory(null);
 
@@ -68,10 +68,10 @@ public class TestLeafQueueWithNodeGroup {
   CapacityScheduler cs;
   CapacitySchedulerConfiguration csConf;
   CapacitySchedulerContext csContext;
-  
+
   CSQueue root;
   Map<String, CSQueue> queues = new HashMap<String, CSQueue>();
-  
+
   final static int GB = 1024;
   final static String DEFAULT_RACK = "/default";
 
@@ -79,14 +79,14 @@ public class TestLeafQueueWithNodeGroup {
   public void setUp() throws Exception {
     cs = new CapacityScheduler();
     rmContext = TestUtils.getMockRMContext();
-    
+
     csConf = 
         new CapacitySchedulerConfiguration();
     csConf.setBoolean("yarn.scheduler.capacity.user-metrics.enable", true);
     setupQueueConfiguration(csConf);
     YarnConfiguration conf = new YarnConfiguration();
     cs.setConf(conf);
-    
+
     csContext = mock(CapacitySchedulerContext.class);
     when(csContext.getConf()).thenReturn(conf);
     when(csContext.getConfiguration()).thenReturn(csConf);
@@ -105,17 +105,17 @@ public class TestLeafQueueWithNodeGroup {
 
     cs.reinitialize(csConf, null, rmContext);
   }
-  
+
   private static final String A = "a";
   private static final String B = "b";
   private void setupQueueConfiguration(CapacitySchedulerConfiguration conf) {
-	// Set related implementation classes with NodeGroup.
+    // Set related implementation classes with NodeGroup.
     conf.set(CommonConfigurationKeysPublic.NET_TOPOLOGY_WITH_NODEGROUP, "true");
-	conf.set(YarnConfiguration.RM_SCHEDULED_REQUESTS_CLASS_KEY, 
+    conf.set(YarnConfiguration.RM_SCHEDULED_REQUESTS_CLASS_KEY, 
         "org.apache.hadoop.mapreduce.v2.app.rm.ScheduledRequests");
-	conf.set(YarnConfiguration.RM_SCHEDULER_NODE_CLASS_KEY, 
+    conf.set(YarnConfiguration.RM_SCHEDULER_NODE_CLASS_KEY, 
         "org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNodeWithNodeGroup");
-	conf.set(YarnConfiguration.RM_CAPACITY_SCHEDULER_LEAFQUEUE_CLASS_KEY, 
+    conf.set(YarnConfiguration.RM_CAPACITY_SCHEDULER_LEAFQUEUE_CLASS_KEY, 
         "org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.LeafQueueWithNodeGroup");
 
     // Define top-level queues
@@ -161,7 +161,7 @@ public class TestLeafQueueWithNodeGroup {
               any(Resource.class),
               any(Priority.class)
               );
-    
+
     // 2. Stub out LeafQueue.parent.completedContainer
     CSQueue parent = queue.getParent();
     doNothing().when(parent).completedContainer(
@@ -171,7 +171,7 @@ public class TestLeafQueueWithNodeGroup {
     
     return queue;
   }
-  
+
   @Test
   public void testLocalitySchedulingWithNodeGroup() throws Exception {
     // Manipulate queue 'a'
@@ -179,21 +179,21 @@ public class TestLeafQueueWithNodeGroup {
 
     // User
     String user_0 = "user_0";
-    
+
     // Submit applications
     final ApplicationAttemptId appAttemptId_0 = 
         TestUtils.getMockApplicationAttemptId(0, 0); 
     SchedulerApp app_0 = 
         spy(new SchedulerApp(appAttemptId_0, user_0, a, 
-        		mock(ActiveUsersManager.class), rmContext, null));
+                mock(ActiveUsersManager.class), rmContext, null));
     a.submitApplication(app_0, user_0, A);
-    
+
     // Setup some nodes, nodegroups and racks
     String host_0 = "host_0";
     String rack_0 = "rack_0";
     String nodegroup_0 = "nodegroup_0";
     SchedulerNode node_0 = TestUtils.getMockVNode(host_0, nodegroup_0, rack_0, 0, 8*GB);
-    
+
     String host_1 = "host_1";
     String rack_1 = "rack_1";
     String nodegroup_1 = "nodegroup_1";
@@ -202,7 +202,7 @@ public class TestLeafQueueWithNodeGroup {
     final int numNodes = 3;
     Resource clusterResource = Resources.createResource(numNodes * (8*GB));
     when(csContext.getNumClusterNodes()).thenReturn(numNodes);
-    
+
     // Setup resource-requests and submit
     Priority priority = TestUtils.createMockPriority(1);
     List<ResourceRequest> app_0_requests_0 = new ArrayList<ResourceRequest>();
@@ -228,21 +228,21 @@ public class TestLeafQueueWithNodeGroup {
         TestUtils.createResourceRequest(RMNodeImpl.ANY, 1*GB, 3, // one extra 
             priority, recordFactory));
     app_0.updateResourceRequests(app_0_requests_0);
-    
-    // NODE_LOCAL - node_0    
+
+    // NODE_LOCAL - node_0
     a.assignContainers(clusterResource, node_0);
     verify(app_0).allocate(eq(NodeType.NODE_LOCAL), eq(node_0), 
         any(Priority.class), any(ResourceRequest.class), any(Container.class));
     assertEquals(0, app_0.getSchedulingOpportunities(priority)); // should reset
     assertEquals(2, app_0.getTotalRequiredResources(priority));
-    
+
     // NODE_LOCAL - node_1
     a.assignContainers(clusterResource, node_1);
     verify(app_0).allocate(eq(NodeType.NODE_LOCAL), eq(node_1), 
         any(Priority.class), any(ResourceRequest.class), any(Container.class));
     assertEquals(0, app_0.getSchedulingOpportunities(priority)); // should reset
     assertEquals(1, app_0.getTotalRequiredResources(priority));
-    
+
     // Add 2 more request to check for NodeGroup_LOCAL and Rack_LOCAL
     app_0_requests_0.clear();
     app_0_requests_0.add(
@@ -259,17 +259,17 @@ public class TestLeafQueueWithNodeGroup {
             priority, recordFactory));
     app_0.updateResourceRequests(app_0_requests_0);
     assertEquals(1, app_0.getTotalRequiredResources(priority));
-    
+
     String host_2 = "host_2"; // on nodegroup_1
     SchedulerNode node_2 = TestUtils.getMockVNode(host_2, nodegroup_1, rack_1, 0, 8*GB);
-    
+
     a.assignContainers(clusterResource, node_2);
     // Check NodeGroup-LOCAL scheduling
     verify(app_0).allocate(eq(NodeType.NODEGROUP_LOCAL), eq(node_2), 
         any(Priority.class), any(ResourceRequest.class), any(Container.class));
     assertEquals(0, app_0.getSchedulingOpportunities(priority)); // should reset
     assertEquals(0, app_0.getTotalRequiredResources(priority));
-    
+
     app_0_requests_0.clear();
     app_0_requests_0.add(
         TestUtils.createResourceRequest(host_1, 1*GB, 1, 
@@ -285,10 +285,10 @@ public class TestLeafQueueWithNodeGroup {
             priority, recordFactory));
     app_0.updateResourceRequests(app_0_requests_0);
     assertEquals(1, app_0.getTotalRequiredResources(priority));
-    
+
     String host_3 = "host_3"; // on nodegroup_1
     SchedulerNode node_3 = TestUtils.getMockVNode(host_3, nodegroup_0, rack_1, 0, 8*GB);
-    
+
     a.assignContainers(clusterResource, node_3);
     // Check RACK-LOCAL scheduling
     verify(app_0).allocate(eq(NodeType.RACK_LOCAL), eq(node_3), 
@@ -296,7 +296,7 @@ public class TestLeafQueueWithNodeGroup {
     assertEquals(0, app_0.getSchedulingOpportunities(priority)); // should reset
     assertEquals(0, app_0.getTotalRequiredResources(priority));
   }
-  
+
   @After
   public void tearDown() throws Exception {
   }

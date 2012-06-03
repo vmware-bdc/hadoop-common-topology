@@ -28,17 +28,17 @@ public class RMNodeImplWithNodeGroup extends RMNodeImpl {
 
   public RMNodeImplWithNodeGroup(NodeId nodeId, RMContext context,
       String hostName, int cmPort, int httpPort, Node node,
-	      Resource capability) {
+          Resource capability) {
     super(nodeId, context, hostName, cmPort, httpPort, node, capability);
   }
-  
+
   @Override
   public String getRackName() {
     return TopologyResolver.getRack(node, true);
   }
-  
+
   public String getNodeGroupName() {
-	return TopologyResolver.getNodeGroup(node, true);
+    return TopologyResolver.getNodeGroup(node, true);
   }
 
 }
