@@ -35,18 +35,26 @@ import java.util.*;
  * which is on the same rack as the second replica.
  */
 class ReplicationTargetChooser {
-  private final boolean considerLoad; 
-  private NetworkTopology clusterMap;
+  private boolean considerLoad; 
+  protected NetworkTopology clusterMap;
   private FSNamesystem fs;
-    
+  
+  ReplicationTargetChooser() {
+  }
+  
   ReplicationTargetChooser(boolean considerLoad,  FSNamesystem fs,
                            NetworkTopology clusterMap) {
+    initialize(considerLoad, fs, clusterMap);
+  }
+    
+  public void initialize(boolean considerLoad, FSNamesystem fs,
+      NetworkTopology clusterMap) {
     this.considerLoad = considerLoad;
     this.fs = fs;
     this.clusterMap = clusterMap;
   }
-    
-  private static class NotEnoughReplicasException extends Exception {
+
+protected static class NotEnoughReplicasException extends Exception {
     NotEnoughReplicasException(String msg) {
       super(msg);
     }
@@ -83,8 +91,8 @@ class ReplicationTargetChooser {
    * 
    * @param numOfReplicas: additional number of replicas wanted.
    * @param writer: the writer's machine, null if not in the cluster.
-   * @param choosenNodes: datanodes that have been choosen as targets.
-   * @param excludedNodes: datanodesthat should not be considered targets.
+   * @param choosenNodes: datanodes that have been chosen as targets.
+   * @param excludedNodes: datanodes that should not be considered targets.
    * @param blocksize: size of the data to be written.
    * @return array of DatanodeDescriptor instances chosen as target 
    * and sorted as a pipeline.
@@ -188,9 +196,9 @@ class ReplicationTargetChooser {
   }
     
   /* choose <i>localMachine</i> as the target.
-   * if <i>localMachine</i> is not availabe, 
+   * if <i>localMachine</i> is not available, 
    * choose a node on the same rack
-   * @return the choosen node
+   * @return the chosen node
    */
   private DatanodeDescriptor chooseLocalNode(
                                              DatanodeDescriptor localMachine,
@@ -213,20 +221,35 @@ class ReplicationTargetChooser {
         return localMachine;
       }
     } 
-      
+    // if local machine is not available, try node with other locality, i.e
+    // local rack
+    return chooseOtherLocalityNode(localMachine, excludedNodes, blocksize,
+        maxNodesPerRack, results);
+  }
+
+  /** Choose node with other locality other than <i>localMachine</i>.
+   * As there is no local node is available, choose one node with nearest 
+   * locality.
+   * Default to be local rack, but could be overridden in sub-class for other 
+   * localities.
+   * @return the chosen node
+   */
+  protected DatanodeDescriptor chooseOtherLocalityNode(DatanodeDescriptor localMachine,
+      List<Node> excludedNodes, long blocksize, int maxNodesPerRack,
+      List<DatanodeDescriptor> results) throws NotEnoughReplicasException {
     // try a node on local rack
     return chooseLocalRack(localMachine, excludedNodes, 
-                           blocksize, maxNodesPerRack, results);
+        blocksize, maxNodesPerRack, results);
   }
-    
+
   /* choose one node from the rack that <i>localMachine</i> is on.
-   * if no such node is availabe, choose one node from the rack where
+   * if no such node is available, choose one node from the rack where
    * a second replica is on.
    * if still no such node is available, choose a random node 
    * in the cluster.
-   * @return the choosen node
+   * @return the chosen node
    */
-  private DatanodeDescriptor chooseLocalRack(
+  protected DatanodeDescriptor chooseLocalRack(
                                              DatanodeDescriptor localMachine,
                                              List<Node> excludedNodes,
                                              long blocksize,
@@ -275,11 +298,11 @@ class ReplicationTargetChooser {
     
   /* choose <i>numOfReplicas</i> nodes from the racks 
    * that <i>localMachine</i> is NOT on.
-   * if not enough nodes are availabe, choose the remaining ones 
+   * if not enough nodes are available, choose the remaining ones 
    * from the local rack
    */
     
-  private void chooseRemoteRack(int numOfReplicas,
+  protected void chooseRemoteRack(int numOfReplicas,
                                 DatanodeDescriptor localMachine,
                                 List<Node> excludedNodes,
                                 long blocksize,
@@ -299,9 +322,9 @@ class ReplicationTargetChooser {
   }
 
   /* Randomly choose one target from <i>nodes</i>.
-   * @return the choosen node
+   * @return the chosen node
    */
-  private DatanodeDescriptor chooseRandom(
+  protected DatanodeDescriptor chooseRandom(
                                           String nodes,
                                           List<Node> excludedNodes,
                                           long blocksize,
@@ -324,7 +347,7 @@ class ReplicationTargetChooser {
     
   /* Randomly choose <i>numOfReplicas</i> targets from <i>nodes</i>.
    */
-  private void chooseRandom(int numOfReplicas,
+  protected void chooseRandom(int numOfReplicas,
                             String nodes,
                             List<Node> excludedNodes,
                             long blocksize,
@@ -354,7 +377,7 @@ class ReplicationTargetChooser {
   }
     
   /* Randomly choose <i>numOfNodes</i> nodes from <i>scope</i>.
-   * @return the choosen nodes
+   * @return the chosen nodes
    */
   private DatanodeDescriptor[] chooseRandom(int numOfReplicas, 
                                             String nodes,
