@@ -342,7 +342,7 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean, FSClusterSt
   private Host2NodesMap host2DataNodeMap = new Host2NodesMap();
     
   // datanode networktoplogy
-  NetworkTopology clusterMap = new NetworkTopology();
+  NetworkTopology clusterMap;
   private DNSToSwitchMapping dnsToSwitchMapping;
   
   // for block replicas placement
@@ -431,6 +431,10 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean, FSClusterSt
         conf.getInt("dfs.namenode.decommission.nodes.per.interval", 5)));
     dnthread.start();
 
+    this.clusterMap = (NetworkTopology) ReflectionUtils.newInstance(
+        conf.getClass("net.topology.impl", NetworkTopology.class,
+            NetworkTopology.class), conf);
+    
     this.dnsToSwitchMapping = ReflectionUtils.newInstance(
         conf.getClass("topology.node.switch.mapping.impl", ScriptBasedMapping.class,
             DNSToSwitchMapping.class), conf);
@@ -931,8 +935,17 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean, FSClusterSt
         true);
     if (blocks != null) {
       //sort the blocks
-      DatanodeDescriptor client = host2DataNodeMap.getDatanodeByHost(
+      // As it is possible for the separation of node manager and datanode, 
+      // here we should get node but not datanode only .
+      Node client = host2DataNodeMap.getDatanodeByHost(
           clientMachine);
+      if (client == null) {
+          List<String> hosts = new ArrayList<String> (1);
+          hosts.add(clientMachine);
+          String rName = dnsToSwitchMapping.resolve(hosts).get(0);
+          if (rName != null)
+            client = new NodeBase(clientMachine, rName);
+        }
       for (LocatedBlock b : blocks.getLocatedBlocks()) {
         clusterMap.pseudoSortByDistance(client, b.getLocations());
       }
