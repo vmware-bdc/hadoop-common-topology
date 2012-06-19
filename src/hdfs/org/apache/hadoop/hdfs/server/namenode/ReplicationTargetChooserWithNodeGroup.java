@@ -130,7 +130,11 @@ public class ReplicationTargetChooserWithNodeGroup extends
     // Nodes under same nodegroup should be excluded.
     String nodeGroupScope = localMachine.getNetworkLocation();
     List<Node> leafNodes = clusterMap.getLeaves(nodeGroupScope);
-    excludedNodes.addAll(leafNodes);
+    for (Node leafNode:leafNodes) {
+      if (!excludedNodes.contains(leafNode)) {
+        excludedNodes.add(leafNode);
+      }
+    }
     // choose one from the local rack, but off-nodegroup
     try {
       return chooseRandom(TopologyResolver.getRack(localMachine.getNetworkLocation(), true),

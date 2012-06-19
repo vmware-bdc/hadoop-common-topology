@@ -47,7 +47,6 @@ import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
-import java.util.Map.Entry;
 import java.util.concurrent.TimeUnit;
 
 import javax.management.NotCompliantMBeanException;
@@ -420,10 +419,6 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
         conf.getInt("dfs.namenode.decommission.interval", 30),
         conf.getInt("dfs.namenode.decommission.nodes.per.interval", 5)));
     dnthread.start();
-
-    this.clusterMap = (NetworkTopology) ReflectionUtils.newInstance(
-        conf.getClass("net.topology.impl", NetworkTopology.class,
-            NetworkTopology.class), conf);
     
     this.dnsToSwitchMapping = ReflectionUtils.newInstance(
         conf.getClass("topology.node.switch.mapping.impl", ScriptBasedMapping.class,
@@ -494,6 +489,10 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean,
     this.defaultPermission = PermissionStatus.createImmutable(
         fsOwner.getShortUserName(), supergroup, new FsPermission(filePermission));
 
+    this.clusterMap = (NetworkTopology) ReflectionUtils.newInstance(
+            conf.getClass("net.topology.impl", NetworkTopology.class,
+                NetworkTopology.class), conf);
+    
     this.replicator = ReflectionUtils.newInstance(
         conf.getClass("dfs.block.replicator.classname", ReplicationTargetChooser.class,
             ReplicationTargetChooser.class), conf);

@@ -398,7 +398,7 @@ protected static class NotEnoughReplicasException extends Exception {
       }
     }
     return (DatanodeDescriptor[])results.toArray(
-                                                 new DatanodeDescriptor[results.size()]);    
+                                                 new DatanodeDescriptor[results.size()]);
   }
     
   /* judge if a node is a good target.
@@ -448,7 +448,7 @@ protected static class NotEnoughReplicasException extends Exception {
     }
       
     // check if the target rack has chosen too many nodes
-    String rackname = node.getNetworkLocation();
+    String rackname = getRack(node);
     int counter=1;
     for(Iterator<DatanodeDescriptor> iter = results.iterator();
         iter.hasNext();) {
