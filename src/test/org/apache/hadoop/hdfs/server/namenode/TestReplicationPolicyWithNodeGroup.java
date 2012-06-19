@@ -30,7 +30,7 @@ import junit.framework.TestCase;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.DFSTestUtil;
+import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.FSConstants;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
@@ -44,7 +44,7 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
   private static final Configuration CONF = new Configuration();
   private static final NetworkTopology cluster;
   private static final NameNode namenode;
-  private static final ReplicationTargetChooser replicator;
+  private static final BlockPlacementPolicy replicator;
   private static final String filename = "/dummyfile.txt";
 
   private final static DatanodeDescriptor dataNodes[] = new DatanodeDescriptor[] {
@@ -67,8 +67,8 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
       CONF.set(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY, "0.0.0.0:0");
       // Set properties to make HDFS aware of NodeGroup.
       CONF.set("dfs.block.replicator.classname", 
-          "org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyWithNodeGroup");
-      CONF.set("net.topology.imple", 
+          "org.apache.hadoop.hdfs.server.namenode.BlockPlacementPolicyWithNodeGroup");
+      CONF.set("net.topology.impl", 
           "org.apache.hadoop.net.NetworkTopologyWithNodeGroup");
       NameNode.format(CONF);
       namenode = new NameNode(CONF);
@@ -109,31 +109,31 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
         FSConstants.MIN_BLOCKS_FOR_WRITE*BLOCK_SIZE, 4); // overloaded
 
     DatanodeDescriptor[] targets;
-    targets = replicator.chooseTarget(
-                                      0, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      0, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 0);
 
-    targets = replicator.chooseTarget(
-                                      1, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      1, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 1);
     assertEquals(targets[0], dataNodes[0]);
 
-    targets = replicator.chooseTarget(
-                                      2, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      2, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 2);
     assertEquals(targets[0], dataNodes[0]);
     assertFalse(cluster.isOnSameRack(targets[0], targets[1]));
 
-    targets = replicator.chooseTarget(
-                                      3, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      3, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 3);
     assertEquals(targets[0], dataNodes[0]);
     assertFalse(cluster.isOnSameRack(targets[0], targets[1]));
     assertTrue(cluster.isOnSameRack(targets[1], targets[2]));
     assertFalse(cluster.isOnSameNodeGroup(targets[1], targets[2]));
 
-    targets = replicator.chooseTarget(
-                                      4, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      4, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 4);
     assertEquals(targets[0], dataNodes[0]);
     assertTrue(cluster.isOnSameRack(targets[1], targets[2]) ||
@@ -150,13 +150,13 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
   }
 
   private static DatanodeDescriptor[] chooseTarget(
-      ReplicationTargetChooser policy,
+      BlockPlacementPolicy policy,
       int numOfReplicas,
       DatanodeDescriptor writer,
       List<DatanodeDescriptor> chosenNodes,
-      List<Node> excludedNodes,
+      HashMap<Node, Node> excludedNodes,
       long blocksize) {
-    return policy.chooseTarget(numOfReplicas, writer, 
+    return policy.chooseTarget(filename, numOfReplicas, writer, 
         chosenNodes, excludedNodes, blocksize);
   }
 
@@ -169,13 +169,13 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
    * @throws Exception
    */
   public void testChooseTarget2() throws Exception { 
-    List<Node> excludedNodes;
+    HashMap<Node, Node> excludedNodes = new HashMap<Node, Node>();
     DatanodeDescriptor[] targets;
-    ReplicationTargetChooser repl = (ReplicationTargetChooser)replicator;
+    BlockPlacementPolicyWithNodeGroup repl = 
+        (BlockPlacementPolicyWithNodeGroup)replicator;
     List<DatanodeDescriptor> chosenNodes = new ArrayList<DatanodeDescriptor>();
 
-    excludedNodes = new ArrayList<Node>();
-    excludedNodes.add(dataNodes[1]); 
+    excludedNodes.put(dataNodes[1], dataNodes[1]);
     targets = chooseTarget(repl, 4, dataNodes[0], chosenNodes, excludedNodes,
         BLOCK_SIZE);
     assertEquals(targets.length, 4);
@@ -191,9 +191,9 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
 
     excludedNodes.clear();
     chosenNodes.clear();
-    excludedNodes.add(dataNodes[1]); 
+    excludedNodes.put(dataNodes[1], dataNodes[1]); 
     chosenNodes.add(dataNodes[2]);
-    targets = repl.chooseTarget(1, dataNodes[0], chosenNodes,
+    targets = repl.chooseTarget(filename, 1, dataNodes[0], chosenNodes,
         excludedNodes, BLOCK_SIZE);
     System.out.println("targets=" + Arrays.asList(targets));
     assertEquals(2, targets.length);
@@ -218,30 +218,30 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
         (FSConstants.MIN_BLOCKS_FOR_WRITE-1)*BLOCK_SIZE, 0); // no space
 
     DatanodeDescriptor[] targets;
-    targets = replicator.chooseTarget(
-                                      0, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      0, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 0);
 
-    targets = replicator.chooseTarget(
-                                      1, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      1, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 1);
     assertEquals(targets[0], dataNodes[1]);
 
-    targets = replicator.chooseTarget(
-                                      2, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      2, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 2);
     assertEquals(targets[0], dataNodes[1]);
     assertFalse(cluster.isOnSameRack(targets[0], targets[1]));
 
-    targets = replicator.chooseTarget(
-                                      3, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      3, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 3);
     assertEquals(targets[0], dataNodes[1]);
     assertTrue(cluster.isOnSameRack(targets[1], targets[2]));
     assertFalse(cluster.isOnSameRack(targets[0], targets[1]));
 
-    targets = replicator.chooseTarget(
-                                      4, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      4, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 4);
     assertEquals(targets[0], dataNodes[1]);
     assertTrue(cluster.isNodeGroupAware());
@@ -274,23 +274,23 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
     }
 
     DatanodeDescriptor[] targets;
-    targets = replicator.chooseTarget(
-                                      0, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      0, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 0);
 
-    targets = replicator.chooseTarget(
-                                      1, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      1, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 1);
     assertFalse(cluster.isOnSameRack(targets[0], dataNodes[0]));
 
-    targets = replicator.chooseTarget(
-                                      2, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      2, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 2);
     assertFalse(cluster.isOnSameRack(targets[0], dataNodes[0]));
     assertFalse(cluster.isOnSameRack(targets[0], targets[1]));
 
-    targets = replicator.chooseTarget(
-                                      3, dataNodes[0], null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      3, dataNodes[0], BLOCK_SIZE);
     assertEquals(targets.length, 3);
     for(int i=0; i<3; i++) {
       assertFalse(cluster.isOnSameRack(targets[i], dataNodes[0]));
@@ -310,21 +310,21 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
   public void testChooseTarget5() throws Exception {
     setupDataNodeCapacity();
     DatanodeDescriptor[] targets;
-    targets = replicator.chooseTarget(
-                                      0, NODE, null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      0, NODE, BLOCK_SIZE);
     assertEquals(targets.length, 0);
     
-    targets = replicator.chooseTarget(
-                                      1, NODE, null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      1, NODE, BLOCK_SIZE);
     assertEquals(targets.length, 1);
     
-    targets = replicator.chooseTarget(
-                                      2, NODE, null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      2, NODE, BLOCK_SIZE);
     assertEquals(targets.length, 2);
     assertFalse(cluster.isOnSameRack(targets[0], targets[1]));
     
-    targets = replicator.chooseTarget(
-                                      3, NODE, null, BLOCK_SIZE);
+    targets = replicator.chooseTarget(filename,
+                                      3, NODE, BLOCK_SIZE);
     assertEquals(targets.length, 3);
     assertTrue(cluster.isOnSameRack(targets[1], targets[2]));
     assertFalse(cluster.isOnSameNodeGroup(targets[1], targets[2]));
@@ -340,26 +340,27 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
    */
   public void testRereplicate1() throws Exception {
     setupDataNodeCapacity();
-    List<Node> chosenNodes = new ArrayList<Node>();
+    List<DatanodeDescriptor> chosenNodes = new ArrayList<DatanodeDescriptor>();
     chosenNodes.add(dataNodes[0]);
     DatanodeDescriptor[] targets;
     
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                       0, dataNodes[0], chosenNodes, BLOCK_SIZE);
+    
     assertEquals(targets.length, 0);
     
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                       1, dataNodes[0], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 1);
     assertFalse(cluster.isOnSameRack(dataNodes[0], targets[0]));
     
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                       2, dataNodes[0], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 2);
     assertTrue(cluster.isOnSameRack(dataNodes[0], targets[0]));
     assertFalse(cluster.isOnSameRack(targets[0], targets[1]));
     
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                       3, dataNodes[0], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 3);
     assertTrue(cluster.isOnSameRack(dataNodes[0], targets[0]));
@@ -376,21 +377,21 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
    */
   public void testRereplicate2() throws Exception {
     setupDataNodeCapacity();
-    List<Node> chosenNodes = new ArrayList<Node>();
+    List<DatanodeDescriptor> chosenNodes = new ArrayList<DatanodeDescriptor>();
     chosenNodes.add(dataNodes[0]);
     chosenNodes.add(dataNodes[1]);
 
     DatanodeDescriptor[] targets;
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                       0, dataNodes[0], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 0);
 
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                       1, dataNodes[0], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 1);
     assertFalse(cluster.isOnSameRack(dataNodes[0], targets[0]));
 
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                       2, dataNodes[0], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 2);
     assertFalse(cluster.isOnSameRack(dataNodes[0], targets[0]) && 
@@ -406,38 +407,90 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
    */
   public void testRereplicate3() throws Exception {
 	setupDataNodeCapacity();
-    List<Node> chosenNodes = new ArrayList<Node>();
+    List<DatanodeDescriptor> chosenNodes = new ArrayList<DatanodeDescriptor>();
     chosenNodes.add(dataNodes[0]);
     chosenNodes.add(dataNodes[3]);
 
     DatanodeDescriptor[] targets;
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                       0, dataNodes[0], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 0);
 
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                       1, dataNodes[0], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 1);
     assertTrue(cluster.isOnSameRack(dataNodes[0], targets[0]));
     assertFalse(cluster.isOnSameRack(dataNodes[3], targets[0]));
 
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                1, dataNodes[3], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 1);
     assertTrue(cluster.isOnSameRack(dataNodes[3], targets[0]));
     assertFalse(cluster.isOnSameNodeGroup(dataNodes[3], targets[0]));
     assertFalse(cluster.isOnSameRack(dataNodes[0], targets[0]));
 
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                       2, dataNodes[0], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 2);
     assertTrue(cluster.isOnSameRack(dataNodes[0], targets[0]));
     assertFalse(cluster.isOnSameNodeGroup(dataNodes[0], targets[0]));
-    targets = replicator.chooseTarget(
+    targets = replicator.chooseTarget(filename,
                                2, dataNodes[3], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 2);
     assertTrue(cluster.isOnSameRack(dataNodes[3], targets[0]));
   }
 
+  /**
+   * Test for the chooseReplicaToDelete are processed based on 
+   * block locality and free space
+   */
+  @Test
+  public void testChooseReplicaToDelete() throws Exception {
+    List<DatanodeDescriptor> replicaNodeList = 
+        new ArrayList<DatanodeDescriptor>();
+    final Map<String, List<DatanodeDescriptor>> rackMap = 
+        new HashMap<String, List<DatanodeDescriptor>>();
+    dataNodes[0].setRemaining(4*1024*1024);
+    replicaNodeList.add(dataNodes[0]);
+
+    dataNodes[1].setRemaining(3*1024*1024);
+    replicaNodeList.add(dataNodes[1]);
+
+    dataNodes[2].setRemaining(2*1024*1024);
+    replicaNodeList.add(dataNodes[2]);
+
+    dataNodes[5].setRemaining(1*1024*1024);
+    replicaNodeList.add(dataNodes[5]);
+
+    List<DatanodeDescriptor> first = new ArrayList<DatanodeDescriptor>();
+    List<DatanodeDescriptor> second = new ArrayList<DatanodeDescriptor>();
+    replicator.splitNodesWithLocalityGroup(
+        replicaNodeList, rackMap, first, second);
+    assertEquals(3, first.size());
+    assertEquals(1, second.size());
+    DatanodeDescriptor chosenNode = replicator.chooseReplicaToDelete(
+        new INodeFile(), new Block(), (short)3, first, second);
+    // Within first set {dataNodes[0], dataNodes[1], dataNodes[2]}, 
+    // dataNodes[0] and dataNodes[1] are in the same nodegroup, 
+    // but dataNodes[1] is chosen as less free space
+    assertEquals(chosenNode, dataNodes[1]);
+
+    replicator.adjustSetsWithChosenReplica(rackMap, first, second, chosenNode);
+    assertEquals(2, first.size());
+    assertEquals(1, second.size());
+    // Within first set {dataNodes[0], dataNodes[2]}, dataNodes[2] is chosen
+    // as less free space
+    chosenNode = replicator.chooseReplicaToDelete(
+        new INodeFile(), new Block(), (short)3, first, second);
+    assertEquals(chosenNode, dataNodes[2]);
+
+    replicator.adjustSetsWithChosenReplica(rackMap, first, second, chosenNode);
+    assertEquals(0, first.size());
+    assertEquals(2, second.size());
+    // Within second set, dataNodes[5] with less free space
+    chosenNode = replicator.chooseReplicaToDelete(
+        new INodeFile(), new Block(), (short)3, first, second);
+    assertEquals(chosenNode, dataNodes[5]);
+  }
 }
 

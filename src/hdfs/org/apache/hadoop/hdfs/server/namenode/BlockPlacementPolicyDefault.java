@@ -40,7 +40,7 @@ import java.util.*;
 @InterfaceAudience.Private
 public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
   private boolean considerLoad; 
-  private NetworkTopology clusterMap;
+  protected NetworkTopology clusterMap;
   private FSClusterStats stats;
 
   BlockPlacementPolicyDefault(Configuration conf,  FSClusterStats stats,
@@ -219,19 +219,35 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
       }
     } 
       
-    // try a node on local rack
-    return chooseLocalRack(localMachine, excludedNodes, 
-                           blocksize, maxNodesPerRack, results);
+    // if local machine is not available, try node with other locality, i.e
+    // local rack
+    return chooseOtherLocalityNode(localMachine, excludedNodes, blocksize,
+        maxNodesPerRack, results);
   }
     
-  /* choose one node from the rack that <i>localMachine</i> is on.
+  /** Choose node with other locality other than <i>localMachine</i>.
+   * As there is no local node is available, choose one node with nearest 
+   * locality.
+   * Default to be local rack, but could be overridden in sub-class for other 
+   * localities.
+   * @return the chosen node
+   */
+  protected DatanodeDescriptor chooseOtherLocalityNode(DatanodeDescriptor localMachine,
+      HashMap<Node, Node> excludedNodes, long blocksize, int maxNodesPerRack,
+      List<DatanodeDescriptor> results) throws NotEnoughReplicasException {
+    // try a node on local rack
+    return chooseLocalRack(localMachine, excludedNodes, 
+        blocksize, maxNodesPerRack, results);
+  }
+
+/* choose one node from the rack that <i>localMachine</i> is on.
    * if no such node is available, choose one node from the rack where
    * a second replica is on.
    * if still no such node is available, choose a random node 
    * in the cluster.
    * @return the chosen node
    */
-  private DatanodeDescriptor chooseLocalRack(
+  protected DatanodeDescriptor chooseLocalRack(
                                              DatanodeDescriptor localMachine,
                                              HashMap<Node, Node> excludedNodes,
                                              long blocksize,
@@ -284,7 +300,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
    * from the local rack
    */
     
-  private void chooseRemoteRack(int numOfReplicas,
+  protected void chooseRemoteRack(int numOfReplicas,
                                 DatanodeDescriptor localMachine,
                                 HashMap<Node, Node> excludedNodes,
                                 long blocksize,
@@ -306,7 +322,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
   /* Randomly choose one target from <i>nodes</i>.
    * @return the chosen node
    */
-  private DatanodeDescriptor chooseRandom(
+  protected DatanodeDescriptor chooseRandom(
                                           String nodes,
                                           HashMap<Node, Node> excludedNodes,
                                           long blocksize,
@@ -335,7 +351,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
     
   /* Randomly choose <i>numOfReplicas</i> targets from <i>nodes</i>.
    */
-  private void chooseRandom(int numOfReplicas,
+  protected void chooseRandom(int numOfReplicas,
                             String nodes,
                             HashMap<Node, Node> excludedNodes,
                             long blocksize,
@@ -467,6 +483,126 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
     }
     return nodes;
   }
+  
+  /**
+   * Decide to delete the specified replica of the block still makes 
+   * the block conform to the configured block placement policy.
+   * 
+   * @param priSet The replica locations of this block that are present
+                  on at least two unique racks. 
+   * @param remains Replica locations of this block that are not
+                   listed in the previous parameter.
+   * @return the replica that is the best candidate for deletion
+   */
+  public DatanodeDescriptor chooseReplicaToDelete(
+      List<DatanodeDescriptor> priSet,
+      List<DatanodeDescriptor> remains) {
+    long minSpace = Long.MAX_VALUE;
+    DatanodeDescriptor cur = null;
+
+    // pick replica from the priSet. If priSet is empty, then pick replicas
+    // from remains set.
+    Iterator<DatanodeDescriptor> iter = pickupReplicaSet(priSet, remains);
+    while( iter.hasNext() ) {
+      DatanodeDescriptor node = iter.next();
+      long free = node.getRemaining();
+      if (minSpace > free) {
+        minSpace = free;
+        cur = node;
+      }
+    }
+    return cur;
+  }
+
+  /**
+   * Adjust rackmap, priSet, and remains after choosing replica to delete.
+   */
+  protected void adjustSetsWithChosenReplica(
+      Map<String, List<DatanodeDescriptor>> rackMap,
+      List<DatanodeDescriptor> priSet,
+      List<DatanodeDescriptor> remains, DatanodeInfo cur) {
+    // adjust rackmap, priSet, and remains
+    String rack = getLocalityGroupForSplit(cur);
+    List<DatanodeDescriptor> datanodes = rackMap.get(rack);
+    datanodes.remove(cur);
+    if(datanodes.isEmpty()) {
+      rackMap.remove(rack);
+    }
+    if( priSet.remove(cur) ) {
+      if (datanodes.size() == 1) {
+        priSet.remove(datanodes.get(0));
+        remains.add(datanodes.get(0));
+      }
+    } else {
+      remains.remove(cur);
+    }
+  }
+
+  /**
+   * Get specific level of locality group from a data node for judging 
+   * over-replicated. 
+   * Default to be rack, can be overridden in sub class with other locality 
+   * group for other split policy.
+   */
+  protected String getLocalityGroupForSplit(DatanodeInfo cur) {
+    return getRack(cur);
+  }
+
+  protected String getRack(DatanodeInfo cur) {
+    return cur.getNetworkLocation();
+  }
+  
+  /**
+   * Split data nodes into two sets, one set includes nodes on rack with
+   * more than one  replica, the other set contains the remaining nodes.
+   * 
+   * @param dataNodes
+   * @param rackMap a map from rack to datanodes
+   * @param priSet contains nodes on rack with more than one replica
+   * @param remains remains contains the remaining nodes
+   */
+  protected void splitNodesWithLocalityGroup(
+      Collection<DatanodeDescriptor> dataNodes,
+      Map<String, List<DatanodeDescriptor>> rackMap,
+      List<DatanodeDescriptor> priSet,
+      List<DatanodeDescriptor> remains) {
+    for (Iterator<DatanodeDescriptor> iter = dataNodes.iterator();
+        iter.hasNext();) {
+      DatanodeDescriptor node = iter.next();
+      String rackName = getLocalityGroupForSplit(node);
+      List<DatanodeDescriptor> datanodeList = rackMap.get(rackName);
+      if(datanodeList==null) {
+        datanodeList = new ArrayList<DatanodeDescriptor>();
+      }
+      datanodeList.add(node);
+      rackMap.put(rackName, datanodeList);
+    }
+    
+    // split nodes into two sets
+    for(List<DatanodeDescriptor> datanodeList : rackMap.values()) {
+      if (datanodeList.size() == 1 ) {
+        // remains contains the remaining nodes
+        remains.add(datanodeList.get(0));
+      } else {
+        // priSet contains nodes on rack with more than one replica
+        priSet.addAll(datanodeList);
+      }
+    }
+  }
+  
+  /**
+   * Pick up replica node set for deleting replica as over-replicated. 
+   * First set contains replica nodes on rack with more than one
+   * replica while second set contains remaining replica nodes.
+   * So pick up first set if not empty. If first is empty, then pick second.
+   */
+  protected Iterator<DatanodeDescriptor> pickupReplicaSet(
+      List<DatanodeDescriptor> priSet,
+      List<DatanodeDescriptor> remains) {
+    Iterator<DatanodeDescriptor> iter = 
+        priSet.isEmpty() ? remains.iterator() : priSet.iterator();
+    return iter;
+  }
 
   /** {@inheritDoc} */
   public int verifyBlockPlacement(String srcPath,
@@ -496,10 +632,9 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
     long minSpace = Long.MAX_VALUE;
     DatanodeDescriptor cur = null;
 
-    // pick replica from the first Set. If first is empty, then pick replicas
-    // from second set.
-    Iterator<DatanodeDescriptor> iter =
-          first.isEmpty() ? second.iterator() : first.iterator();
+    // pick replica from the priSet. If priSet is empty, then pick replicas
+    // from remains set.
+    Iterator<DatanodeDescriptor> iter = pickupReplicaSet(first, second);
 
     // pick node with least free space
     while (iter.hasNext() ) {
@@ -512,5 +647,18 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
     }
     return cur;
   }
+  
+  /**
+   * Pick up replica node set for deleting replica as over-replicated. 
+   * First set contains replica nodes on rack with more than one
+   * replica while second set contains remaining replica nodes.
+   * So pick up first set if not empty. If first is empty, then pick second.
+   */
+  protected Iterator<DatanodeDescriptor> pickupReplicaSet(
+      Collection<DatanodeDescriptor> priSet,
+      Collection<DatanodeDescriptor> remains) {
+    Iterator<DatanodeDescriptor> iter = 
+        priSet.isEmpty() ? remains.iterator() : priSet.iterator();
+    return iter;
+  }
 }
-
