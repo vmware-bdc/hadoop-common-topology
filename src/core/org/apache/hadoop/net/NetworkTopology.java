@@ -166,8 +166,7 @@ public class NetworkTopology {
         }
         if (parentNode == null) {
           // create a new InnerNode
-          parentNode = new InnerNode(parentName, getPath(this),
-                                     this, this.getLevel()+1);
+          parentNode = createParentNode(parentName);
           children.add(parentNode);
         }
         // add n to the subtree of the next ancestor node
@@ -275,7 +274,7 @@ public class NetworkTopology {
       // calculate the total number of excluded leaf nodes
       int numOfExcludedLeaves =
         isLeaf ? 1 : ((InnerNode)excludedNode).getNumOfLeaves();
-      if (isRack()) { // children are leaves
+      if (isLeafParent()) { // children are leaves
         if (isLeaf) { // excluded node is a leaf node
           int excludedIndex = children.indexOf(excludedNode);
           if (excludedIndex != -1 && leafIndex >= 0) {
@@ -313,6 +312,10 @@ public class NetworkTopology {
       }
     }
 
+    protected boolean isLeafParent() {
+      return isRack();
+    }
+
     /**
      * Determine if children a leaves, default implementation calls {@link #isRack()}
      * <p>To be overridden in subclasses for specific InnerNode implementations,
@@ -338,8 +341,8 @@ public class NetworkTopology {
   public NetworkTopology() {
     clusterMap = new InnerNode(InnerNode.ROOT);
   }
-    
-  /** Add a leaf node
+
+/** Add a leaf node
    * Update node counter & rack counter if neccessary
    * @param node
    *          node to be added

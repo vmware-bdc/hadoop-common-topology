@@ -380,7 +380,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
                                            "Not able to place enough replicas");
     }
   }
-    
+
   /* judge if a node is a good target.
    * return true if <i>node</i> has enough space, 
    * does not have too much load, and the rack does not have too many nodes
@@ -428,7 +428,7 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
     }
       
     // check if the target rack has chosen too many nodes
-    String rackname = node.getNetworkLocation();
+    String rackname = getRack(node);
     int counter=1;
     for(Iterator<DatanodeDescriptor> iter = results.iterator();
         iter.hasNext();) {
