@@ -439,5 +439,57 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
     assertTrue(cluster.isOnSameRack(dataNodes[3], targets[0]));
   }
 
+  /**
+   * Test for the chooseReplicaToDelete are processed based on 
+   * block locality and free space
+   */
+  @Test
+  public void testChooseReplicaToDelete() throws Exception {
+    List<DatanodeDescriptor> replicaNodeList = 
+        new ArrayList<DatanodeDescriptor>();
+    final Map<String, List<DatanodeDescriptor>> rackMap = 
+        new HashMap<String, List<DatanodeDescriptor>>();
+    dataNodes[0].setRemaining(4*1024*1024);
+    replicaNodeList.add(dataNodes[0]);
+
+    dataNodes[1].setRemaining(3*1024*1024);
+    replicaNodeList.add(dataNodes[1]);
+
+    dataNodes[2].setRemaining(2*1024*1024);
+    replicaNodeList.add(dataNodes[2]);
+
+    dataNodes[5].setRemaining(1*1024*1024);
+    replicaNodeList.add(dataNodes[5]);
+
+    List<DatanodeDescriptor> first = new ArrayList<DatanodeDescriptor>();
+    List<DatanodeDescriptor> second = new ArrayList<DatanodeDescriptor>();
+    replicator.splitNodesWithLocalityGroup(
+        replicaNodeList, rackMap, first, second);
+    assertEquals(3, first.size());
+    assertEquals(1, second.size());
+    DatanodeDescriptor chosenNode = replicator.chooseReplicaToDelete(
+        first, second);
+    // Within first set {dataNodes[0], dataNodes[1], dataNodes[2]}, 
+    // dataNodes[0] and dataNodes[1] are in the same nodegroup, 
+    // but dataNodes[1] is chosen as less free space
+    assertEquals(chosenNode, dataNodes[1]);
+
+    replicator.adjustSetsWithChosenReplica(rackMap, first, second, chosenNode);
+    assertEquals(2, first.size());
+    assertEquals(1, second.size());
+    // Within first set {dataNodes[0], dataNodes[2]}, dataNodes[2] is chosen
+    // as less free space
+    chosenNode = replicator.chooseReplicaToDelete(
+        first, second);
+    assertEquals(chosenNode, dataNodes[2]);
+
+    replicator.adjustSetsWithChosenReplica(rackMap, first, second, chosenNode);
+    assertEquals(0, first.size());
+    assertEquals(2, second.size());
+    // Within second set, dataNodes[5] with less free space
+    chosenNode = replicator.chooseReplicaToDelete(
+        first, second);
+    assertEquals(chosenNode, dataNodes[5]);
+  }
 }
 

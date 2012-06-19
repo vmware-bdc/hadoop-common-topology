@@ -17,9 +17,13 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.NetworkTopologyWithNodeGroup;
 import org.apache.hadoop.net.Node;
@@ -180,4 +184,65 @@ public class ReplicationTargetChooserWithNodeGroup extends
     }
   }
   
+  /**
+   * Pick up replica node set for deleting replica as over-replicated. 
+   * First set contains replica nodes on rack with more than one
+   * replica while second set contains remaining replica nodes.
+   * If first is not empty, divide first set into two subsets:
+   *   priSet contains nodes on nodegroup with more than one replica
+   *   remains contains the remaining nodes in first set
+   * then pickup priSet if not empty.
+   * If first is empty, then pick second.
+   */
+  @Override
+  public Iterator<DatanodeDescriptor> pickupReplicaSet(
+      List<DatanodeDescriptor> first,
+      List<DatanodeDescriptor> second) {
+    // If no replica within same rack, return directly.
+    if (first.isEmpty()) {
+      return second.iterator();
+    }
+    // Split data nodes in the first set into two sets, 
+    // priSet contains nodes on nodegroup with more than one replica
+    // remains contains the remaining nodes
+    Map<String, List<DatanodeDescriptor>> nodeGroupMap = 
+        new HashMap<String, List<DatanodeDescriptor>>();
+    
+    for(final Iterator<DatanodeDescriptor> iter = first.iterator();
+        iter.hasNext(); ) {
+      final DatanodeDescriptor node = iter.next();
+      final String nodeGroupName = 
+          TopologyResolver.getNodeGroup(node.getNetworkLocation(), true);
+      List<DatanodeDescriptor> datanodeList = 
+          nodeGroupMap.get(nodeGroupName);
+      if (datanodeList == null) {
+        datanodeList = new ArrayList<DatanodeDescriptor>();
+        nodeGroupMap.put(nodeGroupName, datanodeList);
+      }
+      datanodeList.add(node);
+    }
+    
+    final List<DatanodeDescriptor> priSet = new ArrayList<DatanodeDescriptor>();
+    final List<DatanodeDescriptor> remains = new ArrayList<DatanodeDescriptor>();
+    // split nodes into two sets
+    for(List<DatanodeDescriptor> datanodeList : nodeGroupMap.values()) {
+      if (datanodeList.size() == 1 ) {
+        // remains contains the remaining nodes
+        remains.add(datanodeList.get(0));
+      } else {
+        // priSet contains nodes on nodegroup with more than one replica
+        priSet.addAll(datanodeList);
+      }
+    }
+    
+    Iterator<DatanodeDescriptor> iter =
+        priSet.isEmpty() ? remains.iterator() : priSet.iterator();
+    return iter;
+  }
+  
+  @Override
+  protected String getRack(DatanodeInfo cur) {
+    String nodeGroupString = cur.getNetworkLocation();
+    return TopologyResolver.getRack(nodeGroupString, true);
+  }
 }
