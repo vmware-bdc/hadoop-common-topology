@@ -29,7 +29,6 @@ import java.util.Map;
 import junit.framework.TestCase;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.FSConstants;
@@ -64,7 +63,7 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
   static {
     try {
       FileSystem.setDefaultUri(CONF, "hdfs://localhost:0");
-      CONF.set(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY, "0.0.0.0:0");
+      CONF.set("dfs.http.address", "0.0.0.0:0");
       // Set properties to make HDFS aware of NodeGroup.
       CONF.set("dfs.block.replicator.classname", 
           "org.apache.hadoop.hdfs.server.namenode.BlockPlacementPolicyWithNodeGroup");
@@ -139,10 +138,6 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
     assertTrue(cluster.isOnSameRack(targets[1], targets[2]) ||
                cluster.isOnSameRack(targets[2], targets[3]));
     assertFalse(cluster.isOnSameRack(targets[0], targets[2]));
-    // Make sure no replicas are on the same nodegroup 
-    for (int i=1;i<3;i++) {
-      assertFalse(cluster.isOnSameNodeGroup(targets[0], targets[i]));
-    }
 
     dataNodes[0].updateHeartbeat(
         2*FSConstants.MIN_BLOCKS_FOR_WRITE*BLOCK_SIZE, 0L,
@@ -178,15 +173,14 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
     excludedNodes.put(dataNodes[1], dataNodes[1]);
     targets = chooseTarget(repl, 4, dataNodes[0], chosenNodes, excludedNodes,
         BLOCK_SIZE);
+
     assertEquals(targets.length, 4);
     assertEquals(targets[0], dataNodes[0]);
-    assertTrue(cluster.isNodeGroupAware());
-    // Make sure no replicas are on the same nodegroup 
-    for (int i=1;i<4;i++) {
-      assertFalse(cluster.isOnSameNodeGroup(targets[0], targets[i]));
-    }
+
     assertTrue(cluster.isOnSameRack(targets[1], targets[2]) ||
                cluster.isOnSameRack(targets[2], targets[3]));
+    assertFalse(cluster.isOnSameNodeGroup(targets[1], targets[2]) ||
+            cluster.isOnSameNodeGroup(targets[2], targets[3]));
     assertFalse(cluster.isOnSameRack(targets[1], targets[3]));
 
     excludedNodes.clear();
@@ -424,6 +418,7 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
 
     targets = replicator.chooseTarget(filename,
                                1, dataNodes[3], chosenNodes, BLOCK_SIZE);
+
     assertEquals(targets.length, 1);
     assertTrue(cluster.isOnSameRack(dataNodes[3], targets[0]));
     assertFalse(cluster.isOnSameNodeGroup(dataNodes[3], targets[0]));
@@ -438,6 +433,7 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
                                2, dataNodes[3], chosenNodes, BLOCK_SIZE);
     assertEquals(targets.length, 2);
     assertTrue(cluster.isOnSameRack(dataNodes[3], targets[0]));
+    assertFalse(cluster.isOnSameNodeGroup(dataNodes[3], targets[0]));
   }
 
   /**
