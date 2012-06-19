@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.server.namenode;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.Node;
@@ -214,6 +215,82 @@ public abstract class BlockPlacementPolicy {
                         new ArrayList<DatanodeDescriptor>(),
                         excludedNodes,
                         blocksize);
+  }
+
+  /**
+   * Split data nodes into two sets, one set includes nodes on rack with
+   * more than one  replica, the other set contains the remaining nodes.
+   * 
+   * @param dataNodes
+   * @param rackMap a map from rack to datanodes
+   * @param priSet contains nodes on rack with more than one replica
+   * @param remains remains contains the remaining nodes
+   */
+  protected void splitNodesWithLocalityGroup(
+      Collection<DatanodeDescriptor> dataNodes,
+      Map<String, List<DatanodeDescriptor>> rackMap,
+      List<DatanodeDescriptor> priSet,
+      List<DatanodeDescriptor> remains) {
+    for (Iterator<DatanodeDescriptor> iter = dataNodes.iterator();
+        iter.hasNext();) {
+      DatanodeDescriptor node = iter.next();
+      String rackName = getLocalityGroupForSplit(node);
+      List<DatanodeDescriptor> datanodeList = rackMap.get(rackName);
+      if(datanodeList==null) {
+        datanodeList = new ArrayList<DatanodeDescriptor>();
+      }
+      datanodeList.add(node);
+      rackMap.put(rackName, datanodeList);
+    }
+    
+    // split nodes into two sets
+    for(List<DatanodeDescriptor> datanodeList : rackMap.values()) {
+      if (datanodeList.size() == 1 ) {
+        // remains contains the remaining nodes
+        remains.add(datanodeList.get(0));
+      } else {
+        // priSet contains nodes on rack with more than one replica
+        priSet.addAll(datanodeList);
+      }
+    }
+  }
+  
+  /**
+   * Get specific level of locality group from a data node for judging 
+   * over-replicated. 
+   * Default to be rack, can be overridden in sub class with other locality 
+   * group for other split policy.
+   */
+  protected String getLocalityGroupForSplit(DatanodeInfo cur) {
+    return getRack(cur);
+  }
+  
+  protected String getRack(DatanodeInfo cur) {
+    return cur.getNetworkLocation();
+  }
+
+  /**
+   * Adjust rackmap, priSet, and remains after choosing replica to delete.
+   */
+  protected void adjustSetsWithChosenReplica(
+      Map<String, List<DatanodeDescriptor>> rackMap,
+      List<DatanodeDescriptor> priSet,
+      List<DatanodeDescriptor> remains, DatanodeInfo cur) {
+    // adjust rackmap, priSet, and remains
+    String rack = getLocalityGroupForSplit(cur);
+    List<DatanodeDescriptor> datanodes = rackMap.get(rack);
+    datanodes.remove(cur);
+    if(datanodes.isEmpty()) {
+      rackMap.remove(rack);
+    }
+    if( priSet.remove(cur) ) {
+      if (datanodes.size() == 1) {
+        priSet.remove(datanodes.get(0));
+        remains.add(datanodes.get(0));
+      }
+    } else {
+      remains.remove(cur);
+    }
   }
 
 }
