@@ -341,7 +341,7 @@ public class NetworkTopology {
     clusterMap = new InnerNode(InnerNode.ROOT);
   }
 
-/** Add a leaf node
+  /** Add a leaf node
    * Update node counter & rack counter if neccessary
    * @param node
    *          node to be added

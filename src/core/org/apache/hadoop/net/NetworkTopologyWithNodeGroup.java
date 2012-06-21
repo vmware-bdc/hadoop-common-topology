@@ -56,8 +56,8 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
 
   @Override
   public String getRack(String loc) {
-    netlock.readLock().lock();
     try {
+      netlock.readLock().lock();
       loc = InnerNode.normalize(loc);
       Node locNode = getNode(loc);
       if (locNode instanceof InnerNodeWithNodeGroup) {
@@ -88,8 +88,8 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
    * @return a node group string
    */
   public String getNodeGroup(String loc) {
-    netlock.readLock().lock();
     try {
+      netlock.readLock().lock();
       loc = InnerNode.normalize(loc);
       Node locNode = getNode(loc);
       if (locNode instanceof InnerNodeWithNodeGroup) {
@@ -118,9 +118,8 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
         node1.getParent() == null || node2.getParent() == null) {
       return false;
     }
-
-    netlock.readLock().lock();
     try {
+      netlock.readLock().lock();
       return isSameParents(node1.getParent(), node2.getParent());
     } finally {
       netlock.readLock().unlock();
@@ -146,8 +145,8 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
     if (node1 == null || node2 == null) {
       return false;
     }
-    netlock.readLock().lock();
     try {
+      netlock.readLock().lock();
       return isSameParents(node1, node2);
     } finally {
       netlock.readLock().unlock();
@@ -175,8 +174,8 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
       throw new IllegalArgumentException(
         "Not allow to add an inner node: "+NodeBase.getPath(node));
     }
-    netlock.writeLock().lock();
     try {
+      netlock.writeLock().lock();
       Node rack = null;
 
       // if node only with default rack info, here we need to add default 
@@ -223,8 +222,8 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
           "Not allow to remove an inner node: "+NodeBase.getPath(node));
     }
     LOG.info("Removing a node: "+NodeBase.getPath(node));
-    netlock.writeLock().lock();
     try {
+      netlock.writeLock().lock();
       if (clusterMap.remove(node)) {
         Node nodeGroup = getNode(node.getNetworkLocation());
         if (nodeGroup == null) {
