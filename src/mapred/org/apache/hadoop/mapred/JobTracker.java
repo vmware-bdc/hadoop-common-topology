@@ -202,7 +202,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   static final String JOB_INFO_FILE = "job-info";
   static final String JOB_TOKEN_FILE = "jobToken";
   private DNSToSwitchMapping dnsToSwitchMapping;
-  private NetworkTopology clusterMap = new NetworkTopology();
+  private NetworkTopology clusterMap;
   private int numTaskCacheLevels; // the max level to which we cache tasks
   /**
    * {@link #nodesAtMaxLevel} is using the keySet from {@link ConcurrentHashMap}
@@ -1405,7 +1405,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
           synchronized (trackerExpiryQueue) {
             // IV. Register a new tracker
             TaskTracker taskTracker = getTaskTracker(trackerName);
-            boolean isTrackerRegistered =  (taskTracker != null);
+            boolean isTrackerRegistered = (taskTracker != null);
             if (!isTrackerRegistered) {
               markTracker(trackerName); // add the tracker to recovery-manager
               taskTracker = new TaskTracker(trackerName);
@@ -2146,6 +2146,11 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
     LOG.info("Starting jobtracker with owner as " +
         getMROwner().getShortUserName());
 
+    // Create network topology
+    clusterMap = (NetworkTopology) ReflectionUtils.newInstance(
+            conf.getClass("net.topology.impl", NetworkTopology.class,
+                NetworkTopology.class), conf);
+    
     // Create the scheduler
     Class<? extends TaskScheduler> schedulerClass
       = conf.getClass("mapred.jobtracker.taskScheduler",
