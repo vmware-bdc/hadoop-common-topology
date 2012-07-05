@@ -473,6 +473,13 @@
   </description>
 </property>
 
+ <property>
+  <name>net.topology.nodegroup.aware</name>
+  <value>false</value>
+  <description> By default, network topology is not aware of nodegroup layer.
+  </description>
+</property>
+
 <property>
   <name>topology.script.file.name</name>
   <value></value>

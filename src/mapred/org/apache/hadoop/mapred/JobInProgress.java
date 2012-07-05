@@ -1310,27 +1310,49 @@ public class JobInProgress {
                                             int clusterSize, 
                                             int numUniqueHosts
                                            ) throws IOException {
-    if (status.getRunState() != JobStatus.RUNNING) {
+    return obtainNewMapTaskCommon(tts, clusterSize, numUniqueHosts, 
+        anyCacheLevel);
+  }
+  
+  /**
+   * Return a MapTask with locality level that smaller or equal than a given
+   * locality level to tasktracker.
+   * 
+   * @param tts The task tracker that is asking for a task
+   * @param clusterSize The number of task trackers in the cluster
+   * @param numUniqueHosts The number of hosts that run task trackers
+   * @param avgProgress The average progress of this kind of task in this job
+   * @param maxCacheLevel The maximum topology level until which to schedule
+   *                      maps.
+   * @return the index in tasks of the selected task (or -1 for no task)
+   * @throws IOException
+   */
+  public synchronized Task obtainNewMapTaskCommon(
+      TaskTrackerStatus tts, int clusterSize, int numUniqueHosts, 
+      int maxCacheLevel) throws IOException {
+    if (!tasksInited) {
       LOG.info("Cannot create task split for " + profile.getJobID());
       try { throw new IOException("state = " + status.getRunState()); }
       catch (IOException ioe) {ioe.printStackTrace();}
       return null;
     }
-        
-    int target = findNewMapTask(tts, clusterSize, numUniqueHosts, anyCacheLevel,
+
+    int target = findNewMapTask(tts, clusterSize, numUniqueHosts, maxCacheLevel, 
                                 status.mapProgress());
     if (target == -1) {
       return null;
     }
-    
+
     Task result = maps[target].getTaskToRun(tts.getTrackerName());
     if (result != null) {
       addRunningTaskToTIP(maps[target], result.getTaskID(), tts, true);
-      resetSchedulingOpportunities();
+      // DO NOT reset for off-switch!
+      if (maxCacheLevel != NON_LOCAL_CACHE_LEVEL) {
+        resetSchedulingOpportunities();
+      }
     }
-
     return result;
-  }    
+  }
 
   /*
    * Return task cleanup attempt if any, to run on a given tracker
@@ -1373,78 +1395,22 @@ public class JobInProgress {
   public synchronized Task obtainNewNodeLocalMapTask(TaskTrackerStatus tts,
                                                      int clusterSize,
                                                      int numUniqueHosts)
-  throws IOException {
-    if (!tasksInited) {
-      LOG.info("Cannot create task split for " + profile.getJobID());
-      try { throw new IOException("state = " + status.getRunState()); }
-      catch (IOException ioe) {ioe.printStackTrace();}
-      return null;
-    }
-
-    int target = findNewMapTask(tts, clusterSize, numUniqueHosts, 1, 
-                                status.mapProgress());
-    if (target == -1) {
-      return null;
-    }
-
-    Task result = maps[target].getTaskToRun(tts.getTrackerName());
-    if (result != null) {
-      addRunningTaskToTIP(maps[target], result.getTaskID(), tts, true);
-      resetSchedulingOpportunities();
-    }
-
-    return result;
+      throws IOException {
+    return obtainNewMapTaskCommon(tts, clusterSize, numUniqueHosts, 1);
   }
   
   public synchronized Task obtainNewNodeOrRackLocalMapTask(
       TaskTrackerStatus tts, int clusterSize, int numUniqueHosts)
   throws IOException {
-    if (!tasksInited) {
-      LOG.info("Cannot create task split for " + profile.getJobID());
-      try { throw new IOException("state = " + status.getRunState()); }
-      catch (IOException ioe) {ioe.printStackTrace();}
-      return null;
-    }
-
-    int target = findNewMapTask(tts, clusterSize, numUniqueHosts, maxLevel, 
-                                status.mapProgress());
-    if (target == -1) {
-      return null;
-    }
-
-    Task result = maps[target].getTaskToRun(tts.getTrackerName());
-    if (result != null) {
-      addRunningTaskToTIP(maps[target], result.getTaskID(), tts, true);
-      resetSchedulingOpportunities();
-    }
-
-    return result;
+    return obtainNewMapTaskCommon(tts, clusterSize, numUniqueHosts, maxLevel);
   }
   
   public synchronized Task obtainNewNonLocalMapTask(TaskTrackerStatus tts,
                                                     int clusterSize, 
                                                     int numUniqueHosts)
-  throws IOException {
-    if (!tasksInited) {
-      LOG.info("Cannot create task split for " + profile.getJobID());
-      try { throw new IOException("state = " + status.getRunState()); }
-      catch (IOException ioe) {ioe.printStackTrace();}
-      return null;
-    }
-
-    int target = findNewMapTask(tts, clusterSize, numUniqueHosts, 
-                                NON_LOCAL_CACHE_LEVEL, status.mapProgress());
-    if (target == -1) {
-      return null;
-    }
-
-    Task result = maps[target].getTaskToRun(tts.getTrackerName());
-    if (result != null) {
-      addRunningTaskToTIP(maps[target], result.getTaskID(), tts, true);
-      // DO NOT reset for off-switch!
-    }
-
-    return result;
+      throws IOException {
+    return obtainNewMapTaskCommon(tts, clusterSize, numUniqueHosts, 
+        NON_LOCAL_CACHE_LEVEL);
   }
   
   public void schedulingOpportunity() {
@@ -1824,6 +1790,7 @@ public class JobInProgress {
         LOG.info("Choosing rack-local task " + tip.getTIPId());
         jobCounters.incrCounter(Counter.RACK_LOCAL_MAPS, 1);
         break;
+      // TODO jdu
       default :
         // check if there is any locality
         if (level != this.maxLevel) {
