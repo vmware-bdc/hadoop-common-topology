@@ -294,6 +294,14 @@
 </property>
 
 <property>
+  <name>mapred.jobtracker.jobSchedulable</name>
+  <value>org.apache.hadoop.mapred.JobSchedulabler</value>
+  <description>The class responsible for an entity in FairScheduler that can
+  launch tasks.
+  </description>
+</property>
+
+<property>
   <name>mapred.jobtracker.taskScheduler.maxRunningTasksPerJob</name>
   <value></value>
   <description>The maximum number of running tasks for a job before
