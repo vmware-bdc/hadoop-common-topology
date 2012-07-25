@@ -294,6 +294,12 @@
 </property>
 
 <property>
+  <name>mapred.jobtracker.nodegroup.awareness</name>
+  <value>false</value>
+  <description>Identify if jobtracker is aware of nodegroup layer.</description>
+</property>
+
+<property>
   <name>mapred.jobtracker.jobSchedulable</name>
   <value>org.apache.hadoop.mapred.JobSchedulabler</value>
   <description>The class responsible for an entity in FairScheduler that can
