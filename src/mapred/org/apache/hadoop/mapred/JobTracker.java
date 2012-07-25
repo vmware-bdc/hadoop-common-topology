@@ -208,6 +208,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   private DNSToSwitchMapping dnsToSwitchMapping;
   private NetworkTopology clusterMap;
   private int numTaskCacheLevels; // the max level to which we cache tasks
+  private boolean isNodeGroupAware;
   /**
    * {@link #nodesAtMaxLevel} is using the keySet from {@link ConcurrentHashMap}
    * so that it can be safely written to and iterated on via 2 separate threads.
@@ -2476,7 +2477,9 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
             DNSToSwitchMapping.class), conf);
     this.numTaskCacheLevels = conf.getInt("mapred.task.cache.levels", 
         NetworkTopology.DEFAULT_HOST_LEVEL);
-
+    this.isNodeGroupAware = conf.getBoolean(
+        "mapred.jobtracker.nodegroup.awareness", false);
+    
     //initializes the job status store
     completedJobStatusStore = new CompletedJobStatusStore(conf, aclsManager);
   }
@@ -3268,7 +3271,9 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
   public int getNumberOfUniqueHosts() {
     return uniqueHostsMap.size();
   }
-  
+  public boolean isNodeGroupAware() {
+    return isNodeGroupAware;
+  }
   public void addJobInProgressListener(JobInProgressListener listener) {
     jobInProgressListeners.add(listener);
   }
@@ -3418,7 +3423,7 @@ public class JobTracker implements MRConstants, InterTrackerProtocol,
         }
       }
     }
-      
+    
     // Check for tasks to be killed
     List<TaskTrackerAction> killTasksList = getTasksToKill(trackerName);
     if (killTasksList != null) {

@@ -47,7 +47,6 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.CleanupQueue.PathDeletionContext;
 import org.apache.hadoop.mapred.Counters.CountersExceededException;
-import org.apache.hadoop.mapred.Counters.Group;
 import org.apache.hadoop.mapred.JobHistory.Values;
 import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.mapreduce.JobSubmissionFiles;
@@ -70,7 +69,7 @@ import org.apache.hadoop.util.StringUtils;
 
 /*************************************************************
  * JobInProgress maintains all the info for keeping
- * a Job on the straight and narrow.  It keeps its JobProfile
+ * a Job on the straight and narrow. It keeps its JobProfile
  * and its latest JobStatus, plus a set of tables for 
  * doing bookkeeping of its Tasks.
  * ***********************************************************
@@ -255,7 +254,6 @@ public class JobInProgress {
   private String submitHostAddress;
   private String user;
   private String historyFile = "";
-  private boolean historyFileCopied;
   
   // Per-job counters
   public static enum Counter { 
@@ -265,6 +263,7 @@ public class JobInProgress {
     TOTAL_LAUNCHED_REDUCES,
     OTHER_LOCAL_MAPS,
     DATA_LOCAL_MAPS,
+    NODEGROUP_LOCAL_MAPS,
     RACK_LOCAL_MAPS,
     SLOTS_MILLIS_MAPS,
     SLOTS_MILLIS_REDUCES,
@@ -519,7 +518,7 @@ public class JobInProgress {
   public void cleanUpMetrics() {
     // per job metrics is disabled for now.
   }
-    
+  
   private void printCache (Map<Node, List<TaskInProgress>> cache) {
     LOG.info("The taskcache info:");
     for (Map.Entry<Node, List<TaskInProgress>> n : cache.entrySet()) {
@@ -701,8 +700,8 @@ public class JobInProgress {
     TaskSplitMetaInfo[] splits = createSplits(jobId);
     if (numMapTasks != splits.length) {
       throw new IOException("Number of maps in JobConf doesn't match number of " +
-      		"recieved splits for job " + jobId + "! " +
-      		"numMapTasks=" + numMapTasks + ", #splits=" + splits.length);
+          "recieved splits for job " + jobId + "! " +
+          "numMapTasks=" + numMapTasks + ", #splits=" + splits.length);
     }
     numMapTasks = splits.length;
 
@@ -1715,7 +1714,7 @@ public class JobInProgress {
     // keeping the earlier ordering intact
     String name;
     String splits = "";
-    Enum counter = null;
+    Enum<Counter> counter = null;
     if (tip.isJobSetupTask()) {
       launchedSetup = true;
       name = Values.SETUP.name();
@@ -1781,25 +1780,55 @@ public class JobInProgress {
           }
         }
       }
-      switch (level) {
-      case 0 :
-        LOG.info("Choosing data-local task " + tip.getTIPId());
-        jobCounters.incrCounter(Counter.DATA_LOCAL_MAPS, 1);
+      logAndIncreJobCounters(tip, level,jobtracker.isNodeGroupAware());
+    }
+  }
+
+  private void logAndIncreJobCounters(TaskInProgress tip, int level, 
+      boolean isNodeGroupAware) {
+    switch (level) {
+      case 0:
+        logAndIncrDataLocalMaps(tip);
         break;
       case 1:
-        LOG.info("Choosing rack-local task " + tip.getTIPId());
-        jobCounters.incrCounter(Counter.RACK_LOCAL_MAPS, 1);
-        break;
-      // TODO jdu
-      default :
-        // check if there is any locality
-        if (level != this.maxLevel) {
-          LOG.info("Choosing cached task at level " + level + tip.getTIPId());
-          jobCounters.incrCounter(Counter.OTHER_LOCAL_MAPS, 1);
+        if (isNodeGroupAware) {
+          logAndIncrNodeGroupLocalMaps(tip);
+        } else {
+          logAndIncrRackLocalMaps(tip);
         }
         break;
-      }
+      case 2:
+        if (isNodeGroupAware) {
+          logAndIncrRackLocalMaps(tip);
+        } 
+        break;
+      default:
+        // check if there is any locality
+        if (level != this.maxLevel) {
+          logAndIncrOtherLocalMaps(tip, level);
+        }
+        break;
     }
+  }
+
+  private void logAndIncrOtherLocalMaps(TaskInProgress tip, int level) {
+    LOG.info("Choosing cached task at level " + level + tip.getTIPId());
+    jobCounters.incrCounter(Counter.OTHER_LOCAL_MAPS, 1);
+  }
+
+  private void logAndIncrNodeGroupLocalMaps(TaskInProgress tip) {
+    LOG.info("Choosing nodeGroup-local task " + tip.getTIPId());
+    jobCounters.incrCounter(Counter.NODEGROUP_LOCAL_MAPS, 1);
+  }
+
+  private void logAndIncrRackLocalMaps(TaskInProgress tip) {
+    LOG.info("Choosing rack-local task " + tip.getTIPId());
+    jobCounters.incrCounter(Counter.RACK_LOCAL_MAPS, 1);
+  }
+
+  private void logAndIncrDataLocalMaps(TaskInProgress tip) {
+    LOG.info("Choosing data-local task " + tip.getTIPId());
+    jobCounters.incrCounter(Counter.DATA_LOCAL_MAPS, 1);
   }
 
   void setFirstTaskLaunchTime(TaskInProgress tip) {
