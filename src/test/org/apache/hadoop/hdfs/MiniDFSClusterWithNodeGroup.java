@@ -46,6 +46,19 @@ public class MiniDFSClusterWithNodeGroup extends MiniDFSCluster {
     super(nameNodePort, conf, numDataNodes, format, manageDfsDirs, 
         manageDfsDirs, operation, racks, null, simulatedCapacities);
   }
+  
+  public MiniDFSClusterWithNodeGroup(int nameNodePort, 
+          Configuration conf,
+          int numDataNodes,
+          boolean format,
+          boolean manageDfsDirs,
+          StartupOption operation,
+          String[] racks,
+          String[] hosts,
+          long[] simulatedCapacities) throws IOException {
+    super(nameNodePort, conf, numDataNodes, format, manageDfsDirs, 
+        manageDfsDirs, operation, racks, hosts, simulatedCapacities);
+  }
 
   // NODE_GROUPS should be set before constructor being executed.
   public static void setNodeGroups(String[] nodeGroups) {

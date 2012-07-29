@@ -1780,7 +1780,7 @@ public class JobInProgress {
           }
         }
       }
-      logAndIncreJobCounters(tip, level,jobtracker.isNodeGroupAware());
+      logAndIncreJobCounters(tip, level, jobtracker.isNodeGroupAware());
     }
   }
 
@@ -1800,7 +1800,7 @@ public class JobInProgress {
       case 2:
         if (isNodeGroupAware) {
           logAndIncrRackLocalMaps(tip);
-        } 
+        }
         break;
       default:
         // check if there is any locality
