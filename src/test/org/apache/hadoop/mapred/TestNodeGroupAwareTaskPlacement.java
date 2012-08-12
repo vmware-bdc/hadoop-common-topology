@@ -23,11 +23,15 @@ import junit.framework.TestCase;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSClusterWithNodeGroup;
 import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.mapred.SortValidator.RecordStatsChecker.NonSplitableSequenceFileInputFormat;
 import org.apache.hadoop.mapred.lib.IdentityMapper;
 import org.apache.hadoop.mapred.lib.IdentityReducer;
+import org.apache.hadoop.net.DNSToSwitchMapping;
+import org.apache.hadoop.net.StaticMapping;
+import org.junit.BeforeClass;
 
 public class TestNodeGroupAwareTaskPlacement extends TestCase {
 
@@ -111,6 +115,15 @@ public class TestNodeGroupAwareTaskPlacement extends TestCase {
     mr.waitUntilIdle();
     mr.shutdown();
   }
+  
+  @BeforeClass
+  public void setUp(){
+    // map host to related locations
+    StaticMapping.addNodeToRack(hosts1[0], rack1[0]+nodeGroup1[0]);
+    StaticMapping.addNodeToRack(hosts2[0], rack2[0]+nodeGroup2[0]);
+    StaticMapping.addNodeToRack(hosts2[1], rack2[1]+nodeGroup2[1]);
+    StaticMapping.addNodeToRack(hosts4[0], rack4[0]+nodeGroup4[0]);
+  }
 
   public void testTaskPlacement() throws IOException {
     String namenode = null;
@@ -175,9 +188,6 @@ public class TestNodeGroupAwareTaskPlacement extends TestCase {
       UtilsForTests.writeFile(
           dfs.getNameNode(), conf, new Path(inDir + "/file3"), (short)3);
       
-      // start the last datanode (datanode-4), it shouldn't includes any file
-      dfs.startDataNodes(conf, 1, true, null, rack4, nodeGroup4, hosts4, null);
-      
       namenode = (dfs.getFileSystem()).getUri().getHost() + ":" + 
                  (dfs.getFileSystem()).getUri().getPort(); 
       /* Run a job with the (only)tasktracker which is under r2/nodegroup3 and
@@ -207,6 +217,10 @@ public class TestNodeGroupAwareTaskPlacement extends TestCase {
        * creating the files, we will have all the three files on datanode1 which
        * is on the same nodegroup with datanode4 where the only tasktracker run. 
        * Thus, the result should be 3 nodegroup-local maps.
+       * The MapReduce cluster have only 1 node which is host4 but no datanode
+       * running on that host. So this is to verify that in compute/data node 
+       * separation case, it still can get nodegroup level locality in task
+       * scheduling.
        */
       launchJobAndTestCounters(testName, mr, fileSys, inDir, outputPath, 3, 0,
           0, 3, 0, jobConf);
