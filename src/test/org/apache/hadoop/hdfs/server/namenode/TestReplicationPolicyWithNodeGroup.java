@@ -400,7 +400,7 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
    * @throws Exception
    */
   public void testRereplicate3() throws Exception {
-	setupDataNodeCapacity();
+    setupDataNodeCapacity();
     List<DatanodeDescriptor> chosenNodes = new ArrayList<DatanodeDescriptor>();
     chosenNodes.add(dataNodes[0]);
     chosenNodes.add(dataNodes[3]);
