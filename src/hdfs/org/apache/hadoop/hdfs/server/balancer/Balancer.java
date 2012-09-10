@@ -59,7 +59,6 @@ import org.apache.hadoop.hdfs.protocol.FSConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
 import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
-import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.BlockWithLocations;
@@ -1508,6 +1507,11 @@ public class Balancer implements Tool {
     if (block.isLocatedOnDatanode(target)) {
       return false;
     }
+    
+    if (cluster.isNodeGroupAware() && 
+        isOnSameNodeGroupWithReplicas(target, block, source)) {
+      return false;
+    }
 
     boolean goodBlock = false;
     if (cluster.isOnSameRack(source.getDatanode(), target.getDatanode())) {
@@ -1540,7 +1544,22 @@ public class Balancer implements Tool {
     return goodBlock;
   }
   
-  /* reset all fields in a balancer preparing for the next iteration */
+  /*
+   * Return true if target node is on the same node group with any replica
+   * other than source.
+   */
+  private boolean isOnSameNodeGroupWithReplicas(BalancerDatanode target,
+      BalancerBlock block, Source source) {
+    for (BalancerDatanode loc : block.locations) {
+      if (loc != source && 
+        areDataNodesOnSameNodeGroup(loc.getDatanode(), target.getDatanode())) {
+          return true;
+        }
+      }
+    return false;
+  }
+
+/* reset all fields in a balancer preparing for the next iteration */
   private void resetData() {
     this.cluster = new NetworkTopology();
     this.overUtilizedDatanodes.clear();
