@@ -39,12 +39,12 @@ public class TopologyResolver {
     return withNodeGroupLayer ? getLastHalf(networkLocation) : null;
   }
 
-  private static String getFirstHalf(String wholeString) {
+  public static String getFirstHalf(String wholeString) {
     int index = wholeString.lastIndexOf(PATH_SEPARATOR_STR);
     return wholeString.substring(0, index);
   }
 
-  private static String getLastHalf(String wholeString) {
+  public static String getLastHalf(String wholeString) {
     int index = wholeString.lastIndexOf(PATH_SEPARATOR_STR);
     return wholeString.substring(index);
   }

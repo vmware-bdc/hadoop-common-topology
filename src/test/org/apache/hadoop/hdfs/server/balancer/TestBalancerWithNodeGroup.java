@@ -18,7 +18,10 @@
 package org.apache.hadoop.hdfs.server.balancer;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import junit.framework.TestCase;
 import org.apache.commons.logging.Log;
@@ -27,25 +30,25 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSClient;
-import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.MiniDFSClusterWithNodeGroup;
-import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
-import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.FSConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
+import org.apache.hadoop.net.TopologyResolver;
+import org.junit.Test;
 
 /**
  * This class tests if a balancer schedules tasks correctly.
  */
 public class TestBalancerWithNodeGroup extends TestCase {
   private static final Log LOG = LogFactory.getLog(
-  "org.apache.hadoop.hdfs.TestReplication");
+      "org.apache.hadoop.hdfs.TestBalancerWithNodeGroup");
   
   final private static long CAPACITY = 500L;
   final private static String RACK0 = "/rack0";
   final private static String RACK1 = "/rack1";
-  final private static String RACK2 = "/rack2";
   final private static String NODEGROUP0 = "/nodegroup0";
   final private static String NODEGROUP1 = "/nodegroup1";
   final private static String NODEGROUP2 = "/nodegroup2";
@@ -83,193 +86,38 @@ public class TestBalancerWithNodeGroup extends TestCase {
     DFSTestUtil.waitReplication(fs, filePath, replicationFactor);
   }
 
-  /* fill up a cluster with <code>numNodes</code> datanodes 
-   * whose used space to be <code>size</code>
-   */
-  private Block[] generateBlocks(Configuration conf, long size,
-      short numNodes) throws IOException {
-    cluster = new MiniDFSClusterWithNodeGroup(
-        0, conf, numNodes, true, true, null, null, null);
-    try {
-      cluster.waitActive();
-      client = DFSClient.createNamenode(conf);
-
-      short replicationFactor = (short)(numNodes-1);
-      long fileLen = size/replicationFactor;
-      createFile(fileLen, replicationFactor);
-
-      List<LocatedBlock> locatedBlocks = client.
-      getBlockLocations(fileName, 0, fileLen).getLocatedBlocks();
-
-      int numOfBlocks = locatedBlocks.size();
-      Block[] blocks = new Block[numOfBlocks];
-      for(int i=0; i<numOfBlocks; i++) {
-        Block b = locatedBlocks.get(i).getBlock();
-        blocks[i] = new Block(b.getBlockId(), b.getNumBytes(),
-                    b.getGenerationStamp());
-      }
-      return blocks;
-    } finally {
-      cluster.shutdown();
-    }
-  }
-
-  /* we first start a cluster and fill the cluster up to a certain size.
-   * then redistribute blocks according the required distribution.
-   * Afterwards a balancer is running to balance the cluster.
-   */
-  private void testUnevenDistribution(Configuration conf,
-      long distribution[], long capacities[], String[] racks, String[] nodeGroups) throws Exception {
-    int numDatanodes = distribution.length;
-    if (capacities.length != numDatanodes || racks.length != numDatanodes) {
-      throw new IllegalArgumentException("Array length is not the same");
-    }
-
-    // calculate total space that need to be filled
-    long totalUsedSpace = 0L;
-    for(int i=0; i<distribution.length; i++) {
-      totalUsedSpace += distribution[i];
-    }
-
-    // fill the cluster
-    Block[] blocks = generateBlocks(conf, totalUsedSpace,
-        (short) numDatanodes);
-
-    // redistribute blocks
-    Block[][] blocksDN = TestBalancer.distributeBlocks(
-        blocks, (short)(numDatanodes-1), distribution);
-
-    // restart the cluster: do NOT format the cluster
-    conf.set(DFSConfigKeys.DFS_NAMENODE_SAFEMODE_THRESHOLD_PCT_KEY, "0.0f");
+  /** Create a cluster with even distribution, and a new empty node is added to
+   *  the cluster, then test rack locality for balancer policy. 
+   **/
+  @Test
+  public void testBalancerWithRackLocality() throws Exception {
+    Configuration conf = createConf();
+    long[] capacities = new long[]{CAPACITY, CAPACITY};
+    String[] racks = new String[]{RACK0, RACK1};
+    String[] nodeGroups = new String[]{NODEGROUP0, NODEGROUP1};
     
-    MiniDFSClusterWithNodeGroup.setNodeGroups(nodeGroups);
-    cluster = new MiniDFSClusterWithNodeGroup(0, conf,numDatanodes, 
-              false, true, null, racks, capacities);
-    cluster.waitActive();
-    client = DFSClient.createNamenode(conf);
-
-    cluster.injectBlocks(blocksDN);
-
-    long totalCapacity = 0L;
-    for(long capacity:capacities) {
-      totalCapacity += capacity;
-    }
-    TestBalancer.runBalancer(cluster, client, new Balancer(conf), 
-        totalUsedSpace, totalCapacity);
-    cluster.shutdown();
-  }
-
-  /** This test start a cluster with specified number of nodes, 
-   * and fills it to be 30% full (with a single file replicated identically
-   * to all datanodes);
-   * It then adds one new empty node and starts balancing.
-   * 
-   * @param conf - configuration
-   * @param capacities - array of capacities of original nodes in cluster
-   * @param racks - array of racks for original nodes in cluster
-   * @param nodeGroups - array of nodeGroups for original nodes in cluster
-   * @param newCapacity - new node's capacity
-   * @param newRack - new node's rack
-   * @param newNodeGroiup - new node's nodegroup
-   * @throws Exception
-   */
-  private void doTest(Configuration conf, long[] capacities, String[] racks, 
-      String[] nodeGroups, long newCapacity, String newRack, 
-      String newNodeGroup) throws Exception {
-    assertEquals(capacities.length, racks.length);
     int numOfDatanodes = capacities.length;
-    
+    assertEquals(numOfDatanodes, racks.length);
     MiniDFSClusterWithNodeGroup.setNodeGroups(nodeGroups);
     cluster = new MiniDFSClusterWithNodeGroup(0, conf, capacities.length,
         true, true, null, racks, capacities);
     try {
       cluster.waitActive();
       client = DFSClient.createNamenode(conf);
-
-      long totalCapacity=0L;
-      for(long capacity:capacities) {
+      
+      long totalCapacity = 0L;
+      for(long capacity : capacities) {
         totalCapacity += capacity;
       }
       
       // fill up the cluster to be 30% full
       long totalUsedSpace = totalCapacity*3/10;
-      createFile(totalUsedSpace/numOfDatanodes, (short)numOfDatanodes);
-      // start up an empty node with the same capacity and on the same rack
-      cluster.startDataNodes(conf, 1, true, null, new String[]{newRack}, 
-          new String[]{newNodeGroup}, new long[]{newCapacity});
-
-      totalCapacity += newCapacity;
-
-      // run balancer and validate results
-      TestBalancer.runBalancer(cluster, client, new Balancer(conf),
-          totalUsedSpace, totalCapacity);
-    } finally {
-      cluster.shutdown();
-    }
-  }
-  
-  /** one-node cluster test*/
-  private void oneNodeTest(Configuration conf) throws Exception {
-    // add an empty node with half of the CAPACITY & the same rack
-    doTest(conf, new long[]{CAPACITY}, new String[]{RACK0}, new String[]{NODEGROUP0}, 
-        CAPACITY/2, RACK0, NODEGROUP0);
-  }
-  
-  /** two-node cluster test */
-  private void twoNodeTest(Configuration conf) throws Exception {
-    doTest(conf, new long[]{CAPACITY, CAPACITY}, new String[]{RACK0, RACK1},
-        new String[]{NODEGROUP0, NODEGROUP1}, CAPACITY, RACK2, NODEGROUP2);
-  }
-
-  /** Test a cluster with even distribution, 
-   * then a new empty node is added to the cluster*/
-  public void testBalancer0() throws Exception {
-    Configuration conf = new Configuration();
-    initConf(conf);
-    oneNodeTest(conf);
-    twoNodeTest(conf);
-  }
-
-  /** Test unevenly distributed cluster */
-  public void testBalancer1() throws Exception {
-    Configuration conf = new Configuration();
-    initConf(conf);
-    testUnevenDistribution(conf,
-        new long[]{50*CAPACITY/100, 10*CAPACITY/100},
-        new long[]{CAPACITY, CAPACITY}, new String[] {RACK0, RACK1}, 
-        new String[]{NODEGROUP0, NODEGROUP1});
-  }
-
-  public void testBalancer2() throws Exception {
-    Configuration conf = new Configuration();
-    initConf(conf);
-    testBalancerDefaultConstructor(conf, new long[]{CAPACITY, CAPACITY},
-        new String[]{RACK0, RACK1}, new String[]{NODEGROUP0, NODEGROUP1}, 
-        CAPACITY, RACK2, NODEGROUP2);
-  }
-
-  private void testBalancerDefaultConstructor(Configuration conf,
-      long[] capacities, String[] racks, String[] nodeGroups, long newCapacity, 
-      String newRack, String newNodeGroup)
-      throws Exception {
-    int numOfDatanodes = capacities.length;
-    assertEquals(numOfDatanodes, racks.length);
-    // Set nodeGroups prior to constructor
-    MiniDFSClusterWithNodeGroup.setNodeGroups(nodeGroups);
-    cluster = new MiniDFSClusterWithNodeGroup(0, conf, capacities.length, true, true,
-            null, racks, capacities);
-    try {
-      cluster.waitActive();
-      client = DFSClient.createNamenode(conf);
-
-      long totalCapacity=0L;
-      for(long capacity:capacities) {
-        totalCapacity += capacity;
-      }
-
-      // fill up the cluster to be 30% full
-      long totalUsedSpace = totalCapacity * 3 / 10;
+      
       createFile(totalUsedSpace / numOfDatanodes, (short) numOfDatanodes);
+      
+      long newCapacity = CAPACITY;
+      String newRack = RACK1;
+      String newNodeGroup = NODEGROUP2;
       // start up an empty node with the same capacity and on the same rack
       cluster.startDataNodes(conf, 1, true, null, new String[]{newRack},
           new String[]{newNodeGroup}, new long[] {newCapacity});
@@ -277,21 +125,85 @@ public class TestBalancerWithNodeGroup extends TestCase {
       totalCapacity += newCapacity;
 
       // run balancer and validate results
-      TestBalancer.runBalancer(cluster, client, new Balancer(conf), 
+      TestBalancer.runBalancer(cluster, client, new Balancer(conf),
           totalUsedSpace, totalCapacity);
+      
+    } finally {
+      cluster.shutdown();
+    }
+  }
+  
+  // create and initiate conf for balancer
+  private Configuration createConf() {
+    Configuration conf = new Configuration();
+    initConf(conf);
+    return conf;
+  }
+
+  /**
+   *  Create a cluster with even distribution, and a new empty node is added to
+   *  the cluster, then test node-group locality for balancer policy.
+   */
+  @Test
+  public void testBalancerWithNodeGroupLocality() throws Exception {
+    Configuration conf = createConf();
+    long[] capacities = new long[]{CAPACITY, CAPACITY, CAPACITY, CAPACITY};
+    String[] racks = new String[]{RACK0, RACK0, RACK1, RACK1};
+    String[] nodeGroups = new String[]{NODEGROUP0, NODEGROUP0, NODEGROUP1, NODEGROUP2};
+    
+    int numOfDatanodes = capacities.length;
+    assertEquals(numOfDatanodes, racks.length);
+    assertEquals(numOfDatanodes, nodeGroups.length);
+    MiniDFSClusterWithNodeGroup.setNodeGroups(nodeGroups);
+    cluster = new MiniDFSClusterWithNodeGroup(0, conf, capacities.length,
+        true, true, null, racks, capacities);
+    try {
+      cluster.waitActive();
+      client = DFSClient.createNamenode(conf);
+      
+      long totalCapacity = 0L;
+      for(long capacity : capacities) {
+        totalCapacity += capacity;
+      }
+      
+      // fill up the cluster to be 30% full
+      long totalUsedSpace = totalCapacity*3/10;
+      createFile(totalUsedSpace / (numOfDatanodes/2),
+          (short) (numOfDatanodes/2));
+      
+      long newCapacity = CAPACITY;
+      String newRack = RACK1;
+      String newNodeGroup = NODEGROUP2;
+      // start up an empty node with the same capacity and on NODEGROUP2
+      cluster.startDataNodes(conf, 1, true, null, new String[]{newRack},
+          new String[]{newNodeGroup}, new long[] {newCapacity});
+
+      totalCapacity += newCapacity;
+      // run balancer and validate results
+      TestBalancer.runBalancer(cluster, client, new Balancer(conf),
+          totalUsedSpace, totalCapacity);
+      
+      DatanodeInfo[] datanodeReport = 
+          client.getDatanodeReport(DatanodeReportType.ALL);
+      
+      Map<String, List<DatanodeInfo>> nodeGroupToDNList = 
+          new HashMap<String, List<DatanodeInfo>>();
+      for (DatanodeInfo datanode: datanodeReport) {
+        String nodeGroup = 
+            TopologyResolver.getLastHalf(datanode.getNetworkLocation());
+        List<DatanodeInfo> datanodeList = null;
+        if ((datanodeList = nodeGroupToDNList.get(nodeGroup)) != null) {
+          datanodeList.add(datanode);
+        } else {
+          datanodeList = new ArrayList<DatanodeInfo>();
+          datanodeList.add(datanode);
+          nodeGroupToDNList.put(nodeGroup, datanodeList);
+        }
+      }
     } finally {
       cluster.shutdown();
     }
   }
 
-  /**
-   * @param args
-   */
-  public static void main(String[] args) throws Exception {
-    TestBalancerWithNodeGroup balancerTest = new TestBalancerWithNodeGroup();
-    balancerTest.testBalancer0();
-    balancerTest.testBalancer1();
-    balancerTest.testBalancer2();
-  }
 }
 
