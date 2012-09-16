@@ -147,7 +147,7 @@ public class TestNodeGroupAwareTaskPlacement extends TestCase {
       conf.setBoolean("dfs.replication.considerLoad", false);
       
       conf.set("dfs.block.replicator.classname", 
-          "org.apache.hadoop.hdfs.server.namenode.ReplicationTargetChooserWithNodeGroup");
+          "org.apache.hadoop.hdfs.server.namenode.BlockPlacementPolicyWithNodeGroup");
       
       conf.set("net.topology.impl",
           "org.apache.hadoop.net.NetworkTopologyWithNodeGroup");
