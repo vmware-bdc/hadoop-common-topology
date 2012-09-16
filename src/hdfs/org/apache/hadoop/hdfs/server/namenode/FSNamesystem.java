@@ -956,8 +956,10 @@ public class FSNamesystem implements FSConstants, FSNamesystemMBean, FSClusterSt
         true);
     if (blocks != null) {
       //sort the blocks
-      // As it is possible for the separation of node manager and datanode, 
-      // here we should get node but not datanode only .
+      // In some deployment cases, cluster is with separation of task tracker 
+      // and datanode which means client machines will not always be recognized 
+      // as known data nodes, so here we should try to get node (but not 
+      // datanode only) for locality based sort.
       Node client = host2DataNodeMap.getDatanodeByHost(
           clientMachine);
       

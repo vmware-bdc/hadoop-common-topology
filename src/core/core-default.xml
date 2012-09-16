@@ -461,7 +461,7 @@
 <property>
   <name>dfs.block.replicator.classname</name>
   <value></value>
-  <description> The default implementation of ReplicationTargetChooser.
+  <description> The implementation of BlockPlacementPolicy.
   </description>
 </property>
 
