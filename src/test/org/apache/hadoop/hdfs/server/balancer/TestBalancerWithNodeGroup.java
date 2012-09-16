@@ -52,6 +52,7 @@ public class TestBalancerWithNodeGroup extends TestCase {
   final private static String NODEGROUP0 = "/nodegroup0";
   final private static String NODEGROUP1 = "/nodegroup1";
   final private static String NODEGROUP2 = "/nodegroup2";
+  final private static String NODEGROUP3 = "/nodegroup3";
   final static private String fileName = "/tmp.txt";
   final static private Path filePath = new Path(fileName);
   MiniDFSClusterWithNodeGroup cluster;
@@ -75,6 +76,8 @@ public class TestBalancerWithNodeGroup extends TestCase {
     conf.setBoolean(SimulatedFSDataset.CONFIG_PROPERTY_SIMULATED, true);
     conf.setLong("dfs.balancer.movedWinWidth", 2000L);
     conf.set("net.topology.impl", "org.apache.hadoop.net.NetworkTopologyWithNodeGroup");
+    conf.set("dfs.block.replicator.classname",
+        "org.apache.hadoop.hdfs.server.namenode.BlockPlacementPolicyWithNodeGroup");
   }
 
   /* create a file with a length of <code>fileLen</code> */
@@ -147,9 +150,11 @@ public class TestBalancerWithNodeGroup extends TestCase {
   @Test
   public void testBalancerWithNodeGroupLocality() throws Exception {
     Configuration conf = createConf();
-    long[] capacities = new long[]{CAPACITY, CAPACITY, CAPACITY, CAPACITY};
-    String[] racks = new String[]{RACK0, RACK0, RACK1, RACK1};
-    String[] nodeGroups = new String[]{NODEGROUP0, NODEGROUP0, NODEGROUP1, NODEGROUP2};
+    long[] capacities = new long[]{CAPACITY, CAPACITY, CAPACITY, 
+        CAPACITY, CAPACITY};
+    String[] racks = new String[]{RACK0, RACK0, RACK0, RACK1, RACK1};
+    String[] nodeGroups = new String[]{NODEGROUP0, NODEGROUP0, NODEGROUP1, 
+        NODEGROUP2, NODEGROUP3};
     
     int numOfDatanodes = capacities.length;
     assertEquals(numOfDatanodes, racks.length);
@@ -167,9 +172,9 @@ public class TestBalancerWithNodeGroup extends TestCase {
       }
       
       // fill up the cluster to be 30% full
-      long totalUsedSpace = totalCapacity*3/10;
-      createFile(totalUsedSpace / (numOfDatanodes/2),
-          (short) (numOfDatanodes/2));
+      long totalUsedSpace = totalCapacity *3 /10;
+
+      createFile(totalUsedSpace / 2, (short) 2);
       
       long newCapacity = CAPACITY;
       String newRack = RACK1;

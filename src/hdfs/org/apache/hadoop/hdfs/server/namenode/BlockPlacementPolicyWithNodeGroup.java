@@ -18,6 +18,7 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -198,9 +199,9 @@ public class BlockPlacementPolicyWithNodeGroup extends
    * If first is empty, then pick second.
    */
   @Override
-  public Iterator<DatanodeDescriptor> pickupReplicaSet(
-      List<DatanodeDescriptor> first,
-      List<DatanodeDescriptor> second) {
+  protected Iterator<DatanodeDescriptor> pickupReplicaSet(
+      Collection<DatanodeDescriptor> first,
+      Collection<DatanodeDescriptor> second) {
     // If no replica within same rack, return directly.
     if (first.isEmpty()) {
       return second.iterator();
@@ -212,7 +213,7 @@ public class BlockPlacementPolicyWithNodeGroup extends
         new HashMap<String, List<DatanodeDescriptor>>();
     
     for(final Iterator<DatanodeDescriptor> iter = first.iterator();
-        iter.hasNext(); ) {
+        iter.hasNext();) {
       final DatanodeDescriptor node = iter.next();
       final String nodeGroupName = 
           TopologyResolver.getNodeGroup(node.getNetworkLocation(), true);
@@ -229,7 +230,7 @@ public class BlockPlacementPolicyWithNodeGroup extends
     final List<DatanodeDescriptor> remains = new ArrayList<DatanodeDescriptor>();
     // split nodes into two sets
     for(List<DatanodeDescriptor> datanodeList : nodeGroupMap.values()) {
-      if (datanodeList.size() == 1 ) {
+      if (datanodeList.size() == 1) {
         // remains contains the remaining nodes
         remains.add(datanodeList.get(0));
       } else {

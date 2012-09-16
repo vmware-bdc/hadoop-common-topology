@@ -182,19 +182,6 @@ public class TestReplicationPolicyWithNodeGroup extends TestCase {
     assertFalse(cluster.isOnSameNodeGroup(targets[1], targets[2]) ||
             cluster.isOnSameNodeGroup(targets[2], targets[3]));
     assertFalse(cluster.isOnSameRack(targets[1], targets[3]));
-
-    excludedNodes.clear();
-    chosenNodes.clear();
-    excludedNodes.put(dataNodes[1], dataNodes[1]); 
-    chosenNodes.add(dataNodes[2]);
-    targets = repl.chooseTarget(filename, 1, dataNodes[0], chosenNodes,
-        excludedNodes, BLOCK_SIZE);
-    System.out.println("targets=" + Arrays.asList(targets));
-    assertEquals(2, targets.length);
-    //make sure that the chosen node is in the target.
-    int i = 0;
-    for(; i < targets.length && !dataNodes[2].equals(targets[i]); i++);
-    assertTrue(i < targets.length);
   }
 
   /**

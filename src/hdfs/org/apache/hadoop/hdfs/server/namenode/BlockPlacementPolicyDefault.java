@@ -483,36 +483,6 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
     }
     return nodes;
   }
-  
-  /**
-   * Decide to delete the specified replica of the block still makes 
-   * the block conform to the configured block placement policy.
-   * 
-   * @param priSet The replica locations of this block that are present
-                  on at least two unique racks. 
-   * @param remains Replica locations of this block that are not
-                   listed in the previous parameter.
-   * @return the replica that is the best candidate for deletion
-   */
-  public DatanodeDescriptor chooseReplicaToDelete(
-      List<DatanodeDescriptor> priSet,
-      List<DatanodeDescriptor> remains) {
-    long minSpace = Long.MAX_VALUE;
-    DatanodeDescriptor cur = null;
-
-    // pick replica from the priSet. If priSet is empty, then pick replicas
-    // from remains set.
-    Iterator<DatanodeDescriptor> iter = pickupReplicaSet(priSet, remains);
-    while( iter.hasNext() ) {
-      DatanodeDescriptor node = iter.next();
-      long free = node.getRemaining();
-      if (minSpace > free) {
-        minSpace = free;
-        cur = node;
-      }
-    }
-    return cur;
-  }
 
   /**
    * Adjust rackmap, priSet, and remains after choosing replica to delete.
@@ -590,20 +560,6 @@ public class BlockPlacementPolicyDefault extends BlockPlacementPolicy {
     }
   }
   
-  /**
-   * Pick up replica node set for deleting replica as over-replicated. 
-   * First set contains replica nodes on rack with more than one
-   * replica while second set contains remaining replica nodes.
-   * So pick up first set if not empty. If first is empty, then pick second.
-   */
-  protected Iterator<DatanodeDescriptor> pickupReplicaSet(
-      List<DatanodeDescriptor> priSet,
-      List<DatanodeDescriptor> remains) {
-    Iterator<DatanodeDescriptor> iter = 
-        priSet.isEmpty() ? remains.iterator() : priSet.iterator();
-    return iter;
-  }
-
   /** {@inheritDoc} */
   public int verifyBlockPlacement(String srcPath,
                                   LocatedBlock lBlk,

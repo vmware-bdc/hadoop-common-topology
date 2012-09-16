@@ -797,7 +797,8 @@ public class Balancer implements Tool {
    */
   private void checkReplicationPolicyCompatibility(Configuration conf)
       throws UnsupportedActionException {
-    if (BlockPlacementPolicy.getInstance(conf, null, null).getClass() != BlockPlacementPolicyDefault.class) {
+    if (!(BlockPlacementPolicy.getInstance(conf, null, null) 
+        instanceof BlockPlacementPolicyDefault)) {
       throw new UnsupportedActionException(
           "Balancer without BlockPlacementPolicyDefault");
     }
@@ -1581,7 +1582,9 @@ public class Balancer implements Tool {
 
 /* reset all fields in a balancer preparing for the next iteration */
   private void resetData() {
-    this.cluster = new NetworkTopology();
+    this.cluster = (NetworkTopology) ReflectionUtils.newInstance(
+        conf.getClass("net.topology.impl", NetworkTopology.class,
+            NetworkTopology.class), conf);
     this.overUtilizedDatanodes.clear();
     this.aboveAvgUtilizedDatanodes.clear();
     this.belowAvgUtilizedDatanodes.clear();
