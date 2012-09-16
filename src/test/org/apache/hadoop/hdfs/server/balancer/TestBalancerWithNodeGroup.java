@@ -18,10 +18,6 @@
 package org.apache.hadoop.hdfs.server.balancer;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
 import java.util.Random;
 import junit.framework.TestCase;
 import org.apache.commons.logging.Log;
@@ -33,10 +29,7 @@ import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.MiniDFSClusterWithNodeGroup;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
-import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
-import org.apache.hadoop.hdfs.protocol.FSConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
-import org.apache.hadoop.net.TopologyResolver;
 import org.junit.Test;
 
 /**
@@ -52,7 +45,6 @@ public class TestBalancerWithNodeGroup extends TestCase {
   final private static String NODEGROUP0 = "/nodegroup0";
   final private static String NODEGROUP1 = "/nodegroup1";
   final private static String NODEGROUP2 = "/nodegroup2";
-  final private static String NODEGROUP3 = "/nodegroup3";
   final static private String fileName = "/tmp.txt";
   final static private Path filePath = new Path(fileName);
   MiniDFSClusterWithNodeGroup cluster;
@@ -62,7 +54,7 @@ public class TestBalancerWithNodeGroup extends TestCase {
   static final long TIMEOUT = 20000L; //msec
   static final double CAPACITY_ALLOWED_VARIANCE = 0.005;  // 0.5%
   static final double BALANCE_ALLOWED_VARIANCE = 0.11;    // 10%+delta
-  static final int DEFAULT_BLOCK_SIZE = 10;
+  static final int DEFAULT_BLOCK_SIZE = 5;
   private static final Random r = new Random();
 
   static {
@@ -93,7 +85,7 @@ public class TestBalancerWithNodeGroup extends TestCase {
    *  the cluster, then test rack locality for balancer policy. 
    **/
   @Test
-  public void testBalancerWithRackLocality() throws Exception {
+  public void testBalancerWithNodeGroup() throws Exception {
     Configuration conf = createConf();
     long[] capacities = new long[]{CAPACITY, CAPACITY};
     String[] racks = new String[]{RACK0, RACK1};
@@ -141,73 +133,6 @@ public class TestBalancerWithNodeGroup extends TestCase {
     Configuration conf = new Configuration();
     initConf(conf);
     return conf;
-  }
-
-  /**
-   *  Create a cluster with even distribution, and a new empty node is added to
-   *  the cluster, then test node-group locality for balancer policy.
-   */
-  @Test
-  public void testBalancerWithNodeGroupLocality() throws Exception {
-    Configuration conf = createConf();
-    long[] capacities = new long[]{CAPACITY, CAPACITY, CAPACITY, 
-        CAPACITY, CAPACITY};
-    String[] racks = new String[]{RACK0, RACK0, RACK0, RACK1, RACK1};
-    String[] nodeGroups = new String[]{NODEGROUP0, NODEGROUP0, NODEGROUP1, 
-        NODEGROUP2, NODEGROUP3};
-    
-    int numOfDatanodes = capacities.length;
-    assertEquals(numOfDatanodes, racks.length);
-    assertEquals(numOfDatanodes, nodeGroups.length);
-    MiniDFSClusterWithNodeGroup.setNodeGroups(nodeGroups);
-    cluster = new MiniDFSClusterWithNodeGroup(0, conf, capacities.length,
-        true, true, null, racks, capacities);
-    try {
-      cluster.waitActive();
-      client = DFSClient.createNamenode(conf);
-      
-      long totalCapacity = 0L;
-      for(long capacity : capacities) {
-        totalCapacity += capacity;
-      }
-      
-      // fill up the cluster to be 30% full
-      long totalUsedSpace = totalCapacity *3 /10;
-
-      createFile(totalUsedSpace / 2, (short) 2);
-      
-      long newCapacity = CAPACITY;
-      String newRack = RACK1;
-      String newNodeGroup = NODEGROUP2;
-      // start up an empty node with the same capacity and on NODEGROUP2
-      cluster.startDataNodes(conf, 1, true, null, new String[]{newRack},
-          new String[]{newNodeGroup}, new long[] {newCapacity});
-
-      totalCapacity += newCapacity;
-      // run balancer and validate results
-      TestBalancer.runBalancer(cluster, client, new Balancer(conf),
-          totalUsedSpace, totalCapacity);
-      
-      DatanodeInfo[] datanodeReport = 
-          client.getDatanodeReport(DatanodeReportType.ALL);
-      
-      Map<String, List<DatanodeInfo>> nodeGroupToDNList = 
-          new HashMap<String, List<DatanodeInfo>>();
-      for (DatanodeInfo datanode: datanodeReport) {
-        String nodeGroup = 
-            TopologyResolver.getLastHalf(datanode.getNetworkLocation());
-        List<DatanodeInfo> datanodeList = null;
-        if ((datanodeList = nodeGroupToDNList.get(nodeGroup)) != null) {
-          datanodeList.add(datanode);
-        } else {
-          datanodeList = new ArrayList<DatanodeInfo>();
-          datanodeList.add(datanode);
-          nodeGroupToDNList.put(nodeGroup, datanodeList);
-        }
-      }
-    } finally {
-      cluster.shutdown();
-    }
   }
 
 }
