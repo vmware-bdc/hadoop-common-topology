@@ -32,6 +32,7 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -65,6 +66,17 @@ public class S3FileSystem extends FileSystem {
   
   public S3FileSystem(FileSystemStore store) {
     this.store = store;
+  }
+
+  /**
+   * Return the protocol scheme for the FileSystem.
+   * <p/>
+   *
+   * @return <code>s3</code>
+   */
+  @Override
+  public String getScheme() {
+    return "s3";
   }
 
   @Override
@@ -195,6 +207,7 @@ public class S3FileSystem extends FileSystem {
   }
 
   /** This optional operation is not yet supported. */
+  @Override
   public FSDataOutputStream append(Path f, int bufferSize,
       Progressable progress) throws IOException {
     throw new IOException("Not supported");
@@ -214,7 +227,7 @@ public class S3FileSystem extends FileSystem {
       if (overwrite) {
         delete(file, true);
       } else {
-        throw new IOException("File already exists: " + file);
+        throw new FileAlreadyExistsException("File already exists: " + file);
       }
     } else {
       Path parent = file.getParent();
@@ -240,32 +253,125 @@ public class S3FileSystem extends FileSystem {
   @Override
   public boolean rename(Path src, Path dst) throws IOException {
     Path absoluteSrc = makeAbsolute(src);
+    final String debugPreamble = "Renaming '" + src + "' to '" + dst + "' - ";
     INode srcINode = store.retrieveINode(absoluteSrc);
+    boolean debugEnabled = LOG.isDebugEnabled();
     if (srcINode == null) {
       // src path doesn't exist
+      if (debugEnabled) {
+        LOG.debug(debugPreamble + "returning false as src does not exist");
+      }
       return false; 
     }
+
     Path absoluteDst = makeAbsolute(dst);
-    INode dstINode = store.retrieveINode(absoluteDst);
-    if (dstINode != null && dstINode.isDirectory()) {
-      absoluteDst = new Path(absoluteDst, absoluteSrc.getName());
-      dstINode = store.retrieveINode(absoluteDst);
-    }
-    if (dstINode != null) {
-      // dst path already exists - can't overwrite
-      return false;
-    }
+
+    //validate the parent dir of the destination
     Path dstParent = absoluteDst.getParent();
     if (dstParent != null) {
+      //if the dst parent is not root, make sure it exists
       INode dstParentINode = store.retrieveINode(dstParent);
-      if (dstParentINode == null || dstParentINode.isFile()) {
-        // dst parent doesn't exist or is a file
+      if (dstParentINode == null) {
+        // dst parent doesn't exist
+        if (debugEnabled) {
+          LOG.debug(debugPreamble +
+                    "returning false as dst parent does not exist");
+        }
+        return false;
+      }
+      if (dstParentINode.isFile()) {
+        // dst parent exists but is a file
+        if (debugEnabled) {
+          LOG.debug(debugPreamble +
+                    "returning false as dst parent exists and is a file");
+        }
         return false;
       }
     }
+
+    //get status of source
+    boolean srcIsFile = srcINode.isFile();
+
+    INode dstINode = store.retrieveINode(absoluteDst);
+    boolean destExists = dstINode != null;
+    boolean destIsDir = destExists && !dstINode.isFile();
+    if (srcIsFile) {
+
+      //source is a simple file
+      if (destExists) {
+        if (destIsDir) {
+          //outcome #1 dest exists and is dir -filename to subdir of dest
+          if (debugEnabled) {
+            LOG.debug(debugPreamble +
+                      "copying src file under dest dir to " + absoluteDst);
+          }
+          absoluteDst = new Path(absoluteDst, absoluteSrc.getName());
+        } else {
+          //outcome #2 dest it's a file: fail iff different from src
+          boolean renamingOnToSelf = absoluteSrc.equals(absoluteDst);
+          if (debugEnabled) {
+            LOG.debug(debugPreamble +
+                      "copying file onto file, outcome is " + renamingOnToSelf);
+          }
+          return renamingOnToSelf;
+        }
+      } else {
+        // #3 dest does not exist: use dest as path for rename
+        if (debugEnabled) {
+          LOG.debug(debugPreamble +
+                    "copying file onto file");
+        }
+      }
+    } else {
+      //here the source exists and is a directory
+      // outcomes (given we know the parent dir exists if we get this far)
+      // #1 destination is a file: fail
+      // #2 destination is a directory: create a new dir under that one
+      // #3 destination doesn't exist: create a new dir with that name
+      // #3 and #4 are only allowed if the dest path is not == or under src
+
+      if (destExists) {
+        if (!destIsDir) {
+          // #1 destination is a file: fail
+          if (debugEnabled) {
+            LOG.debug(debugPreamble +
+                      "returning false as src is a directory, but not dest");
+          }
+          return false;
+        } else {
+          // the destination dir exists
+          // destination for rename becomes a subdir of the target name
+          absoluteDst = new Path(absoluteDst, absoluteSrc.getName());
+          if (debugEnabled) {
+            LOG.debug(debugPreamble +
+                      "copying src dir under dest dir to " + absoluteDst);
+          }
+        }
+      }
+      //the final destination directory is now know, so validate it for
+      //illegal moves
+
+      if (absoluteSrc.equals(absoluteDst)) {
+        //you can't rename a directory onto itself
+        if (debugEnabled) {
+          LOG.debug(debugPreamble +
+                    "Dest==source && isDir -failing");
+        }
+        return false;
+      }
+      if (absoluteDst.toString().startsWith(absoluteSrc.toString() + "/")) {
+        //you can't move a directory under itself
+        if (debugEnabled) {
+          LOG.debug(debugPreamble +
+                    "dst is equal to or under src dir -failing");
+        }
+        return false;
+      }
+    }
+    //here the dest path is set up -so rename
     return renameRecursive(absoluteSrc, absoluteDst);
   }
-  
+
   private boolean renameRecursive(Path src, Path dst) throws IOException {
     INode srcINode = store.retrieveINode(src);
     store.storeINode(dst, srcINode);
@@ -287,6 +393,7 @@ public class S3FileSystem extends FileSystem {
     return true;
   }
 
+  @Override
   public boolean delete(Path path, boolean recursive) throws IOException {
    Path absolutePath = makeAbsolute(path);
    INode inode = store.retrieveINode(absolutePath);
@@ -335,6 +442,12 @@ public class S3FileSystem extends FileSystem {
   @Override
   public long getDefaultBlockSize() {
     return getConf().getLong("fs.s3.block.size", 64 * 1024 * 1024);
+  }
+
+  @Override
+  public String getCanonicalServiceName() {
+    // Does not support Token
+    return null;
   }
 
   // diagnostic methods

@@ -26,6 +26,7 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.text.ParseException;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 
 import org.apache.commons.collections.IteratorUtils;
@@ -42,7 +43,7 @@ import org.apache.hadoop.mapreduce.counters.FrameworkCounterGroup;
 import org.apache.hadoop.mapreduce.counters.GenericCounter;
 import org.apache.hadoop.mapreduce.counters.Limits;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormatCounter;
-import org.apache.hadoop.mapreduce.util.CountersStrings;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormatCounter;
 
 import com.google.common.collect.Iterators;
 
@@ -61,7 +62,14 @@ import com.google.common.collect.Iterators;
 public class Counters
     extends AbstractCounters<Counters.Counter, Counters.Group> {
   
-  public static int MAX_COUNTER_LIMIT = Limits.COUNTERS_MAX;
+  public static int MAX_COUNTER_LIMIT = Limits.getCountersMax();
+  public static int MAX_GROUP_LIMIT = Limits.getGroupsMax();
+  private static HashMap<String, String> depricatedCounterMap =
+      new HashMap<String, String>();
+  
+  static {
+    initDepricatedMap();
+  }
   
   public Counters() {
     super(groupFactory);
@@ -71,6 +79,27 @@ public class Counters
     super(newCounters, groupFactory);
   }
 
+  @SuppressWarnings({ "deprecation" })
+  private static void initDepricatedMap() {
+    depricatedCounterMap.put(FileInputFormat.Counter.class.getName(),
+      FileInputFormatCounter.class.getName());
+    depricatedCounterMap.put(FileOutputFormat.Counter.class.getName(),
+      FileOutputFormatCounter.class.getName());
+    depricatedCounterMap.put(
+      org.apache.hadoop.mapreduce.lib.input.FileInputFormat.Counter.class
+        .getName(), FileInputFormatCounter.class.getName());
+    depricatedCounterMap.put(
+      org.apache.hadoop.mapreduce.lib.output.FileOutputFormat.Counter.class
+        .getName(), FileOutputFormatCounter.class.getName());
+  }
+
+  private static String getNewGroupKey(String oldGroup) {
+    if (depricatedCounterMap.containsKey(oldGroup)) {
+      return depricatedCounterMap.get(oldGroup);
+    }
+    return null;
+  }
+  
   /**
    * Downgrade new {@link org.apache.hadoop.mapreduce.Counters} to old Counters
    * @param newCounters new Counters
@@ -90,7 +119,23 @@ public class Counters
   }
 
   public synchronized String makeCompactString() {
-    return CountersStrings.toEscapedCompactString(this);
+    StringBuilder builder = new StringBuilder();
+    boolean first = true;
+    for(Group group: this){
+      for(Counter counter: group) {
+        if (first) {
+          first = false;
+        } else {
+          builder.append(',');
+        }
+        builder.append(group.getDisplayName());
+        builder.append('.');
+        builder.append(counter.getDisplayName());
+        builder.append(':');
+        builder.append(counter.getCounter());
+      }
+    }
+    return builder.toString();
   }
   
   /**
@@ -213,6 +258,10 @@ public class Counters
   @InterfaceStability.Stable
   public static class Group implements CounterGroupBase<Counter> {
     private CounterGroupBase<Counter> realGroup;
+    
+    protected Group() {
+      realGroup = null;
+    }
     
     Group(GenericGroup group) {
       this.realGroup = group;
@@ -387,21 +436,13 @@ public class Counters
   private static class FrameworkGroupImpl<T extends Enum<T>>
       extends FrameworkCounterGroup<T, Counter> {
 
-    // Mix the framework counter implementation into the Counter interface
-    class FrameworkCounterImpl extends FrameworkCounter {
-      FrameworkCounterImpl(T key) {
-        super(key);
-      }
-
-    }
-
     FrameworkGroupImpl(Class<T> cls) {
       super(cls);
     }
 
     @Override
     protected Counter newCounter(T key) {
-      return new Counter(new FrameworkCounterImpl(key));
+      return new Counter(new FrameworkCounter<T>(key, getName()));
     }
 
     @Override
@@ -413,17 +454,9 @@ public class Counters
   // Mix the file system counter group implementation into the Group interface
   private static class FSGroupImpl extends FileSystemCounterGroup<Counter> {
 
-    private class FSCounterImpl extends FSCounter {
-
-      FSCounterImpl(String scheme, FileSystemCounter key) {
-        super(scheme, key);
-      }
-
-    }
-
     @Override
     protected Counter newCounter(String scheme, FileSystemCounter key) {
-      return new Counter(new FSCounterImpl(scheme, key));
+      return new Counter(new FSCounter(scheme, key));
     }
 
     @Override
@@ -438,6 +471,10 @@ public class Counters
                "Use FileInputFormatCounters as group name and " +
                " BYTES_READ as counter name instead");
       return findCounter(FileInputFormatCounter.BYTES_READ);
+    }
+    String newGroupKey = getNewGroupKey(group);
+    if (newGroupKey != null) {
+      group = newGroupKey;
     }
     return getGroup(group).getCounterForName(name);
   }
@@ -590,5 +627,22 @@ public class Counters
   public static Counters fromEscapedCompactString(String compactString)
       throws ParseException {
     return parseEscapedCompactString(compactString, new Counters());
+  }
+
+  /**
+   * Counter exception thrown when the number of counters exceed the limit
+   */
+  public static class CountersExceededException extends RuntimeException {
+
+    private static final long serialVersionUID = 1L;
+
+    public CountersExceededException(String msg) {
+      super(msg);
+    }
+
+    // Only allows chaining of related exceptions
+    public CountersExceededException(CountersExceededException cause) {
+      super(cause);
+    }
   }
 }

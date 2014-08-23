@@ -23,8 +23,9 @@ import java.util.LinkedList;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.fs.PathIOException;
+import org.apache.hadoop.fs.PathExistsException;
 import org.apache.hadoop.fs.shell.CopyCommands.CopyFromLocal;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIOException;
 
 /** Various commands for moving files */
 @InterfaceAudience.Private
@@ -44,12 +45,26 @@ class MoveCommands {
     public static final String NAME = "moveFromLocal";
     public static final String USAGE = "<localsrc> ... <dst>";
     public static final String DESCRIPTION = 
-      "Same as -put, except that the source is\n" +
+      "Same as -put, except that the source is " +
       "deleted after it's copied.";
 
     @Override
     protected void processPath(PathData src, PathData target) throws IOException {
-      target.fs.moveFromLocalFile(src.path, target.path);
+      // unlike copy, don't merge existing dirs during move
+      if (target.exists && target.stat.isDirectory()) {
+        throw new PathExistsException(target.toString());
+      }
+      super.processPath(src, target);
+    }
+    
+    @Override
+    protected void postProcessPath(PathData src) throws IOException {
+      if (!src.fs.delete(src.path, false)) {
+        // we have no way to know the actual error...
+        PathIOException e = new PathIOException(src.toString());
+        e.setOperation("remove");
+        throw e;
+      }
     }
   }
 
@@ -72,8 +87,8 @@ class MoveCommands {
     public static final String NAME = "mv";
     public static final String USAGE = "<src> ... <dst>";
     public static final String DESCRIPTION = 
-      "Move files that match the specified file pattern <src>\n" +
-      "to a destination <dst>.  When moving multiple files, the\n" +
+      "Move files that match the specified file pattern <src> " +
+      "to a destination <dst>.  When moving multiple files, the " +
       "destination must be a directory.";
 
     @Override
@@ -88,6 +103,9 @@ class MoveCommands {
       if (!src.fs.getUri().equals(target.fs.getUri())) {
         throw new PathIOException(src.toString(),
             "Does not match target filesystem");
+      }
+      if (target.exists) {
+        throw new PathExistsException(target.toString());
       }
       if (!target.fs.rename(src.path, target.path)) {
         // we have no way to know the actual error...

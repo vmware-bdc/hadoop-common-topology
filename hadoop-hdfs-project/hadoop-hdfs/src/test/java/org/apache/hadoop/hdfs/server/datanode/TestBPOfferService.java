@@ -17,21 +17,26 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
+import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodeMetrics;
@@ -41,13 +46,13 @@ import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.HeartbeatResponse;
 import org.apache.hadoop.hdfs.server.protocol.NNHAStatusHeartbeat;
-import org.apache.hadoop.hdfs.server.protocol.NNHAStatusHeartbeat.State;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.PathUtils;
 import org.apache.log4j.Level;
 import org.junit.Before;
 import org.junit.Test;
@@ -68,6 +73,7 @@ public class TestBPOfferService {
       TestBPOfferService.class);
   private static final ExtendedBlock FAKE_BLOCK =
     new ExtendedBlock(FAKE_BPID, 12345L);
+  private static final File TEST_BUILD_DATA = PathUtils.getTestDir(TestBPOfferService.class);
 
   static {
     ((Log4JLogger)DataNode.LOG).getLogger().setLevel(Level.ALL);
@@ -75,8 +81,8 @@ public class TestBPOfferService {
 
   private DatanodeProtocolClientSideTranslatorPB mockNN1;
   private DatanodeProtocolClientSideTranslatorPB mockNN2;
-  private NNHAStatusHeartbeat[] mockHaStatuses = new NNHAStatusHeartbeat[2];
-  private int heartbeatCounts[] = new int[2];
+  private final NNHAStatusHeartbeat[] mockHaStatuses = new NNHAStatusHeartbeat[2];
+  private final int[] heartbeatCounts = new int[2];
   private DataNode mockDn;
   private FsDatasetSpi<?> mockFSDataset;
   
@@ -90,13 +96,15 @@ public class TestBPOfferService {
     mockDn = Mockito.mock(DataNode.class);
     Mockito.doReturn(true).when(mockDn).shouldRun();
     Configuration conf = new Configuration();
+    File dnDataDir = new File(new File(TEST_BUILD_DATA, "dfs"), "data");
+    conf.set(DFS_DATANODE_DATA_DIR_KEY, dnDataDir.toURI().toString());
     Mockito.doReturn(conf).when(mockDn).getConf();
     Mockito.doReturn(new DNConf(conf)).when(mockDn).getDnConf();
     Mockito.doReturn(DataNodeMetrics.create(conf, "fake dn"))
     .when(mockDn).getMetrics();
 
     // Set up a simulated dataset with our fake BP
-    mockFSDataset = Mockito.spy(new SimulatedFSDataset(null, null, conf));
+    mockFSDataset = Mockito.spy(new SimulatedFSDataset(null, conf));
     mockFSDataset.addBlockPool(FAKE_BPID, conf);
 
     // Wire the dataset to the DN.
@@ -110,22 +118,22 @@ public class TestBPOfferService {
       throws Exception {
     DatanodeProtocolClientSideTranslatorPB mock =
         Mockito.mock(DatanodeProtocolClientSideTranslatorPB.class);
-    Mockito.doReturn(
-        new NamespaceInfo(1, FAKE_CLUSTERID, FAKE_BPID,
-            0, HdfsConstants.LAYOUT_VERSION))
-      .when(mock).versionRequest();
+    Mockito.doReturn(new NamespaceInfo(1, FAKE_CLUSTERID, FAKE_BPID, 0))
+        .when(mock).versionRequest();
     
-    Mockito.doReturn(new DatanodeRegistration("fake-node", 100))
+    Mockito.doReturn(DFSTestUtil.getLocalDatanodeRegistration())
       .when(mock).registerDatanode(Mockito.any(DatanodeRegistration.class));
     
     Mockito.doAnswer(new HeartbeatAnswer(nnIdx))
       .when(mock).sendHeartbeat(
           Mockito.any(DatanodeRegistration.class),
           Mockito.any(StorageReport[].class),
+          Mockito.anyLong(),
+          Mockito.anyLong(),
           Mockito.anyInt(),
           Mockito.anyInt(),
           Mockito.anyInt());
-    mockHaStatuses[nnIdx] = new NNHAStatusHeartbeat(State.STANDBY, 0);
+    mockHaStatuses[nnIdx] = new NNHAStatusHeartbeat(HAServiceState.STANDBY, 0);
     return mock;
   }
   
@@ -145,7 +153,7 @@ public class TestBPOfferService {
     public HeartbeatResponse answer(InvocationOnMock invocation) throws Throwable {
       heartbeatCounts[nnIdx]++;
       return new HeartbeatResponse(new DatanodeCommand[0],
-          mockHaStatuses[nnIdx]);
+          mockHaStatuses[nnIdx], null);
     }
   }
 
@@ -172,7 +180,7 @@ public class TestBPOfferService {
       waitForBlockReport(mockNN2);
 
       // When we receive a block, it should report it to both NNs
-      bpos.notifyNamenodeReceivedBlock(FAKE_BLOCK, "");
+      bpos.notifyNamenodeReceivedBlock(FAKE_BLOCK, "", "");
 
       ReceivedDeletedBlockInfo[] ret = waitForBlockReceived(FAKE_BLOCK, mockNN1);
       assertEquals(1, ret.length);
@@ -228,10 +236,9 @@ public class TestBPOfferService {
    */
   @Test
   public void testNNsFromDifferentClusters() throws Exception {
-    Mockito.doReturn(
-        new NamespaceInfo(1, "fake foreign cluster", FAKE_BPID,
-            0, HdfsConstants.LAYOUT_VERSION))
-      .when(mockNN1).versionRequest();
+    Mockito
+        .doReturn(new NamespaceInfo(1, "fake foreign cluster", FAKE_BPID, 0))
+        .when(mockNN1).versionRequest();
         
     BPOfferService bpos = setupBPOSForNNs(mockNN1, mockNN2);
     bpos.start();
@@ -258,12 +265,12 @@ public class TestBPOfferService {
       assertNull(bpos.getActiveNN());
 
       // Have NN1 claim active at txid 1
-      mockHaStatuses[0] = new NNHAStatusHeartbeat(State.ACTIVE, 1);
+      mockHaStatuses[0] = new NNHAStatusHeartbeat(HAServiceState.ACTIVE, 1);
       bpos.triggerHeartbeatForTests();
       assertSame(mockNN1, bpos.getActiveNN());
 
       // NN2 claims active at a higher txid
-      mockHaStatuses[1] = new NNHAStatusHeartbeat(State.ACTIVE, 2);
+      mockHaStatuses[1] = new NNHAStatusHeartbeat(HAServiceState.ACTIVE, 2);
       bpos.triggerHeartbeatForTests();
       assertSame(mockNN2, bpos.getActiveNN());
       
@@ -275,15 +282,57 @@ public class TestBPOfferService {
       // Even if NN2 goes to standby, DN shouldn't reset to talking to NN1,
       // because NN1's txid is lower than the last active txid. Instead,
       // it should consider neither active.
-      mockHaStatuses[1] = new NNHAStatusHeartbeat(State.STANDBY, 2);
+      mockHaStatuses[1] = new NNHAStatusHeartbeat(HAServiceState.STANDBY, 2);
       bpos.triggerHeartbeatForTests();
       assertNull(bpos.getActiveNN());
       
       // Now if NN1 goes back to a higher txid, it should be considered active
-      mockHaStatuses[0] = new NNHAStatusHeartbeat(State.ACTIVE, 3);
+      mockHaStatuses[0] = new NNHAStatusHeartbeat(HAServiceState.ACTIVE, 3);
       bpos.triggerHeartbeatForTests();
       assertSame(mockNN1, bpos.getActiveNN());
 
+    } finally {
+      bpos.stop();
+    }
+  }
+
+  /**
+   * Test datanode block pool initialization error handling.
+   * Failure in initializing a block pool should not cause NPE.
+   */
+  @Test
+  public void testBPInitErrorHandling() throws Exception {
+    final DataNode mockDn = Mockito.mock(DataNode.class);
+    Mockito.doReturn(true).when(mockDn).shouldRun();
+    Configuration conf = new Configuration();
+    File dnDataDir = new File(
+      new File(TEST_BUILD_DATA, "testBPInitErrorHandling"), "data");
+    conf.set(DFS_DATANODE_DATA_DIR_KEY, dnDataDir.toURI().toString());
+    Mockito.doReturn(conf).when(mockDn).getConf();
+    Mockito.doReturn(new DNConf(conf)).when(mockDn).getDnConf();
+    Mockito.doReturn(DataNodeMetrics.create(conf, "fake dn")).
+      when(mockDn).getMetrics();
+    final AtomicInteger count = new AtomicInteger();
+    Mockito.doAnswer(new Answer<Void>() {
+      @Override
+      public Void answer(InvocationOnMock invocation) throws Throwable {
+        if (count.getAndIncrement() == 0) {
+          throw new IOException("faked initBlockPool exception");
+        }
+        // The initBlockPool is called again. Now mock init is done.
+        Mockito.doReturn(mockFSDataset).when(mockDn).getFSDataset();
+        return null;
+      }
+    }).when(mockDn).initBlockPool(Mockito.any(BPOfferService.class));
+    BPOfferService bpos = setupBPOSForNNs(mockDn, mockNN1, mockNN2);
+    List<BPServiceActor> actors = bpos.getBPServiceActors();
+    assertEquals(2, actors.size());
+    bpos.start();
+    try {
+      waitForInitialization(bpos);
+      // even if one of the actor initialization fails, the other one will be
+      // finish block report.
+      waitForBlockReport(mockNN1, mockNN2);
     } finally {
       bpos.stop();
     }
@@ -294,7 +343,14 @@ public class TestBPOfferService {
     GenericTestUtils.waitFor(new Supplier<Boolean>() {
       @Override
       public Boolean get() {
-        return bpos.countNameNodes() == 1;
+        List<BPServiceActor> actors = bpos.getBPServiceActors();
+        int failedcount = 0;
+        for (BPServiceActor actor : actors) {
+          if (!actor.isAlive()) {
+            failedcount++;
+          }
+        }
+        return failedcount == 1;
       }
     }, 100, 10000);
   }
@@ -305,6 +361,11 @@ public class TestBPOfferService {
    * @throws IOException 
    */
   private BPOfferService setupBPOSForNNs(
+      DatanodeProtocolClientSideTranslatorPB ... nns) throws IOException {
+    return setupBPOSForNNs(mockDn, nns);
+  }
+
+  private BPOfferService setupBPOSForNNs(DataNode mockDn,
       DatanodeProtocolClientSideTranslatorPB ... nns) throws IOException {
     // Set up some fake InetAddresses, then override the connectToNN
     // function to return the corresponding proxies.
@@ -347,10 +408,36 @@ public class TestBPOfferService {
       }
     }, 500, 10000);
   }
-  
+
+  private void waitForBlockReport(
+      final DatanodeProtocolClientSideTranslatorPB mockNN1,
+      final DatanodeProtocolClientSideTranslatorPB mockNN2)
+          throws Exception {
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return get(mockNN1) || get(mockNN2);
+      }
+
+      private Boolean get(DatanodeProtocolClientSideTranslatorPB mockNN) {
+        try {
+          Mockito.verify(mockNN).blockReport(
+                  Mockito.<DatanodeRegistration>anyObject(),
+                  Mockito.eq(FAKE_BPID),
+                  Mockito.<StorageBlockReport[]>anyObject());
+          return true;
+        } catch (Throwable t) {
+          LOG.info("waiting on block report: " + t.getMessage());
+          return false;
+        }
+      }
+    }, 500, 10000);
+  }
+
   private ReceivedDeletedBlockInfo[] waitForBlockReceived(
-      ExtendedBlock fakeBlock,
-      DatanodeProtocolClientSideTranslatorPB mockNN) throws Exception {
+      final ExtendedBlock fakeBlock,
+      final DatanodeProtocolClientSideTranslatorPB mockNN) throws Exception {
+    final String fakeBlockPoolId = fakeBlock.getBlockPoolId();
     final ArgumentCaptor<StorageReceivedDeletedBlocks[]> captor =
       ArgumentCaptor.forClass(StorageReceivedDeletedBlocks[].class);
     GenericTestUtils.waitFor(new Supplier<Boolean>() {
@@ -358,9 +445,9 @@ public class TestBPOfferService {
       @Override
       public Boolean get() {
         try {
-          Mockito.verify(mockNN1).blockReceivedAndDeleted(
+          Mockito.verify(mockNN).blockReceivedAndDeleted(
             Mockito.<DatanodeRegistration>anyObject(),
-            Mockito.eq(FAKE_BPID),
+            Mockito.eq(fakeBlockPoolId),
             captor.capture());
           return true;
         } catch (Throwable t) {

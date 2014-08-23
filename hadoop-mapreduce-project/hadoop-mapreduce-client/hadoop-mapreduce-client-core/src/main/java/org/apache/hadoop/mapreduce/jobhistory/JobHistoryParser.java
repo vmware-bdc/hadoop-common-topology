@@ -42,6 +42,7 @@ import org.apache.hadoop.mapreduce.TaskID;
 import org.apache.hadoop.mapred.TaskStatus;
 import org.apache.hadoop.mapreduce.TaskType;
 import org.apache.hadoop.security.authorize.AccessControlList;
+import org.apache.hadoop.util.StringInterner;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 
@@ -53,7 +54,7 @@ import org.apache.hadoop.yarn.api.records.ContainerId;
  */
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
-public class JobHistoryParser {
+public class JobHistoryParser implements HistoryEventHandler {
 
   private static final Log LOG = LogFactory.getLog(JobHistoryParser.class);
   
@@ -93,6 +94,34 @@ public class JobHistoryParser {
     this.in = in;
   }
   
+  public synchronized void parse(HistoryEventHandler handler) 
+    throws IOException {
+    parse(new EventReader(in), handler);
+  }
+  
+  /**
+   * Only used for unit tests.
+   */
+  @Private
+  public synchronized void parse(EventReader reader, HistoryEventHandler handler)
+    throws IOException {
+    int eventCtr = 0;
+    HistoryEvent event;
+    try {
+      while ((event = reader.getNextEvent()) != null) {
+        handler.handleEvent(event);
+        ++eventCtr;
+      } 
+    } catch (IOException ioe) {
+      LOG.info("Caught exception parsing history file after " + eventCtr + 
+          " events", ioe);
+      parseException = ioe;
+    } finally {
+      in.close();
+    }
+  }
+  
+  
   /**
    * Parse the entire history file and populate the JobInfo object
    * The first invocation will populate the object, subsequent calls
@@ -121,21 +150,7 @@ public class JobHistoryParser {
     }
 
     info = new JobInfo();
-
-    int eventCtr = 0;
-    HistoryEvent event;
-    try {
-      while ((event = reader.getNextEvent()) != null) {
-        handleEvent(event);
-        ++eventCtr;
-      } 
-    } catch (IOException ioe) {
-      LOG.info("Caught exception parsing history file after " + eventCtr + 
-          " events", ioe);
-      parseException = ioe;
-    } finally {
-      in.close();
-    }
+    parse(reader, this);
     return info;
   }
   
@@ -149,7 +164,8 @@ public class JobHistoryParser {
     return parseException;
   }
   
-  private void handleEvent(HistoryEvent event)  { 
+  @Override
+  public void handleEvent(HistoryEvent event)  { 
     EventType type = event.getEventType();
 
     switch (type) {
@@ -167,8 +183,12 @@ public class JobHistoryParser {
     case JOB_PRIORITY_CHANGED:
       handleJobPriorityChangeEvent((JobPriorityChangeEvent) event);
       break;
+    case JOB_QUEUE_CHANGED:
+      handleJobQueueChangeEvent((JobQueueChangeEvent) event);
+      break;
     case JOB_FAILED:
     case JOB_KILLED:
+    case JOB_ERROR:
       handleJobFailedEvent((JobUnsuccessfulCompletionEvent) event);
       break;
     case JOB_FINISHED:
@@ -226,10 +246,11 @@ public class JobHistoryParser {
     TaskAttemptInfo attemptInfo = 
       taskInfo.attemptsMap.get(event.getAttemptId());
     attemptInfo.finishTime = event.getFinishTime();
-    attemptInfo.status = event.getTaskStatus();
-    attemptInfo.state = event.getState();
+    attemptInfo.status = StringInterner.weakIntern(event.getTaskStatus());
+    attemptInfo.state = StringInterner.weakIntern(event.getState());
     attemptInfo.counters = event.getCounters();
-    attemptInfo.hostname = event.getHostname();
+    attemptInfo.hostname = StringInterner.weakIntern(event.getHostname());
+    info.completedTaskAttemptsMap.put(event.getAttemptId(), attemptInfo);
   }
 
   private void handleReduceAttemptFinishedEvent
@@ -238,14 +259,15 @@ public class JobHistoryParser {
     TaskAttemptInfo attemptInfo = 
       taskInfo.attemptsMap.get(event.getAttemptId());
     attemptInfo.finishTime = event.getFinishTime();
-    attemptInfo.status = event.getTaskStatus();
-    attemptInfo.state = event.getState();
+    attemptInfo.status = StringInterner.weakIntern(event.getTaskStatus());
+    attemptInfo.state = StringInterner.weakIntern(event.getState());
     attemptInfo.shuffleFinishTime = event.getShuffleFinishTime();
     attemptInfo.sortFinishTime = event.getSortFinishTime();
     attemptInfo.counters = event.getCounters();
-    attemptInfo.hostname = event.getHostname();
+    attemptInfo.hostname = StringInterner.weakIntern(event.getHostname());
     attemptInfo.port = event.getPort();
-    attemptInfo.rackname = event.getRackName();
+    attemptInfo.rackname = StringInterner.weakIntern(event.getRackName());
+    info.completedTaskAttemptsMap.put(event.getAttemptId(), attemptInfo);
   }
 
   private void handleMapAttemptFinishedEvent(MapAttemptFinishedEvent event) {
@@ -253,29 +275,56 @@ public class JobHistoryParser {
     TaskAttemptInfo attemptInfo = 
       taskInfo.attemptsMap.get(event.getAttemptId());
     attemptInfo.finishTime = event.getFinishTime();
-    attemptInfo.status = event.getTaskStatus();
-    attemptInfo.state = event.getState();
+    attemptInfo.status = StringInterner.weakIntern(event.getTaskStatus());
+    attemptInfo.state = StringInterner.weakIntern(event.getState());
     attemptInfo.mapFinishTime = event.getMapFinishTime();
     attemptInfo.counters = event.getCounters();
-    attemptInfo.hostname = event.getHostname();
+    attemptInfo.hostname = StringInterner.weakIntern(event.getHostname());
     attemptInfo.port = event.getPort();
-    attemptInfo.rackname = event.getRackName();
+    attemptInfo.rackname = StringInterner.weakIntern(event.getRackName());
+    info.completedTaskAttemptsMap.put(event.getAttemptId(), attemptInfo);
   }
 
   private void handleTaskAttemptFailedEvent(
       TaskAttemptUnsuccessfulCompletionEvent event) {
     TaskInfo taskInfo = info.tasksMap.get(event.getTaskId());
+    if(taskInfo == null) {
+      LOG.warn("TaskInfo is null for TaskAttemptUnsuccessfulCompletionEvent"
+          + " taskId:  " + event.getTaskId().toString());
+      return;
+    }
     TaskAttemptInfo attemptInfo = 
       taskInfo.attemptsMap.get(event.getTaskAttemptId());
+    if(attemptInfo == null) {
+      LOG.warn("AttemptInfo is null for TaskAttemptUnsuccessfulCompletionEvent"
+          + " taskAttemptId:  " + event.getTaskAttemptId().toString());
+      return;
+    }
     attemptInfo.finishTime = event.getFinishTime();
-    attemptInfo.error = event.getError();
-    attemptInfo.status = event.getTaskStatus();
-    attemptInfo.hostname = event.getHostname();
+    attemptInfo.error = StringInterner.weakIntern(event.getError());
+    attemptInfo.status = StringInterner.weakIntern(event.getTaskStatus());
+    attemptInfo.hostname = StringInterner.weakIntern(event.getHostname());
     attemptInfo.port = event.getPort();
-    attemptInfo.rackname = event.getRackName();
+    attemptInfo.rackname = StringInterner.weakIntern(event.getRackName());
     attemptInfo.shuffleFinishTime = event.getFinishTime();
     attemptInfo.sortFinishTime = event.getFinishTime();
     attemptInfo.mapFinishTime = event.getFinishTime();
+    attemptInfo.counters = event.getCounters();
+    if(TaskStatus.State.SUCCEEDED.toString().equals(taskInfo.status))
+    {
+      //this is a successful task
+      if(attemptInfo.getAttemptId().equals(taskInfo.getSuccessfulAttemptId()))
+      {
+        // the failed attempt is the one that made this task successful
+        // so its no longer successful. Reset fields set in
+        // handleTaskFinishedEvent()
+        taskInfo.counters = null;
+        taskInfo.finishTime = -1;
+        taskInfo.status = null;
+        taskInfo.successfulAttemptId = null;
+      }
+    }
+    info.completedTaskAttemptsMap.put(event.getTaskAttemptId(), attemptInfo);
   }
 
   private void handleTaskAttemptStartedEvent(TaskAttemptStartedEvent event) {
@@ -286,7 +335,7 @@ public class JobHistoryParser {
     attemptInfo.startTime = event.getStartTime();
     attemptInfo.attemptId = event.getTaskAttemptId();
     attemptInfo.httpPort = event.getHttpPort();
-    attemptInfo.trackerName = event.getTrackerName();
+    attemptInfo.trackerName = StringInterner.weakIntern(event.getTrackerName());
     attemptInfo.taskType = event.getTaskType();
     attemptInfo.shufflePort = event.getShufflePort();
     attemptInfo.containerId = event.getContainerId();
@@ -299,6 +348,7 @@ public class JobHistoryParser {
     taskInfo.counters = event.getCounters();
     taskInfo.finishTime = event.getFinishTime();
     taskInfo.status = TaskStatus.State.SUCCEEDED.toString();
+    taskInfo.successfulAttemptId = event.getSuccessfulTaskAttemptId();
   }
 
   private void handleTaskUpdatedEvent(TaskUpdatedEvent event) {
@@ -310,10 +360,9 @@ public class JobHistoryParser {
     TaskInfo taskInfo = info.tasksMap.get(event.getTaskId());
     taskInfo.status = TaskStatus.State.FAILED.toString();
     taskInfo.finishTime = event.getFinishTime();
-    taskInfo.error = event.getError();
+    taskInfo.error = StringInterner.weakIntern(event.getError());
     taskInfo.failedDueToAttemptId = event.getFailedAttemptID();
-    info.errorInfo = "Task " + taskInfo.taskId +" failed " +
-    taskInfo.attemptsMap.size() + " times ";
+    taskInfo.counters = event.getCounters();
   }
 
   private void handleTaskStartedEvent(TaskStartedEvent event) {
@@ -329,7 +378,8 @@ public class JobHistoryParser {
     info.finishTime = event.getFinishTime();
     info.finishedMaps = event.getFinishedMaps();
     info.finishedReduces = event.getFinishedReduces();
-    info.jobStatus = event.getStatus();
+    info.jobStatus = StringInterner.weakIntern(event.getStatus());
+    info.errorInfo = StringInterner.weakIntern(event.getDiagnostics());
   }
 
   private void handleJobFinishedEvent(JobFinishedEvent event) {
@@ -347,6 +397,10 @@ public class JobHistoryParser {
   private void handleJobPriorityChangeEvent(JobPriorityChangeEvent event) {
     info.priority = event.getPriority();
   }
+  
+  private void handleJobQueueChangeEvent(JobQueueChangeEvent event) {
+    info.jobQueueName = event.getJobQueueName();
+  }
 
   private void handleJobInitedEvent(JobInitedEvent event) {
     info.launchTime = event.getLaunchTime();
@@ -360,7 +414,7 @@ public class JobHistoryParser {
     amInfo.appAttemptId = event.getAppAttemptId();
     amInfo.startTime = event.getStartTime();
     amInfo.containerId = event.getContainerId();
-    amInfo.nodeManagerHost = event.getNodeManagerHost();
+    amInfo.nodeManagerHost = StringInterner.weakIntern(event.getNodeManagerHost());
     amInfo.nodeManagerPort = event.getNodeManagerPort();
     amInfo.nodeManagerHttpPort = event.getNodeManagerHttpPort();
     if (info.amInfos == null) {
@@ -378,11 +432,11 @@ public class JobHistoryParser {
   private void handleJobSubmittedEvent(JobSubmittedEvent event) {
     info.jobid = event.getJobId();
     info.jobname = event.getJobName();
-    info.username = event.getUserName();
+    info.username = StringInterner.weakIntern(event.getUserName());
     info.submitTime = event.getSubmitTime();
     info.jobConfPath = event.getJobConfPath();
     info.jobACLs = event.getJobAcls();
-    info.jobQueueName = event.getJobQueueName();
+    info.jobQueueName = StringInterner.weakIntern(event.getJobQueueName());
   }
 
   /**
@@ -412,6 +466,7 @@ public class JobHistoryParser {
     Map<JobACL, AccessControlList> jobACLs;
     
     Map<TaskID, TaskInfo> tasksMap;
+    Map<TaskAttemptID, TaskAttemptInfo> completedTaskAttemptsMap;
     List<AMInfo> amInfos;
     AMInfo latestAmInfo;
     boolean uberized;
@@ -425,7 +480,9 @@ public class JobHistoryParser {
       finishedMaps = finishedReduces = 0;
       username = jobname = jobConfPath = jobQueueName = "";
       tasksMap = new HashMap<TaskID, TaskInfo>();
+      completedTaskAttemptsMap = new HashMap<TaskAttemptID, TaskAttemptInfo>();
       jobACLs = new HashMap<JobACL, AccessControlList>();
+      priority = JobPriority.NORMAL;
     }
     
     /** Print all the job information */
@@ -439,12 +496,20 @@ public class JobHistoryParser {
       System.out.println("PRIORITY: " + priority);
       System.out.println("TOTAL_MAPS: " + totalMaps);
       System.out.println("TOTAL_REDUCES: " + totalReduces);
-      System.out.println("MAP_COUNTERS:" + mapCounters.toString());
-      System.out.println("REDUCE_COUNTERS:" + reduceCounters.toString());
-      System.out.println("TOTAL_COUNTERS: " + totalCounters.toString());
+      if (mapCounters != null) {
+        System.out.println("MAP_COUNTERS:" + mapCounters.toString());
+      }
+      if (reduceCounters != null) {
+        System.out.println("REDUCE_COUNTERS:" + reduceCounters.toString());
+      }
+      if (totalCounters != null) {
+        System.out.println("TOTAL_COUNTERS: " + totalCounters.toString());
+      }
       System.out.println("UBERIZED: " + uberized);
-      for (AMInfo amInfo : amInfos) {
-        amInfo.printAll();
+      if (amInfos != null) {
+        for (AMInfo amInfo : amInfos) {
+          amInfo.printAll();
+        }
       }
       for (TaskInfo ti: tasksMap.values()) {
         ti.printAll();
@@ -490,6 +555,8 @@ public class JobHistoryParser {
     public Counters getReduceCounters() { return reduceCounters; }
     /** @return the map of all tasks in this job */
     public Map<TaskID, TaskInfo> getAllTasks() { return tasksMap; }
+    /** @return the map of all completed task attempts in this job */
+    public Map<TaskAttemptID, TaskAttemptInfo> getAllCompletedTaskAttempts() { return completedTaskAttemptsMap; }
     /** @return the priority of this job */
     public String getPriority() { return priority.toString(); }
     public Map<JobACL, AccessControlList> getJobACLs() { return jobACLs; }
@@ -514,6 +581,7 @@ public class JobHistoryParser {
     String status;
     String error;
     TaskAttemptID failedDueToAttemptId;
+    TaskAttemptID successfulAttemptId;
     Map<TaskAttemptID, TaskAttemptInfo> attemptsMap;
 
     public TaskInfo() {
@@ -553,6 +621,10 @@ public class JobHistoryParser {
     /** @return the attempt Id that caused this task to fail */
     public TaskAttemptID getFailedDueToAttemptId() {
       return failedDueToAttemptId;
+    }
+    /** @return the attempt Id that caused this task to succeed */
+    public TaskAttemptID getSuccessfulAttemptId() {
+      return successfulAttemptId;
     }
     /** @return the error */
     public String getError() { return error; }

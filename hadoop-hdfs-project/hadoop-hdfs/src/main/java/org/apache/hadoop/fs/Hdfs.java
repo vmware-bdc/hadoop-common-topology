@@ -17,25 +17,32 @@
  */
 package org.apache.hadoop.fs;
 
-
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.crypto.CryptoCodec;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.fs.Options.ChecksumOpt;
 import org.apache.hadoop.hdfs.CorruptFileBlockIterator;
 import org.apache.hadoop.hdfs.DFSClient;
-import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.DFSInputStream;
+import org.apache.hadoop.hdfs.DFSOutputStream;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
+import org.apache.hadoop.hdfs.client.HdfsDataInputStream;
+import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
@@ -44,8 +51,8 @@ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifie
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.AccessControlException;
-import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
+import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenIdentifier;
 import org.apache.hadoop.util.Progressable;
 
@@ -54,6 +61,7 @@ import org.apache.hadoop.util.Progressable;
 public class Hdfs extends AbstractFileSystem {
 
   DFSClient dfs;
+  final CryptoCodec factory;
   private boolean verifyChecksum = true;
 
   static {
@@ -64,9 +72,8 @@ public class Hdfs extends AbstractFileSystem {
    * This constructor has the signature needed by
    * {@link AbstractFileSystem#createFileSystem(URI, Configuration)}
    * 
-   * @param theUri
-   *          which must be that of Hdfs
-   * @param conf
+   * @param theUri which must be that of Hdfs
+   * @param conf configuration
    * @throws IOException
    */
   Hdfs(final URI theUri, final Configuration conf) throws IOException, URISyntaxException {
@@ -81,6 +88,7 @@ public class Hdfs extends AbstractFileSystem {
     }
 
     this.dfs = new DFSClient(theUri, conf, getStatistics());
+    this.factory = CryptoCodec.getInstance(conf);
   }
 
   @Override
@@ -89,13 +97,16 @@ public class Hdfs extends AbstractFileSystem {
   }
 
   @Override
-  public FSDataOutputStream createInternal(Path f,
+  public HdfsDataOutputStream createInternal(Path f,
       EnumSet<CreateFlag> createFlag, FsPermission absolutePermission,
       int bufferSize, short replication, long blockSize, Progressable progress,
-      int bytesPerChecksum, boolean createParent) throws IOException {
-    return new FSDataOutputStream(dfs.primitiveCreate(getUriPath(f),
-        absolutePermission, createFlag, createParent, replication, blockSize,
-        progress, bufferSize, bytesPerChecksum), getStatistics());
+      ChecksumOpt checksumOpt, boolean createParent) throws IOException {
+
+    final DFSOutputStream dfsos = dfs.primitiveCreate(getUriPath(f),
+      absolutePermission, createFlag, createParent, replication, blockSize,
+      progress, bufferSize, checksumOpt);
+    return dfs.createWrappedOutputStream(dfsos, statistics,
+        dfsos.getInitialLen());
   }
 
   @Override
@@ -113,7 +124,7 @@ public class Hdfs extends AbstractFileSystem {
   @Override
   public FileChecksum getFileChecksum(Path f) 
       throws IOException, UnresolvedLinkException {
-    return dfs.getFileChecksum(getUriPath(f));
+    return dfs.getFileChecksum(getUriPath(f), Long.MAX_VALUE);
   }
 
   @Override
@@ -121,7 +132,7 @@ public class Hdfs extends AbstractFileSystem {
       throws IOException, UnresolvedLinkException {
     HdfsFileStatus fi = dfs.getFileInfo(getUriPath(f));
     if (fi != null) {
-      return makeQualified(fi, f);
+      return fi.makeQualified(getUri(), f);
     } else {
       throw new FileNotFoundException("File does not exist: " + f.toString());
     }
@@ -132,33 +143,10 @@ public class Hdfs extends AbstractFileSystem {
       throws IOException, UnresolvedLinkException {
     HdfsFileStatus fi = dfs.getFileLinkInfo(getUriPath(f));
     if (fi != null) {
-      return makeQualified(fi, f);
+      return fi.makeQualified(getUri(), f);
     } else {
       throw new FileNotFoundException("File does not exist: " + f);
     }
-  }  
-
-  private FileStatus makeQualified(HdfsFileStatus f, Path parent) {
-    // NB: symlink is made fully-qualified in FileContext. 
-    return new FileStatus(f.getLen(), f.isDir(), f.getReplication(),
-        f.getBlockSize(), f.getModificationTime(),
-        f.getAccessTime(),
-        f.getPermission(), f.getOwner(), f.getGroup(),
-        f.isSymlink() ? new Path(f.getSymlink()) : null,
-        (f.getFullPath(parent)).makeQualified(
-            getUri(), null)); // fully-qualify path
-  }
-
-  private LocatedFileStatus makeQualifiedLocated(
-      HdfsLocatedFileStatus f, Path parent) {
-    return new LocatedFileStatus(f.getLen(), f.isDir(), f.getReplication(),
-        f.getBlockSize(), f.getModificationTime(),
-        f.getAccessTime(),
-        f.getPermission(), f.getOwner(), f.getGroup(),
-        f.isSymlink() ? new Path(f.getSymlink()) : null,
-        (f.getFullPath(parent)).makeQualified(
-            getUri(), null), // fully-qualify path
-        DFSUtil.locatedBlocks2Locations(f.getBlockLocations()));
   }
 
   @Override
@@ -179,7 +167,8 @@ public class Hdfs extends AbstractFileSystem {
 
       @Override
       public LocatedFileStatus next() throws IOException {
-        return makeQualifiedLocated((HdfsLocatedFileStatus)getNext(), p);
+        return ((HdfsLocatedFileStatus)getNext()).makeQualifiedLocated(
+            getUri(), p);
       }
     };
   }
@@ -192,7 +181,7 @@ public class Hdfs extends AbstractFileSystem {
 
       @Override
       public FileStatus next() throws IOException {
-        return makeQualified(getNext(), f);
+        return getNext().makeQualified(getUri(), f);
       }
     };
   }
@@ -276,7 +265,7 @@ public class Hdfs extends AbstractFileSystem {
     if (!thisListing.hasMore()) { // got all entries of the directory
       FileStatus[] stats = new FileStatus[partialListing.length];
       for (int i = 0; i < partialListing.length; i++) {
-        stats[i] = makeQualified(partialListing[i], f);
+        stats[i] = partialListing[i].makeQualified(getUri(), f);
       }
       return stats;
     }
@@ -289,7 +278,7 @@ public class Hdfs extends AbstractFileSystem {
       new ArrayList<FileStatus>(totalNumEntries);
     // add the first batch of entries to the array list
     for (HdfsFileStatus fileStatus : partialListing) {
-      listing.add(makeQualified(fileStatus, f));
+      listing.add(fileStatus.makeQualified(getUri(), f));
     }
  
     // now fetch more entries
@@ -303,16 +292,13 @@ public class Hdfs extends AbstractFileSystem {
  
       partialListing = thisListing.getPartialListing();
       for (HdfsFileStatus fileStatus : partialListing) {
-        listing.add(makeQualified(fileStatus, f));
+        listing.add(fileStatus.makeQualified(getUri(), f));
       }
     } while (thisListing.hasMore());
  
     return listing.toArray(new FileStatus[listing.size()]);
   }
 
-  /**
-   * {@inheritDoc}
-   */
   @Override
   public RemoteIterator<Path> listCorruptFileBlocks(Path path)
     throws IOException {
@@ -322,14 +308,16 @@ public class Hdfs extends AbstractFileSystem {
   @Override
   public void mkdir(Path dir, FsPermission permission, boolean createParent)
     throws IOException, UnresolvedLinkException {
-    dfs.mkdirs(getUriPath(dir), permission, createParent);
+    dfs.primitiveMkdir(getUriPath(dir), permission, createParent);
   }
 
+  @SuppressWarnings("deprecation")
   @Override
-  public FSDataInputStream open(Path f, int bufferSize) 
+  public HdfsDataInputStream open(Path f, int bufferSize) 
       throws IOException, UnresolvedLinkException {
-    return new DFSClient.DFSDataInputStream(dfs.open(getUriPath(f),
-        bufferSize, verifyChecksum));
+    final DFSInputStream dfsis = dfs.open(getUriPath(f),
+      bufferSize, verifyChecksum);
+    return dfs.createWrappedInputStream(dfsis);
   }
 
   @Override
@@ -391,14 +379,87 @@ public class Hdfs extends AbstractFileSystem {
     return new Path(dfs.getLinkTarget(getUriPath(p)));
   }
   
+  @Override
+  public String getCanonicalServiceName() {
+    return dfs.getCanonicalServiceName();
+  }
+
   @Override //AbstractFileSystem
   public List<Token<?>> getDelegationTokens(String renewer) throws IOException {
     Token<DelegationTokenIdentifier> result = dfs
         .getDelegationToken(renewer == null ? null : new Text(renewer));
-    result.setService(new Text(this.getCanonicalServiceName()));
     List<Token<?>> tokenList = new ArrayList<Token<?>>();
     tokenList.add(result);
     return tokenList;
+  }
+
+  @Override
+  public void modifyAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    dfs.modifyAclEntries(getUriPath(path), aclSpec);
+  }
+
+  @Override
+  public void removeAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    dfs.removeAclEntries(getUriPath(path), aclSpec);
+  }
+
+  @Override
+  public void removeDefaultAcl(Path path) throws IOException {
+    dfs.removeDefaultAcl(getUriPath(path));
+  }
+
+  @Override
+  public void removeAcl(Path path) throws IOException {
+    dfs.removeAcl(getUriPath(path));
+  }
+
+  @Override
+  public void setAcl(Path path, List<AclEntry> aclSpec) throws IOException {
+    dfs.setAcl(getUriPath(path), aclSpec);
+  }
+
+  @Override
+  public AclStatus getAclStatus(Path path) throws IOException {
+    return dfs.getAclStatus(getUriPath(path));
+  }
+  
+  @Override
+  public void setXAttr(Path path, String name, byte[] value, 
+      EnumSet<XAttrSetFlag> flag) throws IOException {
+    dfs.setXAttr(getUriPath(path), name, value, flag);
+  }
+  
+  @Override
+  public byte[] getXAttr(Path path, String name) throws IOException {
+    return dfs.getXAttr(getUriPath(path), name);
+  }
+  
+  @Override
+  public Map<String, byte[]> getXAttrs(Path path) throws IOException {
+    return dfs.getXAttrs(getUriPath(path));
+  }
+  
+  @Override
+  public Map<String, byte[]> getXAttrs(Path path, List<String> names) 
+      throws IOException {
+    return dfs.getXAttrs(getUriPath(path), names);
+  }
+
+  @Override
+  public List<String> listXAttrs(Path path) throws IOException {
+    return dfs.listXAttrs(getUriPath(path));
+  }
+  
+  @Override
+  public void removeXAttr(Path path, String name) throws IOException {
+    dfs.removeXAttr(getUriPath(path), name);
+  }
+
+  @Override
+  public void access(Path path, final FsAction mode) throws IOException {
+    dfs.checkAccess(getUriPath(path), mode);
   }
 
   /**

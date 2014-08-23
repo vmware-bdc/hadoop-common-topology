@@ -25,9 +25,9 @@ import javax.xml.bind.annotation.XmlAccessorType;
 import javax.xml.bind.annotation.XmlRootElement;
 
 import org.apache.hadoop.mapreduce.v2.api.records.AMInfo;
+import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.NodeId;
-import org.apache.hadoop.yarn.util.BuilderUtils;
 
 @XmlRootElement(name = "jobAttempt")
 @XmlAccessorType(XmlAccessType.FIELD)
@@ -52,7 +52,7 @@ public class AMAttemptInfo {
     int nmPort = amInfo.getNodeManagerPort();
     if (nmHost != null) {
       this.nodeHttpAddress = nmHost + ":" + nmHttpPort;
-      NodeId nodeId = BuilderUtils.newNodeId(nmHost, nmPort);
+      NodeId nodeId = NodeId.newInstance(nmHost, nmPort);
       this.nodeId = nodeId.toString();
     }
 
@@ -63,8 +63,8 @@ public class AMAttemptInfo {
     ContainerId containerId = amInfo.getContainerId();
     if (containerId != null) {
       this.containerId = containerId.toString();
-      this.logsLink = join("http://" + nodeHttpAddress,
-          ujoin("node", "containerlogs", this.containerId));
+      this.logsLink = join(MRWebAppUtil.getYARNWebappScheme() + nodeHttpAddress,
+          ujoin("node", "containerlogs", this.containerId, user));
     }
   }
 

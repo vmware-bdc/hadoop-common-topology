@@ -23,12 +23,9 @@ import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
-import static java.lang.Thread.State.*;
 import java.lang.management.GarbageCollectorMXBean;
-import java.util.Map;
 import java.util.List;
-
-import com.google.common.collect.Maps;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.log.metrics.EventCounter;
@@ -41,6 +38,7 @@ import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.lib.Interns;
 import static org.apache.hadoop.metrics2.source.JvmMetricsInfo.*;
 import static org.apache.hadoop.metrics2.impl.MsInfo.*;
+import org.apache.hadoop.util.JvmPauseMonitor;
 
 /**
  * JVM and logging related metrics.
@@ -68,11 +66,17 @@ public class JvmMetrics implements MetricsSource {
       ManagementFactory.getGarbageCollectorMXBeans();
   final ThreadMXBean threadMXBean = ManagementFactory.getThreadMXBean();
   final String processName, sessionId;
-  final Map<String, MetricsInfo[]> gcInfoCache = Maps.newHashMap();
+  private JvmPauseMonitor pauseMonitor = null;
+  final ConcurrentHashMap<String, MetricsInfo[]> gcInfoCache =
+      new ConcurrentHashMap<String, MetricsInfo[]>();
 
   JvmMetrics(String processName, String sessionId) {
     this.processName = processName;
     this.sessionId = sessionId;
+  }
+
+  public void setPauseMonitor(final JvmPauseMonitor pauseMonitor) {
+    this.pauseMonitor = pauseMonitor;
   }
 
   public static JvmMetrics create(String processName, String sessionId,
@@ -99,10 +103,14 @@ public class JvmMetrics implements MetricsSource {
   private void getMemoryUsage(MetricsRecordBuilder rb) {
     MemoryUsage memNonHeap = memoryMXBean.getNonHeapMemoryUsage();
     MemoryUsage memHeap = memoryMXBean.getHeapMemoryUsage();
+    Runtime runtime = Runtime.getRuntime();
     rb.addGauge(MemNonHeapUsedM, memNonHeap.getUsed() / M)
       .addGauge(MemNonHeapCommittedM, memNonHeap.getCommitted() / M)
+      .addGauge(MemNonHeapMaxM, memNonHeap.getMax() / M)
       .addGauge(MemHeapUsedM, memHeap.getUsed() / M)
-      .addGauge(MemHeapCommittedM, memHeap.getCommitted() / M);
+      .addGauge(MemHeapCommittedM, memHeap.getCommitted() / M)
+      .addGauge(MemHeapMaxM, memHeap.getMax() / M)
+      .addGauge(MemMaxM, runtime.maxMemory() / M);
   }
 
   private void getGcUsage(MetricsRecordBuilder rb) {
@@ -118,15 +126,28 @@ public class JvmMetrics implements MetricsSource {
     }
     rb.addCounter(GcCount, count)
       .addCounter(GcTimeMillis, timeMillis);
+    
+    if (pauseMonitor != null) {
+      rb.addCounter(GcNumWarnThresholdExceeded,
+          pauseMonitor.getNumGcWarnThreadholdExceeded());
+      rb.addCounter(GcNumInfoThresholdExceeded,
+          pauseMonitor.getNumGcInfoThresholdExceeded());
+      rb.addCounter(GcTotalExtraSleepTime,
+          pauseMonitor.getTotalGcExtraSleepTime());
+    }
   }
 
-  private synchronized MetricsInfo[] getGcInfo(String gcName) {
+  private MetricsInfo[] getGcInfo(String gcName) {
     MetricsInfo[] gcInfo = gcInfoCache.get(gcName);
     if (gcInfo == null) {
       gcInfo = new MetricsInfo[2];
-      gcInfo[0] = Interns.info("GcCount"+ gcName, "GC Count for "+ gcName);
-      gcInfo[1] = Interns.info("GcTimeMillis"+ gcName, "GC Time for "+ gcName);
-      gcInfoCache.put(gcName, gcInfo);
+      gcInfo[0] = Interns.info("GcCount" + gcName, "GC Count for " + gcName);
+      gcInfo[1] = Interns
+          .info("GcTimeMillis" + gcName, "GC Time for " + gcName);
+      MetricsInfo[] previousGcInfo = gcInfoCache.putIfAbsent(gcName, gcInfo);
+      if (previousGcInfo != null) {
+        return previousGcInfo;
+      }
     }
     return gcInfo;
   }

@@ -35,9 +35,9 @@ import org.apache.hadoop.hdfs.server.common.StorageInfo;
 public class DatanodeRegistration extends DatanodeID
     implements NodeRegistration {
 
-  private StorageInfo storageInfo;
+  private final StorageInfo storageInfo;
   private ExportedBlockKeys exportedKeys;
-  private String softwareVersion;
+  private final String softwareVersion;
 
   public DatanodeRegistration(DatanodeID dn, StorageInfo info,
       ExportedBlockKeys keys, String softwareVersion) {
@@ -45,21 +45,6 @@ public class DatanodeRegistration extends DatanodeID
     this.storageInfo = info;
     this.exportedKeys = keys;
     this.softwareVersion = softwareVersion;
-  }
-
-  public DatanodeRegistration(String ipAddr, int xferPort) {
-    this(ipAddr, xferPort, new StorageInfo(), new ExportedBlockKeys());
-  }
-
-  public DatanodeRegistration(String ipAddr, int xferPort, StorageInfo info,
-      ExportedBlockKeys keys) {
-    super(ipAddr, xferPort);
-    this.storageInfo = info;
-    this.exportedKeys = keys;
-  }
-  
-  public void setStorageInfo(StorageInfo storage) {
-    this.storageInfo = new StorageInfo(storage);
   }
 
   public StorageInfo getStorageInfo() {
@@ -72,10 +57,6 @@ public class DatanodeRegistration extends DatanodeID
 
   public ExportedBlockKeys getExportedKeys() {
     return exportedKeys;
-  }
-  
-  public void setSoftwareVersion(String softwareVersion) {
-    this.softwareVersion = softwareVersion;
   }
   
   public String getSoftwareVersion() {
@@ -101,9 +82,9 @@ public class DatanodeRegistration extends DatanodeID
   public String toString() {
     return getClass().getSimpleName()
       + "(" + getIpAddr()
-      + ", storageID=" + storageID
-      + ", infoPort=" + infoPort
-      + ", ipcPort=" + ipcPort
+      + ", datanodeUuid=" + getDatanodeUuid()
+      + ", infoPort=" + getInfoPort()
+      + ", ipcPort=" + getIpcPort()
       + ", storageInfo=" + storageInfo
       + ")";
   }

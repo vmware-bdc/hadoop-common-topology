@@ -13,10 +13,15 @@
  */
 package org.apache.hadoop.security.authentication.server;
 
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.security.authentication.client.AuthenticatedURL;
 import org.apache.hadoop.security.authentication.client.AuthenticationException;
 import org.apache.hadoop.security.authentication.util.Signer;
 import org.apache.hadoop.security.authentication.util.SignerException;
+import org.apache.hadoop.security.authentication.util.RandomSignerSecretProvider;
+import org.apache.hadoop.security.authentication.util.SignerSecretProvider;
+import org.apache.hadoop.security.authentication.util.StringSignerSecretProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,9 +37,8 @@ import javax.servlet.http.HttpServletRequestWrapper;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.security.Principal;
-import java.util.Enumeration;
-import java.util.Properties;
-import java.util.Random;
+import java.text.SimpleDateFormat;
+import java.util.*;
 
 /**
  * The {@link AuthenticationFilter} enables protecting web application resources with different (pluggable)
@@ -69,6 +73,9 @@ import java.util.Random;
  * the prefix from it and it will pass them to the the authentication handler for initialization. Properties that do
  * not start with the prefix will not be passed to the authentication handler initialization.
  */
+
+@InterfaceAudience.Private
+@InterfaceStability.Unstable
 public class AuthenticationFilter implements Filter {
 
   private static Logger LOG = LoggerFactory.getLogger(AuthenticationFilter.class);
@@ -103,11 +110,29 @@ public class AuthenticationFilter implements Filter {
    */
   public static final String COOKIE_PATH = "cookie.path";
 
-  private static final Random RAN = new Random();
+  /**
+   * Constant for the configuration property that indicates the name of the
+   * SignerSecretProvider class to use.  If not specified, SIGNATURE_SECRET
+   * will be used or a random secret.
+   */
+  public static final String SIGNER_SECRET_PROVIDER_CLASS =
+          "signer.secret.provider";
 
+  /**
+   * Constant for the attribute that can be used for providing a custom
+   * object that subclasses the SignerSecretProvider.  Note that this should be
+   * set in the ServletContext and the class should already be initialized.  
+   * If not specified, SIGNER_SECRET_PROVIDER_CLASS will be used.
+   */
+  public static final String SIGNATURE_PROVIDER_ATTRIBUTE =
+      "org.apache.hadoop.security.authentication.util.SignerSecretProvider";
+
+  private Properties config;
   private Signer signer;
+  private SignerSecretProvider secretProvider;
   private AuthenticationHandler authHandler;
   private boolean randomSecret;
+  private boolean customSecretProvider;
   private long validity;
   private String cookieDomain;
   private String cookiePath;
@@ -126,15 +151,19 @@ public class AuthenticationFilter implements Filter {
   public void init(FilterConfig filterConfig) throws ServletException {
     String configPrefix = filterConfig.getInitParameter(CONFIG_PREFIX);
     configPrefix = (configPrefix != null) ? configPrefix + "." : "";
-    Properties config = getConfiguration(configPrefix, filterConfig);
+    config = getConfiguration(configPrefix, filterConfig);
     String authHandlerName = config.getProperty(AUTH_TYPE, null);
     String authHandlerClassName;
     if (authHandlerName == null) {
-      throw new ServletException("Authentication type must be specified: simple|kerberos|<class>");
+      throw new ServletException("Authentication type must be specified: " +
+          PseudoAuthenticationHandler.TYPE + "|" + 
+          KerberosAuthenticationHandler.TYPE + "|<class>");
     }
-    if (authHandlerName.equals("simple")) {
+    if (authHandlerName.toLowerCase(Locale.ENGLISH).equals(
+        PseudoAuthenticationHandler.TYPE)) {
       authHandlerClassName = PseudoAuthenticationHandler.class.getName();
-    } else if (authHandlerName.equals("kerberos")) {
+    } else if (authHandlerName.toLowerCase(Locale.ENGLISH).equals(
+        KerberosAuthenticationHandler.TYPE)) {
       authHandlerClassName = KerberosAuthenticationHandler.class.getName();
     } else {
       authHandlerClassName = authHandlerName;
@@ -151,17 +180,60 @@ public class AuthenticationFilter implements Filter {
     } catch (IllegalAccessException ex) {
       throw new ServletException(ex);
     }
-    String signatureSecret = config.getProperty(configPrefix + SIGNATURE_SECRET);
-    if (signatureSecret == null) {
-      signatureSecret = Long.toString(RAN.nextLong());
-      randomSecret = true;
-      LOG.warn("'signature.secret' configuration not set, using a random value as secret");
+
+    validity = Long.parseLong(config.getProperty(AUTH_TOKEN_VALIDITY, "36000"))
+        * 1000; //10 hours
+    secretProvider = (SignerSecretProvider) filterConfig.getServletContext().
+        getAttribute(SIGNATURE_PROVIDER_ATTRIBUTE);
+    if (secretProvider == null) {
+      String signerSecretProviderClassName =
+          config.getProperty(configPrefix + SIGNER_SECRET_PROVIDER_CLASS, null);
+      if (signerSecretProviderClassName == null) {
+        String signatureSecret =
+            config.getProperty(configPrefix + SIGNATURE_SECRET, null);
+        if (signatureSecret != null) {
+          secretProvider = new StringSignerSecretProvider(signatureSecret);
+        } else {
+          secretProvider = new RandomSignerSecretProvider();
+          randomSecret = true;
+        }
+      } else {
+        try {
+          Class<?> klass = Thread.currentThread().getContextClassLoader().
+              loadClass(signerSecretProviderClassName);
+          secretProvider = (SignerSecretProvider) klass.newInstance();
+          customSecretProvider = true;
+        } catch (ClassNotFoundException ex) {
+          throw new ServletException(ex);
+        } catch (InstantiationException ex) {
+          throw new ServletException(ex);
+        } catch (IllegalAccessException ex) {
+          throw new ServletException(ex);
+        }
+      }
+      try {
+        secretProvider.init(config, validity);
+      } catch (Exception ex) {
+        throw new ServletException(ex);
+      }
+    } else {
+      customSecretProvider = true;
     }
-    signer = new Signer(signatureSecret.getBytes());
-    validity = Long.parseLong(config.getProperty(AUTH_TOKEN_VALIDITY, "36000")) * 1000; //10 hours
+    signer = new Signer(secretProvider);
 
     cookieDomain = config.getProperty(COOKIE_DOMAIN, null);
     cookiePath = config.getProperty(COOKIE_PATH, null);
+  }
+
+  /**
+   * Returns the configuration properties of the {@link AuthenticationFilter}
+   * without the prefix. The returned properties are the same that the
+   * {@link #getConfiguration(String, FilterConfig)} method returned.
+   *
+   * @return the configuration properties.
+   */
+  protected Properties getConfiguration() {
+    return config;
   }
 
   /**
@@ -180,6 +252,15 @@ public class AuthenticationFilter implements Filter {
    */
   protected boolean isRandomSecret() {
     return randomSecret;
+  }
+
+  /**
+   * Returns if a custom implementation of a SignerSecretProvider is being used.
+   *
+   * @return if a custom implementation of a SignerSecretProvider is being used.
+   */
+  protected boolean isCustomSignerSecretProvider() {
+    return customSecretProvider;
   }
 
   /**
@@ -219,6 +300,9 @@ public class AuthenticationFilter implements Filter {
     if (authHandler != null) {
       authHandler.destroy();
       authHandler = null;
+    }
+    if (secretProvider != null) {
+      secretProvider.destroy();
     }
   }
 
@@ -327,8 +411,12 @@ public class AuthenticationFilter implements Filter {
   @Override
   public void doFilter(ServletRequest request, ServletResponse response, FilterChain filterChain)
       throws IOException, ServletException {
+    boolean unauthorizedResponse = true;
+    int errCode = HttpServletResponse.SC_UNAUTHORIZED;
+    AuthenticationException authenticationEx = null;
     HttpServletRequest httpRequest = (HttpServletRequest) request;
     HttpServletResponse httpResponse = (HttpServletResponse) response;
+    boolean isHttps = "https".equals(httpRequest.getScheme());
     try {
       boolean newToken = false;
       AuthenticationToken token;
@@ -337,78 +425,127 @@ public class AuthenticationFilter implements Filter {
       }
       catch (AuthenticationException ex) {
         LOG.warn("AuthenticationToken ignored: " + ex.getMessage());
+        // will be sent back in a 401 unless filter authenticates
+        authenticationEx = ex;
         token = null;
       }
-      if (token == null) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Request [{}] triggering authentication", getRequestURL(httpRequest));
-        }
-        token = authHandler.authenticate(httpRequest, httpResponse);
-        if (token != null && token != AuthenticationToken.ANONYMOUS) {
-          token.setExpires(System.currentTimeMillis() + getValidity() * 1000);
-        }
-        newToken = true;
-      }
-      if (token != null) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Request [{}] user [{}] authenticated", getRequestURL(httpRequest), token.getUserName());
-        }
-        final AuthenticationToken authToken = token;
-        httpRequest = new HttpServletRequestWrapper(httpRequest) {
-
-          @Override
-          public String getAuthType() {
-            return authToken.getType();
+      if (authHandler.managementOperation(token, httpRequest, httpResponse)) {
+        if (token == null) {
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Request [{}] triggering authentication", getRequestURL(httpRequest));
           }
-
-          @Override
-          public String getRemoteUser() {
-            return authToken.getUserName();
+          token = authHandler.authenticate(httpRequest, httpResponse);
+          if (token != null && token.getExpires() != 0 &&
+              token != AuthenticationToken.ANONYMOUS) {
+            token.setExpires(System.currentTimeMillis() + getValidity() * 1000);
           }
-
-          @Override
-          public Principal getUserPrincipal() {
-            return (authToken != AuthenticationToken.ANONYMOUS) ? authToken : null;
-          }
-        };
-        if (newToken && token != AuthenticationToken.ANONYMOUS) {
-          String signedToken = signer.sign(token.toString());
-          Cookie cookie = createCookie(signedToken);
-          httpResponse.addCookie(cookie);
+          newToken = true;
         }
-        filterChain.doFilter(httpRequest, httpResponse);
-      }
-      else {
-        throw new AuthenticationException("Missing AuthenticationToken");
+        if (token != null) {
+          unauthorizedResponse = false;
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Request [{}] user [{}] authenticated", getRequestURL(httpRequest), token.getUserName());
+          }
+          final AuthenticationToken authToken = token;
+          httpRequest = new HttpServletRequestWrapper(httpRequest) {
+
+            @Override
+            public String getAuthType() {
+              return authToken.getType();
+            }
+
+            @Override
+            public String getRemoteUser() {
+              return authToken.getUserName();
+            }
+
+            @Override
+            public Principal getUserPrincipal() {
+              return (authToken != AuthenticationToken.ANONYMOUS) ? authToken : null;
+            }
+          };
+          if (newToken && !token.isExpired() && token != AuthenticationToken.ANONYMOUS) {
+            String signedToken = signer.sign(token.toString());
+            createAuthCookie(httpResponse, signedToken, getCookieDomain(),
+                    getCookiePath(), token.getExpires(), isHttps);
+          }
+          doFilter(filterChain, httpRequest, httpResponse);
+        }
+      } else {
+        unauthorizedResponse = false;
       }
     } catch (AuthenticationException ex) {
-      if (!httpResponse.isCommitted()) {
-        Cookie cookie = createCookie("");
-        cookie.setMaxAge(0);
-        httpResponse.addCookie(cookie);
-        httpResponse.sendError(HttpServletResponse.SC_UNAUTHORIZED, ex.getMessage());
-      }
+      // exception from the filter itself is fatal
+      errCode = HttpServletResponse.SC_FORBIDDEN;
+      authenticationEx = ex;
       LOG.warn("Authentication exception: " + ex.getMessage(), ex);
+    }
+    if (unauthorizedResponse) {
+      if (!httpResponse.isCommitted()) {
+        createAuthCookie(httpResponse, "", getCookieDomain(),
+                getCookiePath(), 0, isHttps);
+        if (authenticationEx == null) {
+          httpResponse.sendError(errCode, "Authentication required");
+        } else {
+          httpResponse.sendError(errCode, authenticationEx.getMessage());
+        }
+      }
     }
   }
 
   /**
-   * Creates the Hadoop authentiation HTTP cookie.
-   * <p/>
-   * It sets the domain and path specified in the configuration.
+   * Delegates call to the servlet filter chain. Sub-classes my override this
+   * method to perform pre and post tasks.
+   */
+  protected void doFilter(FilterChain filterChain, HttpServletRequest request,
+      HttpServletResponse response) throws IOException, ServletException {
+    filterChain.doFilter(request, response);
+  }
+
+  /**
+   * Creates the Hadoop authentication HTTP cookie.
    *
    * @param token authentication token for the cookie.
+   * @param expires UNIX timestamp that indicates the expire date of the
+   *                cookie. It has no effect if its value < 0.
    *
-   * @return the HTTP cookie.
+   * XXX the following code duplicate some logic in Jetty / Servlet API,
+   * because of the fact that Hadoop is stuck at servlet 2.5 and jetty 6
+   * right now.
    */
-  protected Cookie createCookie(String token) {
-    Cookie cookie = new Cookie(AuthenticatedURL.AUTH_COOKIE, token);
-    if (getCookieDomain() != null) {
-      cookie.setDomain(getCookieDomain());
+  public static void createAuthCookie(HttpServletResponse resp, String token,
+                                      String domain, String path, long expires,
+                                      boolean isSecure) {
+    StringBuilder sb = new StringBuilder(AuthenticatedURL.AUTH_COOKIE)
+                           .append("=");
+    if (token != null && token.length() > 0) {
+      sb.append("\"")
+          .append(token)
+          .append("\"");
     }
-    if (getCookiePath() != null) {
-      cookie.setPath(getCookiePath());
+    sb.append("; Version=1");
+
+    if (path != null) {
+      sb.append("; Path=").append(path);
     }
-    return cookie;
+
+    if (domain != null) {
+      sb.append("; Domain=").append(domain);
+    }
+
+    if (expires >= 0) {
+      Date date = new Date(expires);
+      SimpleDateFormat df = new SimpleDateFormat("EEE, " +
+              "dd-MMM-yyyy HH:mm:ss zzz");
+      df.setTimeZone(TimeZone.getTimeZone("GMT"));
+      sb.append("; Expires=").append(df.format(date));
+    }
+
+    if (isSecure) {
+      sb.append("; Secure");
+    }
+
+    sb.append("; HttpOnly");
+    resp.addHeader("Set-Cookie", sb.toString());
   }
 }

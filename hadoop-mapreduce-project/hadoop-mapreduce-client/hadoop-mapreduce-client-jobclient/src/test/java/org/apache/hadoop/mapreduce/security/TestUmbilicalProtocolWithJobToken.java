@@ -47,14 +47,18 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.SaslInputStream;
 import org.apache.hadoop.security.SaslRpcClient;
 import org.apache.hadoop.security.SaslRpcServer;
+import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 
 import org.apache.log4j.Level;
-import org.junit.Ignore;
 import org.junit.Test;
 
-/** Unit tests for using Job Token over RPC. */
-@Ignore
+/** Unit tests for using Job Token over RPC. 
+ * 
+ * System properties required:
+ * -Djava.security.krb5.conf=.../hadoop-mapreduce-project/hadoop-mapreduce-client/hadoop-mapreduce-client-jobclient/target/test-classes/krb5.conf 
+ * -Djava.net.preferIPv4Stack=true
+ */
 public class TestUmbilicalProtocolWithJobToken {
   private static final String ADDRESS = "0.0.0.0";
 
@@ -87,8 +91,10 @@ public class TestUmbilicalProtocolWithJobToken {
       .when(mockTT).getProtocolSignature(anyString(), anyLong(), anyInt());
 
     JobTokenSecretManager sm = new JobTokenSecretManager();
-    final Server server = RPC.getServer(TaskUmbilicalProtocol.class, mockTT,
-        ADDRESS, 0, 5, true, conf, sm);
+    final Server server = new RPC.Builder(conf)
+        .setProtocol(TaskUmbilicalProtocol.class).setInstance(mockTT)
+        .setBindAddress(ADDRESS).setPort(0).setNumHandlers(5).setVerbose(true)
+        .setSecretManager(sm).build();
 
     server.start();
 
@@ -98,10 +104,8 @@ public class TestUmbilicalProtocolWithJobToken {
     JobTokenIdentifier tokenId = new JobTokenIdentifier(new Text(jobId));
     Token<JobTokenIdentifier> token = new Token<JobTokenIdentifier>(tokenId, sm);
     sm.addTokenForJob(jobId, token);
-    Text host = new Text(addr.getAddress().getHostAddress() + ":"
-        + addr.getPort());
-    token.setService(host);
-    LOG.info("Service IP address for token is " + host);
+    SecurityUtil.setTokenService(token, addr);
+    LOG.info("Service address for token is " + token.getService());
     current.addToken(token);
     current.doAs(new PrivilegedExceptionAction<Object>() {
       @Override
@@ -111,7 +115,7 @@ public class TestUmbilicalProtocolWithJobToken {
           proxy = (TaskUmbilicalProtocol) RPC.getProxy(
               TaskUmbilicalProtocol.class, TaskUmbilicalProtocol.versionID,
               addr, conf);
-          proxy.ping(null);
+          proxy.statusUpdate(null, null);
         } finally {
           server.stop();
           if (proxy != null) {

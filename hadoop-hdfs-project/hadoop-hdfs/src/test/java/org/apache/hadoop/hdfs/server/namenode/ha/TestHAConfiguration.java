@@ -17,11 +17,14 @@
  */
 package org.apache.hadoop.hdfs.server.namenode.ha;
 
-import static org.apache.hadoop.hdfs.DFSConfigKeys.*;
-import static org.junit.Assert.*;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_EDITS_DIR_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SHARED_EDITS_DIR_KEY;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URL;
 import java.util.Collection;
 
 import org.apache.hadoop.conf.Configuration;
@@ -41,7 +44,7 @@ import org.mockito.Mockito;
  */
 public class TestHAConfiguration {
 
-  private FSNamesystem fsn = Mockito.mock(FSNamesystem.class);
+  private final FSNamesystem fsn = Mockito.mock(FSNamesystem.class);
 
   @Test
   public void testCheckpointerValidityChecks() throws Exception {
@@ -57,7 +60,7 @@ public class TestHAConfiguration {
 
   private Configuration getHAConf(String nsId, String host1, String host2) {
     Configuration conf = new Configuration();
-    conf.set(DFSConfigKeys.DFS_FEDERATION_NAMESERVICES, nsId);    
+    conf.set(DFSConfigKeys.DFS_NAMESERVICES, nsId);    
     conf.set(DFSUtil.addKeySuffixes(
         DFSConfigKeys.DFS_HA_NAMENODES_KEY_PREFIX, nsId),
         "nn1,nn2");    
@@ -72,10 +75,10 @@ public class TestHAConfiguration {
   }
 
   @Test
-  public void testGetOtherNNHttpAddress() {
+  public void testGetOtherNNHttpAddress() throws IOException {
     // Use non-local addresses to avoid host address matching
     Configuration conf = getHAConf("ns1", "1.2.3.1", "1.2.3.2");
-    conf.set(DFSConfigKeys.DFS_FEDERATION_NAMESERVICE_ID, "ns1");
+    conf.set(DFSConfigKeys.DFS_NAMESERVICE_ID, "ns1");
 
     // This is done by the NN before the StandbyCheckpointer is created
     NameNode.initializeGenericKeys(conf, "ns1", "nn1");
@@ -84,7 +87,8 @@ public class TestHAConfiguration {
     // 0.0.0.0, it should substitute the address from the RPC configuration
     // above.
     StandbyCheckpointer checkpointer = new StandbyCheckpointer(conf, fsn);
-    assertEquals("1.2.3.2:" + DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT,
+    assertEquals(new URL("http", "1.2.3.2",
+        DFSConfigKeys.DFS_NAMENODE_HTTP_PORT_DEFAULT, ""),
         checkpointer.getActiveNNAddress());
   }
   

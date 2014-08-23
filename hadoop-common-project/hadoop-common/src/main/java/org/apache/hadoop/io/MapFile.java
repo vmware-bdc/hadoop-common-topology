@@ -30,6 +30,7 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.SequenceFile.CompressionType;
 import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.util.Options;
@@ -255,7 +256,7 @@ public class MapFile {
       } else {
         keyClass= 
           (Class<? extends WritableComparable>) keyClassOption.getValue();
-        this.comparator = WritableComparator.get(keyClass);
+        this.comparator = WritableComparator.get(keyClass, conf);
       }
       this.lastKey = comparator.newKey();
       FileSystem fs = dirName.getFileSystem(conf);
@@ -296,6 +297,7 @@ public class MapFile {
     }
 
     /** Close the map. */
+    @Override
     public synchronized void close() throws IOException {
       data.close();
       index.close();
@@ -426,12 +428,13 @@ public class MapFile {
       this.data = createDataFileReader(dataFile, conf, options);
       this.firstPosition = data.getPosition();
 
-      if (comparator == null)
-        this.comparator = 
-          WritableComparator.get(data.getKeyClass().
-                                   asSubclass(WritableComparable.class));
-      else
+      if (comparator == null) {
+        Class<? extends WritableComparable> cls;
+        cls = data.getKeyClass().asSubclass(WritableComparable.class);
+        this.comparator = WritableComparator.get(cls, conf);
+      } else {
         this.comparator = comparator;
+      }
 
       // open the index
       SequenceFile.Reader.Option[] indexOptions =
@@ -723,6 +726,7 @@ public class MapFile {
     }
 
     /** Close the map. */
+    @Override
     public synchronized void close() throws IOException {
       if (!indexClosed) {
         index.close();
@@ -834,21 +838,24 @@ public class MapFile {
 
     Configuration conf = new Configuration();
     FileSystem fs = FileSystem.getLocal(conf);
-    MapFile.Reader reader = new MapFile.Reader(fs, in, conf);
-    MapFile.Writer writer =
-      new MapFile.Writer(conf, fs, out,
-          reader.getKeyClass().asSubclass(WritableComparable.class),
-          reader.getValueClass());
+    MapFile.Reader reader = null;
+    MapFile.Writer writer = null;
+    try {
+      reader = new MapFile.Reader(fs, in, conf);
+      writer =
+        new MapFile.Writer(conf, fs, out,
+            reader.getKeyClass().asSubclass(WritableComparable.class),
+            reader.getValueClass());
 
-    WritableComparable key =
-      ReflectionUtils.newInstance(reader.getKeyClass().asSubclass(WritableComparable.class), conf);
-    Writable value =
-      ReflectionUtils.newInstance(reader.getValueClass().asSubclass(Writable.class), conf);
+      WritableComparable key = ReflectionUtils.newInstance(reader.getKeyClass()
+        .asSubclass(WritableComparable.class), conf);
+      Writable value = ReflectionUtils.newInstance(reader.getValueClass()
+        .asSubclass(Writable.class), conf);
 
-    while (reader.next(key, value))               // copy all entries
-      writer.append(key, value);
-
-    writer.close();
+      while (reader.next(key, value))               // copy all entries
+        writer.append(key, value);
+    } finally {
+      IOUtils.cleanup(LOG, writer, reader);
+    }
   }
-
 }

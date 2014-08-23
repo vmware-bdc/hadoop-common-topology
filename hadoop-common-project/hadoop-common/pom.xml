@@ -12,7 +12,10 @@
   See the License for the specific language governing permissions and
   limitations under the License. See accompanying LICENSE file.
 -->
-<project>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                      http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>org.apache.hadoop</groupId>
@@ -28,9 +31,6 @@
   <packaging>jar</packaging>
 
   <properties>
-    <snappy.prefix>/usr/local</snappy.prefix>
-    <snappy.lib>${snappy.prefix}/lib</snappy.lib>
-    <bundle.snappy>false</bundle.snappy>
     <kdc.resource.dir>src/test/resources/kdc</kdc.resource.dir>
     <hadoop.component>common</hadoop.component>
     <is.hadoop.component>true</is.hadoop.component>
@@ -41,7 +41,7 @@
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-annotations</artifactId>
-      <scope>provided</scope>
+      <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>com.google.guava</groupId>
@@ -55,7 +55,7 @@
     </dependency>
     <dependency>
       <groupId>org.apache.commons</groupId>
-      <artifactId>commons-math</artifactId>
+      <artifactId>commons-math3</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -74,13 +74,18 @@
       <scope>compile</scope>
     </dependency>
     <dependency>
+      <groupId>commons-io</groupId>
+      <artifactId>commons-io</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
       <groupId>commons-net</groupId>
       <artifactId>commons-net</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
-      <groupId>commons-io</groupId>
-      <artifactId>commons-io</artifactId>
+      <groupId>commons-collections</groupId>
+      <artifactId>commons-collections</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -99,9 +104,9 @@
       <scope>compile</scope>
     </dependency>
     <dependency>
-      <groupId>asm</groupId>
-      <artifactId>asm</artifactId>
-      <scope>compile</scope>
+      <groupId>javax.servlet.jsp</groupId>
+      <artifactId>jsp-api</artifactId>
+      <scope>runtime</scope>
     </dependency>
     <dependency>
       <groupId>com.sun.jersey</groupId>
@@ -109,6 +114,7 @@
       <scope>compile</scope>
     </dependency>
     <dependency>
+      <!-- Used, even though 'mvn dependency:analyze' doesn't find it -->
       <groupId>com.sun.jersey</groupId>
       <artifactId>jersey-json</artifactId>
       <scope>compile</scope>
@@ -119,33 +125,8 @@
       <scope>compile</scope>
     </dependency>
     <dependency>
-      <groupId>tomcat</groupId>
-      <artifactId>jasper-compiler</artifactId>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>tomcat</groupId>
-      <artifactId>jasper-runtime</artifactId>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>javax.servlet.jsp</groupId>
-      <artifactId>jsp-api</artifactId>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>commons-el</groupId>
-      <artifactId>commons-el</artifactId>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
       <groupId>commons-logging</groupId>
       <artifactId>commons-logging</artifactId>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>commons-logging</groupId>
-      <artifactId>commons-logging-api</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -159,26 +140,6 @@
       <scope>compile</scope>
     </dependency>
     <dependency>
-      <groupId>org.apache.mina</groupId>
-      <artifactId>mina-core</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.ftpserver</groupId>
-      <artifactId>ftplet-api</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.ftpserver</groupId>
-      <artifactId>ftpserver-core</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.ftpserver</groupId>
-      <artifactId>ftpserver-deprecated</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
       <groupId>junit</groupId>
       <artifactId>junit</artifactId>
       <scope>test</scope>
@@ -186,11 +147,6 @@
     <dependency>
       <groupId>commons-lang</groupId>
       <artifactId>commons-lang</artifactId>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>commons-collections</groupId>
-      <artifactId>commons-collections</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -206,26 +162,16 @@
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-log4j12</artifactId>
-      <scope>compile</scope>
+      <scope>runtime</scope>
     </dependency>
     <dependency>
-      <groupId>org.eclipse.jdt</groupId>
-      <artifactId>core</artifactId>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>oro</groupId>
-      <artifactId>oro</artifactId>
+      <groupId>org.codehaus.jackson</groupId>
+      <artifactId>jackson-core-asl</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>org.codehaus.jackson</groupId>
       <artifactId>jackson-mapper-asl</artifactId>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.aspectj</groupId>
-      <artifactId>aspectjrt</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -239,14 +185,9 @@
       <scope>compile</scope>
     </dependency>
     <dependency>
-      <groupId>net.sf.kosmosfs</groupId>
-      <artifactId>kfs</artifactId>
-      <scope>compile</scope>
-    </dependency>
-    <dependency>
       <groupId>org.apache.ant</groupId>
       <artifactId>ant</artifactId>
-      <scope>provided</scope>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>com.google.protobuf</groupId>
@@ -254,25 +195,47 @@
       <scope>compile</scope>
     </dependency>
     <dependency>
+      <groupId>com.google.code.gson</groupId>
+      <artifactId>gson</artifactId>
+    </dependency>
+    <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-auth</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
-      <groupId>com.googlecode.json-simple</groupId>
-      <artifactId>json-simple</artifactId>
-      <scope>compile</scope>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-auth</artifactId>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-minikdc</artifactId>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>com.jcraft</groupId>
       <artifactId>jsch</artifactId>
     </dependency>
+    <dependency>
+      <groupId>com.google.code.findbugs</groupId>
+      <artifactId>jsr305</artifactId>
+      <scope>compile</scope>
+    </dependency>
 
     <dependency>
       <groupId>org.apache.zookeeper</groupId>
       <artifactId>zookeeper</artifactId>
-      <version>3.4.2</version>
       <exclusions>
+        <exclusion>
+          <groupId>jline</groupId>
+          <artifactId>jline</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.jboss.netty</groupId>
+          <artifactId>netty</artifactId>
+        </exclusion>
         <exclusion>
           <!-- otherwise seems to drag in junit 3.8.1 via jline -->
           <groupId>junit</groupId>
@@ -291,14 +254,116 @@
     <dependency>
       <groupId>org.apache.zookeeper</groupId>
       <artifactId>zookeeper</artifactId>
-      <version>3.4.2</version>
       <type>test-jar</type>
       <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-compress</artifactId>
     </dependency>
   </dependencies>
 
   <build>
+    <!--
+    Include all files in src/main/resources.  By default, do not apply property
+    substitution (filtering=false), but do apply property substitution to
+    common-version-info.properties (filtering=true).  This will substitute the
+    version information correctly, but prevent Maven from altering other files
+    like core-default.xml.
+    -->
+    <resources>
+      <resource>
+        <directory>${basedir}/src/main/resources</directory>
+        <excludes>
+          <exclude>common-version-info.properties</exclude>
+        </excludes>
+        <filtering>false</filtering>
+      </resource>
+      <resource>
+        <directory>${basedir}/src/main/resources</directory>
+        <includes>
+          <include>common-version-info.properties</include>
+        </includes>
+        <filtering>true</filtering>
+      </resource>
+    </resources>
     <plugins>
+      <plugin>
+        <groupId>org.apache.hadoop</groupId>
+        <artifactId>hadoop-maven-plugins</artifactId>
+        <executions>
+          <execution>
+            <id>version-info</id>
+            <phase>generate-resources</phase>
+            <goals>
+              <goal>version-info</goal>
+            </goals>
+            <configuration>
+              <source>
+                <directory>${basedir}/src/main</directory>
+                <includes>
+                  <include>java/**/*.java</include>
+                  <include>proto/**/*.proto</include>
+                </includes>
+              </source>
+            </configuration>
+          </execution>
+          <execution>
+            <id>compile-protoc</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>protoc</goal>
+            </goals>
+            <configuration>
+              <protocVersion>${protobuf.version}</protocVersion>
+              <protocCommand>${protoc.path}</protocCommand>
+              <imports>
+                <param>${basedir}/src/main/proto</param>
+              </imports>
+              <source>
+                <directory>${basedir}/src/main/proto</directory>
+                <includes>
+                  <include>HAServiceProtocol.proto</include>
+                  <include>IpcConnectionContext.proto</include>
+                  <include>ProtocolInfo.proto</include>
+                  <include>RpcHeader.proto</include>
+                  <include>ZKFCProtocol.proto</include>
+                  <include>ProtobufRpcEngine.proto</include>
+                  <include>Security.proto</include>
+                  <include>GetUserMappingsProtocol.proto</include>
+                  <include>RefreshAuthorizationPolicyProtocol.proto</include>
+                  <include>RefreshUserMappingsProtocol.proto</include>
+                  <include>RefreshCallQueueProtocol.proto</include>
+                  <include>GenericRefreshProtocol.proto</include>
+                </includes>
+              </source>
+              <output>${project.build.directory}/generated-sources/java</output>
+            </configuration>
+          </execution>
+          <execution>
+            <id>compile-test-protoc</id>
+            <phase>generate-test-sources</phase>
+            <goals>
+              <goal>protoc</goal>
+            </goals>
+            <configuration>
+              <protocVersion>${protobuf.version}</protocVersion>
+              <protocCommand>${protoc.path}</protocCommand>
+              <imports>
+                <param>${basedir}/src/test/proto</param>
+              </imports>
+              <source>
+                <directory>${basedir}/src/test/proto</directory>
+                <includes>
+                  <include>test.proto</include>
+                  <include>test_rpc_service.proto</include>
+                </includes>
+              </source>
+              <output>${project.build.directory}/generated-test-sources/java</output>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
@@ -307,6 +372,12 @@
             <startKdc>${startKdc}</startKdc>
             <kdc.resource.dir>${kdc.resource.dir}</kdc.resource.dir>
           </systemPropertyVariables>
+          <properties>
+            <property>
+              <name>listener</name>
+              <value>org.apache.hadoop.test.TimedOutTestsListener</value>
+            </property>
+          </properties>
         </configuration>
       </plugin>
       <plugin>
@@ -330,112 +401,6 @@
         <artifactId>maven-antrun-plugin</artifactId>
         <executions>
           <execution>
-            <id>compile-proto</id>
-            <phase>generate-sources</phase>
-            <goals>
-              <goal>run</goal>
-            </goals>
-            <configuration>
-              <target>
-                <echo file="target/compile-proto.sh">
-                    PROTO_DIR=src/main/proto
-                    JAVA_DIR=target/generated-sources/java
-                    which cygpath 2> /dev/null
-                    if [ $? = 1 ]; then
-                      IS_WIN=false
-                    else
-                      IS_WIN=true
-                      WIN_PROTO_DIR=`cygpath --windows $PROTO_DIR`
-                      WIN_JAVA_DIR=`cygpath --windows $JAVA_DIR`
-                    fi
-                    mkdir -p $JAVA_DIR 2> /dev/null
-                    for PROTO_FILE in `ls $PROTO_DIR/*.proto 2> /dev/null`
-                    do
-                        if [ "$IS_WIN" = "true" ]; then
-                          protoc -I$WIN_PROTO_DIR --java_out=$WIN_JAVA_DIR $PROTO_FILE
-                        else
-                          protoc -I$PROTO_DIR --java_out=$JAVA_DIR $PROTO_FILE
-                        fi
-                    done
-                </echo>
-                <exec executable="sh" dir="${basedir}" failonerror="true">
-                  <arg line="target/compile-proto.sh"/>
-                </exec>
-              </target>
-            </configuration>
-          </execution>
-          <execution>
-            <id>compile-test-proto</id>
-            <phase>generate-test-sources</phase>
-            <goals>
-              <goal>run</goal>
-            </goals>
-            <configuration>
-              <target>
-                <echo file="target/compile-test-proto.sh">
-                    PROTO_DIR=src/test/proto
-                    JAVA_DIR=target/generated-test-sources/java
-                    which cygpath 2> /dev/null
-                    if [ $? = 1 ]; then
-                      IS_WIN=false
-                    else
-                      IS_WIN=true
-                      WIN_PROTO_DIR=`cygpath --windows $PROTO_DIR`
-                      WIN_JAVA_DIR=`cygpath --windows $JAVA_DIR`
-                    fi
-                    mkdir -p $JAVA_DIR 2> /dev/null
-                    for PROTO_FILE in `ls $PROTO_DIR/*.proto 2> /dev/null`
-                    do
-                        if [ "$IS_WIN" = "true" ]; then
-                          protoc -I$WIN_PROTO_DIR --java_out=$WIN_JAVA_DIR $PROTO_FILE
-                        else
-                          protoc -I$PROTO_DIR --java_out=$JAVA_DIR $PROTO_FILE
-                        fi
-                    done
-                </echo>
-                <exec executable="sh" dir="${basedir}" failonerror="true">
-                  <arg line="target/compile-test-proto.sh"/>
-                </exec>
-              </target>
-            </configuration>
-          </execution>
-          <execution>
-            <id>save-version</id>
-            <phase>generate-sources</phase>
-            <goals>
-              <goal>run</goal>
-            </goals>
-            <configuration>
-              <target>
-                <mkdir dir="${project.build.directory}/generated-sources/java"/>
-                <exec executable="sh">
-                  <arg
-                      line="${basedir}/dev-support/saveVersion.sh ${project.version} ${project.build.directory}/generated-sources/java"/>
-                </exec>
-              </target>
-            </configuration>
-          </execution>
-          <execution>
-            <id>generate-test-sources</id>
-            <phase>generate-test-sources</phase>
-            <goals>
-              <goal>run</goal>
-            </goals>
-            <configuration>
-              <target>
-
-                <mkdir dir="${project.build.directory}/generated-test-sources/java"/>
-
-                <taskdef name="recordcc" classname="org.apache.hadoop.record.compiler.ant.RccTask">
-                  <classpath refid="maven.compile.classpath"/>
-                </taskdef>
-                <recordcc destdir="${project.build.directory}/generated-test-sources/java">
-                  <fileset dir="${basedir}/src/test/ddl" includes="**/*.jr"/>
-                </recordcc>
-              </target>
-            </configuration>
-          </execution>
-          <execution>
             <id>create-log-dir</id>
             <phase>process-test-resources</phase>
             <goals>
@@ -458,6 +423,23 @@
             </configuration>
           </execution>
           <execution>
+            <id>copy-test-tarballs</id>
+            <phase>process-test-resources</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <target>
+                <copy toDir="${test.cache.data}">
+                  <fileset dir="${basedir}/src/test/java/org/apache/hadoop/fs">
+                    <include name="test-untar.tar"/>
+                    <include name="test-untar.tgz"/>
+                  </fileset>
+                </copy>
+              </target>
+            </configuration>
+          </execution>
+          <execution>
             <phase>pre-site</phase>
             <goals>
               <goal>run</goal>
@@ -467,36 +449,6 @@
                 <copy file="src/main/resources/core-default.xml" todir="src/site/resources"/>
                 <copy file="src/main/xsl/configuration.xsl" todir="src/site/resources"/>
               </tasks>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>build-helper-maven-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>add-source</id>
-            <phase>generate-sources</phase>
-            <goals>
-              <goal>add-source</goal>
-            </goals>
-            <configuration>
-              <sources>
-                <source>${project.build.directory}/generated-sources/java</source>
-              </sources>
-            </configuration>
-          </execution>
-          <execution>
-            <id>add-test-source</id>
-            <phase>generate-sources</phase>
-            <goals>
-              <goal>add-test-source</goal>
-            </goals>
-            <configuration>
-              <sources>
-                <source>${project.build.directory}/generated-test-sources/java</source>
-              </sources>
             </configuration>
           </execution>
         </executions>
@@ -513,10 +465,22 @@
             <exclude>dev-support/jdiff/**</exclude>
             <exclude>src/main/native/*</exclude>
             <exclude>src/main/native/config/*</exclude>
-            <exclude>src/main/resources/META-INF/services/org.apache.hadoop.security.SecurityInfo</exclude>
             <exclude>src/main/native/m4/*</exclude>
             <exclude>src/test/empty-file</exclude>
             <exclude>src/test/all-tests</exclude>
+            <exclude>src/test/resources/kdc/ldif/users.ldif</exclude>
+            <exclude>src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4.h</exclude>
+            <exclude>src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4.c</exclude>
+            <exclude>src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4_encoder.h</exclude>
+            <exclude>src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4hc.h</exclude>
+            <exclude>src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4hc.c</exclude>
+            <exclude>src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4hc_encoder.h</exclude>
+            <exclude>src/test/java/org/apache/hadoop/fs/test-untar.tgz</exclude>
+            <exclude>src/test/resources/test.har/_SUCCESS</exclude>
+            <exclude>src/test/resources/test.har/_index</exclude>
+            <exclude>src/test/resources/test.har/_masterindex</exclude>
+            <exclude>src/test/resources/test.har/part-0</exclude>
+            <exclude>src/test/resources/javakeystoreprovider.password</exclude>
           </excludes>
         </configuration>
       </plugin>
@@ -530,30 +494,155 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <snappy.prefix>/usr/local</snappy.prefix>
-        <snappy.lib>${snappy.prefix}/lib</snappy.lib>
-        <snappy.include>${snappy.prefix}/include</snappy.include>
+        <require.bzip2>false</require.bzip2>
+        <snappy.prefix></snappy.prefix>
+        <snappy.lib></snappy.lib>
+        <snappy.include></snappy.include>
+        <require.snappy>false</require.snappy>
+        <openssl.prefix></openssl.prefix>
+        <openssl.lib></openssl.lib>
+        <openssl.include></openssl.include>
+        <require.openssl>false</require.openssl>
       </properties>
       <build>
         <plugins>
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-enforcer-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>enforce-os</id>
+                <goals>
+                  <goal>enforce</goal>
+                </goals>
+                <configuration>
+                  <rules>
+                    <requireOS>
+                      <family>mac</family>
+                      <family>unix</family>
+                      <message>native build only supported on Mac or Unix</message>
+                    </requireOS>
+                  </rules>  
+                  <fail>true</fail>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>native-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <phase>compile</phase>
+                <goals>
+                  <goal>javah</goal>
+                </goals>
+                <configuration>
+                  <javahPath>${env.JAVA_HOME}/bin/javah</javahPath>
+                  <javahClassNames>
+                    <javahClassName>org.apache.hadoop.io.compress.zlib.ZlibCompressor</javahClassName>
+                    <javahClassName>org.apache.hadoop.io.compress.zlib.ZlibDecompressor</javahClassName>
+                    <javahClassName>org.apache.hadoop.io.compress.bzip2.Bzip2Compressor</javahClassName>
+                    <javahClassName>org.apache.hadoop.io.compress.bzip2.Bzip2Decompressor</javahClassName>
+                    <javahClassName>org.apache.hadoop.security.JniBasedUnixGroupsMapping</javahClassName>
+                    <javahClassName>org.apache.hadoop.io.nativeio.NativeIO</javahClassName>
+                    <javahClassName>org.apache.hadoop.io.nativeio.SharedFileDescriptorFactory</javahClassName>
+                    <javahClassName>org.apache.hadoop.security.JniBasedUnixGroupsNetgroupMapping</javahClassName>
+                    <javahClassName>org.apache.hadoop.io.compress.snappy.SnappyCompressor</javahClassName>
+                    <javahClassName>org.apache.hadoop.io.compress.snappy.SnappyDecompressor</javahClassName>
+                    <javahClassName>org.apache.hadoop.io.compress.lz4.Lz4Compressor</javahClassName>
+                    <javahClassName>org.apache.hadoop.io.compress.lz4.Lz4Decompressor</javahClassName>
+                    <javahClassName>org.apache.hadoop.crypto.OpensslCipher</javahClassName>
+                    <javahClassName>org.apache.hadoop.crypto.random.OpensslSecureRandom</javahClassName>
+                    <javahClassName>org.apache.hadoop.util.NativeCrc32</javahClassName>
+                    <javahClassName>org.apache.hadoop.net.unix.DomainSocket</javahClassName>
+                    <javahClassName>org.apache.hadoop.net.unix.DomainSocketWatcher</javahClassName>
+                  </javahClassNames>
+                  <javahOutputDirectory>${project.build.directory}/native/javah</javahOutputDirectory>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-antrun-plugin</artifactId>
             <executions>
               <execution>
-                <id>compile</id>
+                <id>make</id>
                 <phase>compile</phase>
-                <goals>
-                  <goal>run</goal>
-                </goals>
+                <goals><goal>run</goal></goals>
                 <configuration>
                   <target>
-                    <mkdir dir="${project.build.directory}/native/javah"/>
-                    <copy toDir="${project.build.directory}/native">
-                      <fileset dir="${basedir}/src/main/native"/>
-                    </copy>
-                    <mkdir dir="${project.build.directory}/native/m4"/>
+                    <exec executable="cmake" dir="${project.build.directory}/native" failonerror="true">
+                      <arg line="${basedir}/src/ -DGENERATED_JAVAH=${project.build.directory}/native/javah -DJVM_ARCH_DATA_MODEL=${sun.arch.data.model} -DREQUIRE_BZIP2=${require.bzip2} -DREQUIRE_SNAPPY=${require.snappy} -DCUSTOM_SNAPPY_PREFIX=${snappy.prefix} -DCUSTOM_SNAPPY_LIB=${snappy.lib} -DCUSTOM_SNAPPY_INCLUDE=${snappy.include} -DREQUIRE_OPENSSL=${require.openssl} -DCUSTOM_OPENSSL_PREFIX=${openssl.prefix} -DCUSTOM_OPENSSL_LIB=${openssl.lib} -DCUSTOM_OPENSSL_INCLUDE=${openssl.include}"/>
+                    </exec>
+                    <exec executable="make" dir="${project.build.directory}/native" failonerror="true">
+                      <arg line="VERBOSE=1"/>
+                    </exec>
+                    <!-- The second make is a workaround for HADOOP-9215.  It can
+                         be removed when version 2.6 of cmake is no longer supported . -->
+                    <exec executable="make" dir="${project.build.directory}/native" failonerror="true"></exec>
                   </target>
+                </configuration>
+              </execution>
+              <execution>
+                <id>native_tests</id>
+                <phase>test</phase>
+                <goals><goal>run</goal></goals>
+                <configuration>
+                  <target>
+                    <exec executable="sh" failonerror="true" dir="${project.build.directory}/native">
+                      <arg value="-c"/>
+                      <arg value="[ x$SKIPTESTS = xtrue ] || ${project.build.directory}/native/test_bulk_crc32"/>
+                      <env key="SKIPTESTS" value="${skipTests}"/>
+                    </exec>
+                  </target>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <id>native-win</id>
+      <activation>
+        <os>
+          <family>Windows</family>
+        </os>
+      </activation>
+      <properties>
+        <snappy.prefix></snappy.prefix>
+        <snappy.lib></snappy.lib>
+        <snappy.include></snappy.include>
+        <require.snappy>false</require.snappy>
+        <bundle.snappy.in.bin>true</bundle.snappy.in.bin>
+        <openssl.prefix></openssl.prefix>
+        <openssl.lib></openssl.lib>
+        <openssl.include></openssl.include>
+        <require.openssl>false</require.openssl>
+        <bundle.openssl.in.bin>true</bundle.openssl.in.bin>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-enforcer-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>enforce-os</id>
+                <goals>
+                  <goal>enforce</goal>
+                </goals>
+                <configuration>
+                  <rules>
+                    <requireOS>
+                      <family>windows</family>
+                      <message>native-win build only supported on Windows</message>
+                    </requireOS>
+                  </rules>  
+                  <fail>true</fail>
                 </configuration>
               </execution>
             </executions>
@@ -579,6 +668,8 @@
                     <javahClassName>org.apache.hadoop.io.compress.snappy.SnappyDecompressor</javahClassName>
                     <javahClassName>org.apache.hadoop.io.compress.lz4.Lz4Compressor</javahClassName>
                     <javahClassName>org.apache.hadoop.io.compress.lz4.Lz4Decompressor</javahClassName>
+                    <javahClassName>org.apache.hadoop.crypto.OpensslCipher</javahClassName>
+                    <javahClassName>org.apache.hadoop.crypto.random.OpensslSecureRandom</javahClassName>
                     <javahClassName>org.apache.hadoop.util.NativeCrc32</javahClassName>
                   </javahClassNames>
                   <javahOutputDirectory>${project.build.directory}/native/javah</javahOutputDirectory>
@@ -588,72 +679,49 @@
           </plugin>
           <plugin>
             <groupId>org.codehaus.mojo</groupId>
-            <artifactId>make-maven-plugin</artifactId>
+            <artifactId>exec-maven-plugin</artifactId>
             <executions>
               <execution>
-                <id>compile</id>
+                <id>compile-ms-winutils</id>
                 <phase>compile</phase>
                 <goals>
-                  <goal>autoreconf</goal>
-                  <goal>configure</goal>
-                  <goal>make-install</goal>
+                  <goal>exec</goal>
                 </goals>
+                <configuration>
+                  <executable>msbuild</executable>
+                  <arguments>
+                    <argument>${basedir}/src/main/winutils/winutils.sln</argument>
+                    <argument>/nologo</argument>
+                    <argument>/p:Configuration=Release</argument>
+                    <argument>/p:OutDir=${project.build.directory}/bin/</argument>
+                  </arguments>
+                </configuration>
+              </execution>
+              <execution>
+                <id>compile-ms-native-dll</id>
+                <phase>compile</phase>
+                <goals>
+                  <goal>exec</goal>
+                </goals>
+                <configuration>
+                  <executable>msbuild</executable>
+                  <arguments>
+                    <argument>${basedir}/src/main/native/native.sln</argument>
+                    <argument>/nologo</argument>
+                    <argument>/p:Configuration=Release</argument>
+                    <argument>/p:OutDir=${project.build.directory}/bin/</argument>
+                    <argument>/p:CustomSnappyPrefix=${snappy.prefix}</argument>
+                    <argument>/p:CustomSnappyLib=${snappy.lib}</argument>
+                    <argument>/p:CustomSnappyInclude=${snappy.include}</argument>
+                    <argument>/p:RequireSnappy=${require.snappy}</argument>
+                    <argument>/p:CustomOpensslPrefix=${openssl.prefix}</argument>
+                    <argument>/p:CustomOpensslLib=${openssl.lib}</argument>
+                    <argument>/p:CustomOpensslInclude=${openssl.include}</argument>
+                    <argument>/p:RequireOpenssl=${require.openssl}</argument>
+                  </arguments>
+                </configuration>
               </execution>
             </executions>
-            <configuration>
-              <!-- autoreconf settings -->
-              <workDir>${project.build.directory}/native</workDir>
-              <arguments>
-                <argument>-i</argument>
-                <argument>-f</argument>
-              </arguments>
-
-              <!-- configure settings -->
-              <configureEnvironment>
-                <property>
-                  <name>OS_NAME</name>
-                  <value>${os.name}</value>
-                </property>
-                <property>
-                  <name>OS_ARCH</name>
-                  <value>${os.arch}</value>
-                </property>
-                <property>
-                  <name>JVM_DATA_MODEL</name>
-                  <value>${sun.arch.data.model}</value>
-                </property>
-              </configureEnvironment>
-              <configureOptions>
-                <configureOption>CPPFLAGS=-I${snappy.include}</configureOption>
-                <configureOption>LDFLAGS=-L${snappy.lib}</configureOption>
-              </configureOptions>
-              <configureWorkDir>${project.build.directory}/native</configureWorkDir>
-              <prefix>/usr/local</prefix>
-
-              <!-- make settings -->
-              <installEnvironment>
-                <property>
-                  <name>OS_NAME</name>
-                  <value>${os.name}</value>
-                </property>
-                <property>
-                  <name>OS_ARCH</name>
-                  <value>${os.arch}</value>
-                </property>
-                <property>
-                  <name>JVM_DATA_MODEL</name>
-                  <value>${sun.arch.data.model}</value>
-                </property>
-                <property>
-                  <name>HADOOP_NATIVE_SRCDIR</name>
-                  <value>${project.build.directory}/native</value>
-                </property>
-              </installEnvironment>
-
-              <!-- configure & make settings -->
-              <destDir>${project.build.directory}/native/target</destDir>
-
-            </configuration>
           </plugin>
         </plugins>
       </build>
@@ -697,7 +765,7 @@
             <artifactId>maven-antrun-plugin</artifactId>
             <executions>
               <execution>
-                <id>compile</id>
+                <id>kdc</id>
                 <phase>compile</phase>
                 <goals>
                   <goal>run</goal>
@@ -735,6 +803,21 @@
                 </configuration>
               </execution>
             </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <profile>
+      <id>parallel-tests</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <forkCount>${testsThreadCount}</forkCount>
+              <argLine>-Xmx1024m -XX:+HeapDumpOnOutOfMemoryError -DminiClusterDedicatedDirs=true</argLine>
+            </configuration>
           </plugin>
         </plugins>
       </build>

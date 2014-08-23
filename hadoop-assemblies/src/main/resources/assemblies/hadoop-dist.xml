@@ -26,6 +26,10 @@
       <outputDirectory>/bin</outputDirectory>
       <excludes>
         <exclude>*.sh</exclude>
+        <exclude>*-config.cmd</exclude>
+        <exclude>start-*.cmd</exclude>
+        <exclude>stop-*.cmd</exclude>
+        <exclude>hadoop-layout.sh.example</exclude>
       </excludes>
       <fileMode>0755</fileMode>
     </fileSet>
@@ -38,6 +42,9 @@
       <outputDirectory>/libexec</outputDirectory>
       <includes>
         <include>*-config.sh</include>
+        <include>*-config.cmd</include>
+        <include>*-functions.sh</include>
+        <include>hadoop-layout.sh.example</include>
       </includes>
       <fileMode>0755</fileMode>
     </fileSet>
@@ -46,9 +53,17 @@
       <outputDirectory>/sbin</outputDirectory>
       <includes>
         <include>*.sh</include>
+        <include>*.cmd</include>
       </includes>
       <excludes>
         <exclude>hadoop-config.sh</exclude>
+        <exclude>hadoop.cmd</exclude>
+        <exclude>hdfs.cmd</exclude>
+        <exclude>hadoop-config.cmd</exclude>
+        <exclude>hadoop-functions.sh</exclude>
+        <exclude>hadoop-layout.sh.example</exclude>
+        <exclude>hdfs-config.cmd</exclude>
+        <exclude>hdfs-config.sh</exclude>
       </excludes>
       <fileMode>0755</fileMode>
     </fileSet>
@@ -91,12 +106,18 @@
       <includes>
         <include>${project.artifactId}-${project.version}.jar</include>
         <include>${project.artifactId}-${project.version}-tests.jar</include>
-        <include>${project.artifactId}-${project.version}-sources.jar</include>
-        <include>${project.artifactId}-${project.version}-test-sources.jar</include>
       </includes>
       <excludes>
         <exclude>hadoop-tools-dist-*.jar</exclude>
       </excludes>
+    </fileSet>
+    <fileSet>
+      <directory>${project.build.directory}</directory>
+      <outputDirectory>/share/hadoop/${hadoop.component}/sources</outputDirectory>
+      <includes>
+        <include>${project.artifactId}-${project.version}-sources.jar</include>
+        <include>${project.artifactId}-${project.version}-test-sources.jar</include>
+      </includes>
     </fileSet>
     <fileSet>
       <directory>${basedir}/dev-support/jdiff</directory>
@@ -111,9 +132,9 @@
       <outputDirectory>/share/doc/hadoop/${hadoop.component}</outputDirectory>
     </fileSet>
     <fileSet>
-      <directory>${basedir}/src/main/native</directory>
+      <directory>${basedir}/src/main/native/libhdfs</directory>
       <includes>
-        <include>*.h</include>
+        <include>hdfs.h</include>
       </includes>
       <outputDirectory>/include</outputDirectory>
     </fileSet>

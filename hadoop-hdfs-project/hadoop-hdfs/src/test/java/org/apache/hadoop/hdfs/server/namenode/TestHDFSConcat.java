@@ -55,10 +55,10 @@ public class TestHDFSConcat {
   private NamenodeProtocols nn;
   private DistributedFileSystem dfs;
 
-  private static long blockSize = 512;
+  private static final long blockSize = 512;
 
   
-  private static Configuration conf;
+  private static final Configuration conf;
 
   static {
     conf = new Configuration();
@@ -70,7 +70,7 @@ public class TestHDFSConcat {
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(REPL_FACTOR).build();
     assertNotNull("Failed Cluster Creation", cluster);
     cluster.waitClusterUp();
-    dfs = (DistributedFileSystem) cluster.getFileSystem();
+    dfs = cluster.getFileSystem();
     assertNotNull("Failed to get FileSystem", dfs);
     nn = cluster.getNameNodeRpc();
     assertNotNull("Failed to get NameNode", nn);

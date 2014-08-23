@@ -17,9 +17,17 @@
  */
 package org.apache.hadoop.hdfs.protocol;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
+import org.apache.hadoop.hdfs.server.datanode.DataNodeLayoutVersion;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeLayoutVersion;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
 
 /************************************
  * Some handy constants
@@ -40,7 +48,7 @@ public class HdfsConstants {
       "org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol";
   
   
-  public static int MIN_BLOCKS_FOR_WRITE = 5;
+  public static final int MIN_BLOCKS_FOR_WRITE = 5;
 
   // Long that indicates "leave current quota unchanged"
   public static final long QUOTA_DONT_SET = Long.MAX_VALUE;
@@ -57,10 +65,10 @@ public class HdfsConstants {
   // HADOOP-438
   // Currently we set the maximum length to 8k characters and the maximum depth
   // to 1k.
-  public static int MAX_PATH_LENGTH = 8000;
-  public static int MAX_PATH_DEPTH = 1000;
+  public static final int MAX_PATH_LENGTH = 8000;
+  public static final int MAX_PATH_DEPTH = 1000;
 
-  // TODO mb@media-style.com: should be conf injected?
+  // TODO should be conf injected?
   public static final int DEFAULT_DATA_SOCKET_SIZE = 128 * 1024;
   public static final int IO_FILE_BUFFER_SIZE = new HdfsConfiguration().getInt(
       DFSConfigKeys.IO_FILE_BUFFER_SIZE_KEY,
@@ -76,23 +84,35 @@ public class HdfsConstants {
     SAFEMODE_LEAVE, SAFEMODE_ENTER, SAFEMODE_GET;
   }
 
+  public static enum RollingUpgradeAction {
+    QUERY, PREPARE, FINALIZE;
+    
+    private static final Map<String, RollingUpgradeAction> MAP
+        = new HashMap<String, RollingUpgradeAction>();
+    static {
+      MAP.put("", QUERY);
+      for(RollingUpgradeAction a : values()) {
+        MAP.put(a.name(), a);
+      }
+    }
+
+    /** Covert the given String to a RollingUpgradeAction. */
+    public static RollingUpgradeAction fromString(String s) {
+      return MAP.get(s.toUpperCase());
+    }
+  }
+
   // type of the datanode report
   public static enum DatanodeReportType {
-    ALL, LIVE, DEAD
+    ALL, LIVE, DEAD, DECOMMISSIONING
   }
 
   // An invalid transaction ID that will never be seen in a real namesystem.
   public static final long INVALID_TXID = -12345;
 
-  /**
-   * Distributed upgrade actions:
-   * 
-   * 1. Get upgrade status. 2. Get detailed upgrade status. 3. Proceed with the
-   * upgrade if it is stuck, no matter what the status is.
-   */
-  public static enum UpgradeAction {
-    GET_STATUS, DETAILED_STATUS, FORCE_PROCEED;
-  }
+  // Number of generation stamps reserved for legacy blocks.
+  public static final long RESERVED_GENERATION_STAMPS_V1 =
+      1024L * 1024 * 1024 * 1024;
 
   /**
    * URI Scheme for hdfs://namenode/ URIs.
@@ -104,12 +124,41 @@ public class HdfsConstants {
    * of a delgation token, indicating that the URI is a logical (HA)
    * URI.
    */
-  public static final String HA_DT_SERVICE_PREFIX = "ha-hdfs:";
+  public static final String HA_DT_SERVICE_PREFIX = "ha-";
 
 
   /**
-   * Please see {@link LayoutVersion} on adding new layout version.
+   * Current layout version for NameNode.
+   * Please see {@link NameNodeLayoutVersion.Feature} on adding new layout version.
    */
-  public static final int LAYOUT_VERSION = LayoutVersion
-      .getCurrentLayoutVersion();
+  public static final int NAMENODE_LAYOUT_VERSION
+      = NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION;
+
+  /**
+   * Current layout version for DataNode.
+   * Please see {@link DataNodeLayoutVersion.Feature} on adding new layout version.
+   */
+  public static final int DATANODE_LAYOUT_VERSION
+      = DataNodeLayoutVersion.CURRENT_LAYOUT_VERSION;
+
+  /**
+   * Path components that are reserved in HDFS.
+   * <p>
+   * .reserved is only reserved under root ("/").
+   */
+  public static final String[] RESERVED_PATH_COMPONENTS = new String[] {
+    HdfsConstants.DOT_SNAPSHOT_DIR,
+    FSDirectory.DOT_RESERVED_STRING
+  };
+
+  /**
+   * A special path component contained in the path for a snapshot file/dir
+   */
+  public static final String DOT_SNAPSHOT_DIR = ".snapshot";
+
+  public static final byte[] DOT_SNAPSHOT_DIR_BYTES
+      = DFSUtil.string2Bytes(DOT_SNAPSHOT_DIR);
+  
+  public static final String SEPARATOR_DOT_SNAPSHOT_DIR
+      = Path.SEPARATOR + DOT_SNAPSHOT_DIR; 
 }

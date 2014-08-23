@@ -19,11 +19,9 @@
 package org.apache.hadoop.mapred;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -38,8 +36,9 @@ import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.mapred.SortedRanges.Range;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TypeConverter;
+import org.apache.hadoop.mapreduce.checkpoint.TaskCheckpointID;
 import org.apache.hadoop.mapreduce.security.token.JobTokenSecretManager;
-import org.apache.hadoop.mapreduce.v2.api.records.TaskType;
+import org.apache.hadoop.mapreduce.v2.api.records.TaskId;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
 import org.apache.hadoop.mapreduce.v2.app.TaskAttemptListener;
 import org.apache.hadoop.mapreduce.v2.app.TaskHeartbeatHandler;
@@ -48,13 +47,16 @@ import org.apache.hadoop.mapreduce.v2.app.job.Task;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptDiagnosticsUpdateEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
-import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptStatusUpdateEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptStatusUpdateEvent.TaskAttemptStatus;
+import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptStatusUpdateEvent;
+import org.apache.hadoop.mapreduce.v2.app.rm.RMHeartbeatHandler;
+import org.apache.hadoop.mapreduce.v2.app.rm.preemption.AMPreemptionPolicy;
 import org.apache.hadoop.mapreduce.v2.app.security.authorize.MRAMPolicyProvider;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.authorize.PolicyProvider;
-import org.apache.hadoop.yarn.YarnException;
-import org.apache.hadoop.yarn.service.CompositeService;
+import org.apache.hadoop.service.CompositeService;
+import org.apache.hadoop.util.StringInterner;
+import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 
 /**
  * This class is responsible for talking to the task umblical.
@@ -64,7 +66,7 @@ import org.apache.hadoop.yarn.service.CompositeService;
  * This class HAS to be in this package to access package private 
  * methods/classes.
  */
-@SuppressWarnings({"unchecked" , "deprecation"})
+@SuppressWarnings({"unchecked"})
 public class TaskAttemptListenerImpl extends CompositeService 
     implements TaskUmbilicalProtocol, TaskAttemptListener {
 
@@ -75,6 +77,8 @@ public class TaskAttemptListenerImpl extends CompositeService
   private AppContext context;
   private Server server;
   protected TaskHeartbeatHandler taskHeartbeatHandler;
+  private RMHeartbeatHandler rmHeartbeatHandler;
+  private long commitWindowMs;
   private InetSocketAddress address;
   private ConcurrentMap<WrappedJvmID, org.apache.hadoop.mapred.Task>
     jvmIDToActiveAttemptMap
@@ -83,24 +87,31 @@ public class TaskAttemptListenerImpl extends CompositeService
       .newSetFromMap(new ConcurrentHashMap<WrappedJvmID, Boolean>()); 
   
   private JobTokenSecretManager jobTokenSecretManager = null;
+  private AMPreemptionPolicy preemptionPolicy;
   
   public TaskAttemptListenerImpl(AppContext context,
-      JobTokenSecretManager jobTokenSecretManager) {
+      JobTokenSecretManager jobTokenSecretManager,
+      RMHeartbeatHandler rmHeartbeatHandler,
+      AMPreemptionPolicy preemptionPolicy) {
     super(TaskAttemptListenerImpl.class.getName());
     this.context = context;
     this.jobTokenSecretManager = jobTokenSecretManager;
+    this.rmHeartbeatHandler = rmHeartbeatHandler;
+    this.preemptionPolicy = preemptionPolicy;
   }
 
   @Override
-  public void init(Configuration conf) {
+  protected void serviceInit(Configuration conf) throws Exception {
    registerHeartbeatHandler(conf);
-   super.init(conf);
+   commitWindowMs = conf.getLong(MRJobConfig.MR_AM_COMMIT_WINDOW_MS,
+       MRJobConfig.DEFAULT_MR_AM_COMMIT_WINDOW_MS);
+   super.serviceInit(conf);
   }
 
   @Override
-  public void start() {
+  protected void serviceStart() throws Exception {
     startRpcServer();
-    super.start();
+    super.serviceStart();
   }
 
   protected void registerHeartbeatHandler(Configuration conf) {
@@ -113,11 +124,14 @@ public class TaskAttemptListenerImpl extends CompositeService
   protected void startRpcServer() {
     Configuration conf = getConfig();
     try {
-      server =
-          RPC.getServer(TaskUmbilicalProtocol.class, this, "0.0.0.0", 0, 
-              conf.getInt(MRJobConfig.MR_AM_TASK_LISTENER_THREAD_COUNT, 
-                  MRJobConfig.DEFAULT_MR_AM_TASK_LISTENER_THREAD_COUNT),
-              false, conf, jobTokenSecretManager);
+      server = 
+          new RPC.Builder(conf).setProtocol(TaskUmbilicalProtocol.class)
+            .setInstance(this).setBindAddress("0.0.0.0")
+            .setPort(0).setNumHandlers(
+                conf.getInt(MRJobConfig.MR_AM_TASK_LISTENER_THREAD_COUNT, 
+                    MRJobConfig.DEFAULT_MR_AM_TASK_LISTENER_THREAD_COUNT))
+                    .setVerbose(false).setSecretManager(jobTokenSecretManager)
+                    .build();
       
       // Enable service authorization?
       if (conf.getBoolean(
@@ -127,12 +141,11 @@ public class TaskAttemptListenerImpl extends CompositeService
       }
 
       server.start();
-      InetSocketAddress listenerAddress = server.getListenerAddress();
-      listenerAddress.getAddress();
-      this.address = NetUtils.createSocketAddr(InetAddress.getLocalHost()
-        .getCanonicalHostName() + ":" + listenerAddress.getPort());
+      this.address = NetUtils.createSocketAddrForHost(
+          context.getNMHostname(),
+          server.getListenerAddress().getPort());
     } catch (IOException e) {
-      throw new YarnException(e);
+      throw new YarnRuntimeException(e);
     }
   }
 
@@ -142,13 +155,15 @@ public class TaskAttemptListenerImpl extends CompositeService
   }
 
   @Override
-  public void stop() {
+  protected void serviceStop() throws Exception {
     stopRpcServer();
-    super.stop();
+    super.serviceStop();
   }
 
   protected void stopRpcServer() {
-    server.stop();
+    if (server != null) {
+      server.stop();
+    }
   }
 
   @Override
@@ -176,6 +191,13 @@ public class TaskAttemptListenerImpl extends CompositeService
         TypeConverter.toYarn(taskAttemptID);
 
     taskHeartbeatHandler.progressing(attemptID);
+
+    // tell task to retry later if AM has not heard from RM within the commit
+    // window to help avoid double-committing in a split-brain situation
+    long now = context.getClock().getTime();
+    if (now - rmHeartbeatHandler.getLastHeartbeatTime() > commitWindowMs) {
+      return false;
+    }
 
     Job job = context.getJob(attemptID.getTaskId().getJobId());
     Task task = job.getTask(attemptID.getTaskId());
@@ -211,6 +233,22 @@ public class TaskAttemptListenerImpl extends CompositeService
   }
 
   @Override
+  public void preempted(TaskAttemptID taskAttemptID, TaskStatus taskStatus)
+          throws IOException, InterruptedException {
+    LOG.info("Preempted state update from " + taskAttemptID.toString());
+    // An attempt is telling us that it got preempted.
+    org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId attemptID =
+        TypeConverter.toYarn(taskAttemptID);
+
+    preemptionPolicy.reportSuccessfulPreemption(attemptID);
+    taskHeartbeatHandler.progressing(attemptID);
+
+    context.getEventHandler().handle(
+        new TaskAttemptEvent(attemptID,
+            TaskAttemptEventType.TA_PREEMPTED));
+  }
+
+  @Override
   public void done(TaskAttemptID taskAttemptID) throws IOException {
     LOG.info("Done acknowledgement from " + taskAttemptID.toString());
 
@@ -232,6 +270,10 @@ public class TaskAttemptListenerImpl extends CompositeService
 
     org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId attemptID =
         TypeConverter.toYarn(taskAttemptID);
+
+    // handling checkpoints
+    preemptionPolicy.handleFailedContainer(attemptID);
+
     context.getEventHandler().handle(
         new TaskAttemptEvent(attemptID, TaskAttemptEventType.TA_FAILMSG));
   }
@@ -246,6 +288,10 @@ public class TaskAttemptListenerImpl extends CompositeService
 
     org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId attemptID =
         TypeConverter.toYarn(taskAttemptID);
+
+    // handling checkpoints
+    preemptionPolicy.handleFailedContainer(attemptID);
+
     context.getEventHandler().handle(
         new TaskAttemptEvent(attemptID, TaskAttemptEventType.TA_FAILMSG));
   }
@@ -257,43 +303,28 @@ public class TaskAttemptListenerImpl extends CompositeService
 
   @Override
   public MapTaskCompletionEventsUpdate getMapCompletionEvents(
-      JobID jobIdentifier, int fromEventId, int maxEvents,
+      JobID jobIdentifier, int startIndex, int maxEvents,
       TaskAttemptID taskAttemptID) throws IOException {
     LOG.info("MapCompletionEvents request from " + taskAttemptID.toString()
-        + ". fromEventID " + fromEventId + " maxEvents " + maxEvents);
+        + ". startIndex " + startIndex + " maxEvents " + maxEvents);
 
     // TODO: shouldReset is never used. See TT. Ask for Removal.
     boolean shouldReset = false;
     org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId attemptID =
       TypeConverter.toYarn(taskAttemptID);
-    org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptCompletionEvent[] events =
-        context.getJob(attemptID.getTaskId().getJobId()).getTaskAttemptCompletionEvents(
-            fromEventId, maxEvents);
+    TaskCompletionEvent[] events =
+        context.getJob(attemptID.getTaskId().getJobId()).getMapAttemptCompletionEvents(
+            startIndex, maxEvents);
 
     taskHeartbeatHandler.progressing(attemptID);
-
-    // filter the events to return only map completion events in old format
-    List<TaskCompletionEvent> mapEvents = new ArrayList<TaskCompletionEvent>();
-    for (org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptCompletionEvent event : events) {
-      if (TaskType.MAP.equals(event.getAttemptId().getTaskId().getTaskType())) {
-        mapEvents.add(TypeConverter.fromYarn(event));
-      }
-    }
     
-    return new MapTaskCompletionEventsUpdate(
-        mapEvents.toArray(new TaskCompletionEvent[0]), shouldReset);
-  }
-
-  @Override
-  public boolean ping(TaskAttemptID taskAttemptID) throws IOException {
-    LOG.info("Ping from " + taskAttemptID.toString());
-    taskHeartbeatHandler.pinged(TypeConverter.toYarn(taskAttemptID));
-    return true;
+    return new MapTaskCompletionEventsUpdate(events, shouldReset);
   }
 
   @Override
   public void reportDiagnosticInfo(TaskAttemptID taskAttemptID, String diagnosticInfo)
  throws IOException {
+    diagnosticInfo = StringInterner.weakIntern(diagnosticInfo);
     LOG.info("Diagnostics report from " + taskAttemptID.toString() + ": "
         + diagnosticInfo);
 
@@ -312,11 +343,33 @@ public class TaskAttemptListenerImpl extends CompositeService
   }
 
   @Override
-  public boolean statusUpdate(TaskAttemptID taskAttemptID,
+  public AMFeedback statusUpdate(TaskAttemptID taskAttemptID,
       TaskStatus taskStatus) throws IOException, InterruptedException {
-    LOG.info("Status update from " + taskAttemptID.toString());
+
     org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId yarnAttemptID =
         TypeConverter.toYarn(taskAttemptID);
+
+    AMFeedback feedback = new AMFeedback();
+    feedback.setTaskFound(true);
+
+    // Propagating preemption to the task if TASK_PREEMPTION is enabled
+    if (getConfig().getBoolean(MRJobConfig.TASK_PREEMPTION, false)
+        && preemptionPolicy.isPreempted(yarnAttemptID)) {
+      feedback.setPreemption(true);
+      LOG.info("Setting preemption bit for task: "+ yarnAttemptID
+          + " of type " + yarnAttemptID.getTaskId().getTaskType());
+    }
+
+    if (taskStatus == null) {
+      //We are using statusUpdate only as a simple ping
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Ping from " + taskAttemptID.toString());
+      }
+      return feedback;
+    }
+
+    // if we are here there is an actual status update to be processed
+
     taskHeartbeatHandler.progressing(yarnAttemptID);
     TaskAttemptStatus taskAttemptStatus =
         new TaskAttemptStatus();
@@ -327,8 +380,6 @@ public class TaskAttemptListenerImpl extends CompositeService
         + taskStatus.getProgress());
     // Task sends the updated state-string to the TT.
     taskAttemptStatus.stateString = taskStatus.getStateString();
-    // Set the output-size when map-task finishes. Set by the task itself.
-    taskAttemptStatus.outputSize = taskStatus.getOutputSize();
     // Task sends the updated phase to the TT.
     taskAttemptStatus.phase = TypeConverter.toYarn(taskStatus.getPhase());
     // Counters are updated by the task. Convert counters into new format as
@@ -379,7 +430,7 @@ public class TaskAttemptListenerImpl extends CompositeService
     context.getEventHandler().handle(
         new TaskAttemptStatusUpdateEvent(taskAttemptStatus.id,
             taskAttemptStatus));
-    return true;
+    return feedback;
   }
 
   @Override
@@ -405,7 +456,7 @@ public class TaskAttemptListenerImpl extends CompositeService
 
     JVMId jvmId = context.jvmId;
     LOG.info("JVM with ID : " + jvmId + " asked for a task");
-    
+
     JvmTask jvmTask = null;
     // TODO: Is it an authorized container to get a task? Otherwise return null.
 
@@ -487,4 +538,18 @@ public class TaskAttemptListenerImpl extends CompositeService
     return ProtocolSignature.getProtocolSignature(this, 
         protocol, clientVersion, clientMethodsHash);
   }
+
+  // task checkpoint bookeeping
+  @Override
+  public TaskCheckpointID getCheckpointID(TaskID taskId) {
+    TaskId tid = TypeConverter.toYarn(taskId);
+    return preemptionPolicy.getCheckpointID(tid);
+  }
+
+  @Override
+  public void setCheckpointID(TaskID taskId, TaskCheckpointID cid) {
+    TaskId tid = TypeConverter.toYarn(taskId);
+    preemptionPolicy.setCheckpointID(tid, cid);
+  }
+
 }

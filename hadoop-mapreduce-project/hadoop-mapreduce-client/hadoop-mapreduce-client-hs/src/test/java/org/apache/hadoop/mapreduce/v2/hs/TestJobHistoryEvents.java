@@ -20,12 +20,11 @@ package org.apache.hadoop.mapreduce.v2.hs;
 
 import java.util.Map;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryEvent;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryEventHandler;
@@ -41,10 +40,9 @@ import org.apache.hadoop.mapreduce.v2.app.MRApp;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
 import org.apache.hadoop.mapreduce.v2.app.job.Task;
 import org.apache.hadoop.mapreduce.v2.app.job.TaskAttempt;
+import org.apache.hadoop.service.Service;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.event.EventHandler;
-import org.apache.hadoop.yarn.service.Service;
-import org.apache.hadoop.yarn.util.BuilderUtils;
 import org.junit.Test;
 
 public class TestJobHistoryEvents {
@@ -67,8 +65,20 @@ public class TestJobHistoryEvents {
      * completed maps 
     */
     HistoryContext context = new JobHistory();
+    // test start and stop states
     ((JobHistory)context).init(conf);
+    ((JobHistory)context).start();
+    Assert.assertTrue( context.getStartTime()>0);
+    Assert.assertEquals(((JobHistory)context).getServiceState(),Service.STATE.STARTED);
+
+    // get job before stopping JobHistory
     Job parsedJob = context.getJob(jobId);
+
+    // stop JobHistory
+    ((JobHistory)context).stop();
+    Assert.assertEquals(((JobHistory)context).getServiceState(),Service.STATE.STOPPED);
+
+
     Assert.assertEquals("CompletedMaps not correct", 2,
         parsedJob.getCompletedMaps());
     Assert.assertEquals(System.getProperty("user.name"), parsedJob.getUserName());
@@ -145,6 +155,41 @@ public class TestJobHistoryEvents {
     Assert.assertEquals("JobHistoryEventHandler",
         services[services.length - 1].getName());
   }
+  
+  @Test
+  public void testAssignedQueue() throws Exception {
+    Configuration conf = new Configuration();
+    MRApp app = new MRAppWithHistory(2, 1, true, this.getClass().getName(),
+        true, "assignedQueue");
+    app.submit(conf);
+    Job job = app.getContext().getAllJobs().values().iterator().next();
+    JobId jobId = job.getID();
+    LOG.info("JOBID is " + TypeConverter.fromYarn(jobId).toString());
+    app.waitForState(job, JobState.SUCCEEDED);
+    
+    //make sure all events are flushed 
+    app.waitForState(Service.STATE.STOPPED);
+    /*
+     * Use HistoryContext to read logged events and verify the number of 
+     * completed maps 
+    */
+    HistoryContext context = new JobHistory();
+    // test start and stop states
+    ((JobHistory)context).init(conf);
+    ((JobHistory)context).start();
+    Assert.assertTrue( context.getStartTime()>0);
+    Assert.assertEquals(((JobHistory)context).getServiceState(),Service.STATE.STARTED);
+
+    // get job before stopping JobHistory
+    Job parsedJob = context.getJob(jobId);
+
+    // stop JobHistory
+    ((JobHistory)context).stop();
+    Assert.assertEquals(((JobHistory)context).getServiceState(),Service.STATE.STOPPED);
+
+    Assert.assertEquals("QueueName not correct", "assignedQueue",
+        parsedJob.getQueueName());
+  }
 
   private void verifyTask(Task task) {
     Assert.assertEquals("Task state not currect", TaskState.SUCCEEDED,
@@ -161,7 +206,7 @@ public class TestJobHistoryEvents {
         TaskAttemptState.SUCCEEDED, attempt.getState());
     Assert.assertNotNull(attempt.getAssignedContainerID());
   //Verify the wrong ctor is not being used. Remove after mrv1 is removed.
-    ContainerId fakeCid = BuilderUtils.newContainerId(-1, -1, -1, -1);
+    ContainerId fakeCid = MRApp.newContainerId(-1, -1, -1, -1);
     Assert.assertFalse(attempt.getAssignedContainerID().equals(fakeCid));
     //Verify complete contianerManagerAddress
     Assert.assertEquals(MRApp.NM_HOST + ":" + MRApp.NM_PORT,
@@ -174,12 +219,16 @@ public class TestJobHistoryEvents {
       super(maps, reduces, autoComplete, testName, cleanOnStart);
     }
 
+    public MRAppWithHistory(int maps, int reduces, boolean autoComplete,
+        String testName, boolean cleanOnStart, String assignedQueue) {
+      super(maps, reduces, autoComplete, testName, cleanOnStart, assignedQueue);
+    }
+
     @Override
     protected EventHandler<JobHistoryEvent> createJobHistoryHandler(
         AppContext context) {
-      JobHistoryEventHandler eventHandler = new JobHistoryEventHandler(
-          context, getStartCount());
-      return eventHandler;
+      return new JobHistoryEventHandler(
+              context, getStartCount());
     }
   }
 
@@ -200,7 +249,7 @@ public class TestJobHistoryEvents {
         AppContext context) {
       return new JobHistoryEventHandler(context, getStartCount()) {
         @Override
-        public void start() {
+        protected void serviceStart() {
           // Don't start any event draining thread.
           super.eventHandlingThread = new Thread();
           super.eventHandlingThread.start();

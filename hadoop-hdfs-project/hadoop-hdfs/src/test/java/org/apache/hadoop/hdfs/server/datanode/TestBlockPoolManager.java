@@ -17,7 +17,7 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -37,10 +37,10 @@ import org.mockito.stubbing.Answer;
 
 
 public class TestBlockPoolManager {
-  private Log LOG = LogFactory.getLog(TestBlockPoolManager.class);
-  private DataNode mockDN = Mockito.mock(DataNode.class);
+  private final Log LOG = LogFactory.getLog(TestBlockPoolManager.class);
+  private final DataNode mockDN = Mockito.mock(DataNode.class);
   private BlockPoolManager bpm;
-  private StringBuilder log = new StringBuilder();
+  private final StringBuilder log = new StringBuilder();
   private int mockIdx = 1;
   
   @Before
@@ -101,7 +101,7 @@ public class TestBlockPoolManager {
   @Test
   public void testFederationRefresh() throws Exception {
     Configuration conf = new Configuration();
-    conf.set(DFSConfigKeys.DFS_FEDERATION_NAMESERVICES,
+    conf.set(DFSConfigKeys.DFS_NAMESERVICES,
         "ns1,ns2");
     addNN(conf, "ns1", "mock1:8020");
     addNN(conf, "ns2", "mock1:8020");
@@ -112,8 +112,8 @@ public class TestBlockPoolManager {
     log.setLength(0);
 
     // Remove the first NS
-    conf.set(DFSConfigKeys.DFS_FEDERATION_NAMESERVICES,
-        "ns1");
+    conf.set(DFSConfigKeys.DFS_NAMESERVICES,
+        "ns2");
     bpm.refreshNamenodes(conf);
     assertEquals(
         "stop #1\n" +
@@ -122,7 +122,7 @@ public class TestBlockPoolManager {
     
     // Add back an NS -- this creates a new BPOS since the old
     // one for ns2 should have been previously retired
-    conf.set(DFSConfigKeys.DFS_FEDERATION_NAMESERVICES,
+    conf.set(DFSConfigKeys.DFS_NAMESERVICES,
         "ns1,ns2");
     bpm.refreshNamenodes(conf);
     assertEquals(

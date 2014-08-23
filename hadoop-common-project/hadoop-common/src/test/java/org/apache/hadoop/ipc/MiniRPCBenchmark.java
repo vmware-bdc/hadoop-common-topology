@@ -26,22 +26,23 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Enumeration;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.KerberosInfo;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authorize.DefaultImpersonationProvider;
 import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenInfo;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelector;
 import org.apache.hadoop.security.token.delegation.TestDelegationToken.TestDelegationTokenIdentifier;
 import org.apache.hadoop.security.token.delegation.TestDelegationToken.TestDelegationTokenSecretManager;
+import org.apache.hadoop.util.Time;
 import org.apache.log4j.Level;
 import org.apache.log4j.LogManager;
 
@@ -164,8 +165,10 @@ public class MiniRPCBenchmark {
         new TestDelegationTokenSecretManager(24*60*60*1000,
             7*24*60*60*1000,24*60*60*1000,3600000);
       secretManager.startThreads();
-      rpcServer = RPC.getServer(MiniProtocol.class,
-          this, DEFAULT_SERVER_ADDRESS, 0, 1, false, conf, secretManager);
+      rpcServer = new RPC.Builder(conf).setProtocol(MiniProtocol.class)
+          .setInstance(this).setBindAddress(DEFAULT_SERVER_ADDRESS).setPort(0)
+          .setNumHandlers(1).setVerbose(false).setSecretManager(secretManager)
+          .build();
       rpcServer.start();
     }
 
@@ -186,10 +189,10 @@ public class MiniRPCBenchmark {
   throws IOException {
     MiniProtocol client = null;
     try {
-      long start = System.currentTimeMillis();
-      client = (MiniProtocol) RPC.getProxy(MiniProtocol.class,
+      long start = Time.now();
+      client = RPC.getProxy(MiniProtocol.class,
           MiniProtocol.versionID, addr, conf);
-      long end = System.currentTimeMillis();
+      long end = Time.now();
       return end - start;
     } finally {
       RPC.stopProxy(client);
@@ -207,8 +210,9 @@ public class MiniRPCBenchmark {
       
       try {
         client =  proxyUserUgi.doAs(new PrivilegedExceptionAction<MiniProtocol>() {
+          @Override
           public MiniProtocol run() throws IOException {
-            MiniProtocol p = (MiniProtocol) RPC.getProxy(MiniProtocol.class,
+            MiniProtocol p = RPC.getProxy(MiniProtocol.class,
                 MiniProtocol.versionID, addr, conf);
             Token<TestDelegationTokenIdentifier> token;
             token = p.getDelegationToken(new Text(RENEWER));
@@ -231,18 +235,19 @@ public class MiniRPCBenchmark {
       final Configuration conf, final InetSocketAddress addr) throws IOException {
     MiniProtocol client = null;
     try {
-      long start = System.currentTimeMillis();
+      long start = Time.now();
       try {
         client = currentUgi.doAs(new PrivilegedExceptionAction<MiniProtocol>() {
+          @Override
           public MiniProtocol run() throws IOException {
-            return (MiniProtocol) RPC.getProxy(MiniProtocol.class,
+            return RPC.getProxy(MiniProtocol.class,
                 MiniProtocol.versionID, addr, conf);
           }
         });
       } catch (InterruptedException e) {
         e.printStackTrace();
       }
-      long end = System.currentTimeMillis();
+      long end = Time.now();
       return end - start;
     } finally {
       RPC.stopProxy(client);
@@ -322,8 +327,8 @@ public class MiniRPCBenchmark {
     String shortUserName =
       UserGroupInformation.createRemoteUser(user).getShortUserName();
     try {
-      conf.setStrings(ProxyUsers.getProxySuperuserGroupConfKey(shortUserName),
-          GROUP_NAME_1);
+      conf.setStrings(DefaultImpersonationProvider.getTestProvider().
+              getProxySuperuserGroupConfKey(shortUserName), GROUP_NAME_1);
       configureSuperUserIPAddresses(conf, shortUserName);
       // start the server
       miniServer = new MiniServer(conf, user, keytabFile);
@@ -375,9 +380,7 @@ public class MiniRPCBenchmark {
       elapsedTime = mb.runMiniBenchmarkWithDelegationToken(
                               conf, count, KEYTAB_FILE_KEY, USER_NAME_KEY);
     } else {
-      String auth = 
-        conf.get(CommonConfigurationKeys.HADOOP_SECURITY_AUTHENTICATION, 
-                        "simple");
+      String auth = SecurityUtil.getAuthenticationMethod(conf).toString();
       System.out.println(
           "Running MiniRPCBenchmark with " + auth + " authentication.");
       elapsedTime = mb.runMiniBenchmark(
@@ -408,7 +411,7 @@ public class MiniRPCBenchmark {
     }
     builder.append("127.0.1.1,");
     builder.append(InetAddress.getLocalHost().getCanonicalHostName());
-    conf.setStrings(ProxyUsers.getProxySuperuserIpConfKey(superUserShortName),
-        builder.toString());
+    conf.setStrings(DefaultImpersonationProvider.getTestProvider().
+            getProxySuperuserIpConfKey(superUserShortName), builder.toString());
   }
 }

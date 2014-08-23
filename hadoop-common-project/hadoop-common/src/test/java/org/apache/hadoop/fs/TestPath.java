@@ -17,6 +17,7 @@
  */
 
 package org.apache.hadoop.fs;
+import org.junit.Test;
 
 import java.io.IOException;
 import java.net.URI;
@@ -25,10 +26,41 @@ import java.util.Arrays;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.AvroTestUtil;
+import org.apache.hadoop.util.Shell;
+
+import com.google.common.base.Joiner;
 
 import junit.framework.TestCase;
 
 public class TestPath extends TestCase {
+  /**
+   * Merge a bunch of Path objects into a sorted semicolon-separated
+   * path string.
+   */
+  public static String mergeStatuses(Path paths[]) {
+    String pathStrings[] = new String[paths.length];
+    int i = 0;
+    for (Path path : paths) {
+      pathStrings[i++] = path.toUri().getPath();
+    }
+    Arrays.sort(pathStrings);
+    return Joiner.on(";").join(pathStrings);
+  }
+
+  /**
+   * Merge a bunch of FileStatus objects into a sorted semicolon-separated
+   * path string.
+   */
+  public static String mergeStatuses(FileStatus statuses[]) {
+    Path paths[] = new Path[statuses.length];
+    int i = 0;
+    for (FileStatus status : statuses) {
+      paths[i++] = status.getPath();
+    }
+    return mergeStatuses(paths);
+  }
+
+  @Test (timeout = 30000)
   public void testToString() {
     toStringTest("/");
     toStringTest("/foo");
@@ -61,7 +93,8 @@ public class TestPath extends TestCase {
     assertEquals(pathString, new Path(pathString).toString());
   }
 
-  public void testNormalize() {
+  @Test (timeout = 30000)
+  public void testNormalize() throws URISyntaxException {
     assertEquals("", new Path(".").toString());
     assertEquals("..", new Path("..").toString());
     assertEquals("/", new Path("/").toString());
@@ -75,11 +108,14 @@ public class TestPath extends TestCase {
     assertEquals("foo", new Path("foo/").toString());
     assertEquals("foo", new Path("foo//").toString());
     assertEquals("foo/bar", new Path("foo//bar").toString());
+    assertEquals("hdfs://foo/foo2/bar/baz/",
+        new Path(new URI("hdfs://foo//foo2///bar/baz///")).toString());
     if (Path.WINDOWS) {
       assertEquals("c:/a/b", new Path("c:\\a\\b").toString());
     }
   }
 
+  @Test (timeout = 30000)
   public void testIsAbsolute() {
     assertTrue(new Path("/").isAbsolute());
     assertTrue(new Path("/foo").isAbsolute());
@@ -92,6 +128,7 @@ public class TestPath extends TestCase {
     }
   }
 
+  @Test (timeout = 30000)
   public void testParent() {
     assertEquals(new Path("/foo"), new Path("/foo/bar").getParent());
     assertEquals(new Path("foo"), new Path("foo/bar").getParent());
@@ -102,6 +139,7 @@ public class TestPath extends TestCase {
     }
   }
 
+  @Test (timeout = 30000)
   public void testChild() {
     assertEquals(new Path("."), new Path(".", "."));
     assertEquals(new Path("/"), new Path("/", "."));
@@ -120,11 +158,49 @@ public class TestPath extends TestCase {
       assertEquals(new Path("c:/foo"), new Path("d:/bar", "c:/foo"));
     }
   }
-  
+
+  @Test (timeout = 30000)
+  public void testPathThreeArgContructor() {
+    assertEquals(new Path("foo"), new Path(null, null, "foo"));
+    assertEquals(new Path("scheme:///foo"), new Path("scheme", null, "/foo"));
+    assertEquals(
+        new Path("scheme://authority/foo"),
+        new Path("scheme", "authority", "/foo"));
+
+    if (Path.WINDOWS) {
+      assertEquals(new Path("c:/foo/bar"), new Path(null, null, "c:/foo/bar"));
+      assertEquals(new Path("c:/foo/bar"), new Path(null, null, "/c:/foo/bar"));
+    } else {
+      assertEquals(new Path("./a:b"), new Path(null, null, "a:b"));
+    }
+
+    // Resolution tests
+    if (Path.WINDOWS) {
+      assertEquals(
+          new Path("c:/foo/bar"),
+          new Path("/fou", new Path(null, null, "c:/foo/bar")));
+      assertEquals(
+          new Path("c:/foo/bar"),
+          new Path("/fou", new Path(null, null, "/c:/foo/bar")));
+      assertEquals(
+          new Path("/foo/bar"),
+          new Path("/foo", new Path(null, null, "bar")));
+    } else {
+      assertEquals(
+          new Path("/foo/bar/a:b"),
+          new Path("/foo/bar", new Path(null, null, "a:b")));
+      assertEquals(
+          new Path("/a:b"),
+          new Path("/foo/bar", new Path(null, null, "/a:b")));
+    }
+  }
+
+  @Test (timeout = 30000)
   public void testEquals() {
     assertFalse(new Path("/").equals(new Path("/foo")));
   }
 
+  @Test (timeout = 30000)
   public void testDots() {
     // Test Path(String) 
     assertEquals(new Path("/foo/bar/baz").toString(), "/foo/bar/baz");
@@ -162,18 +238,54 @@ public class TestPath extends TestCase {
     assertEquals(new Path("foo/bar/baz","../../../../..").toString(), "../..");
   }
 
+  /** Test that Windows paths are correctly handled */
+  @Test (timeout = 5000)
+  public void testWindowsPaths() throws URISyntaxException, IOException {
+    if (!Path.WINDOWS) {
+      return;
+    }
+
+    assertEquals(new Path("c:\\foo\\bar").toString(), "c:/foo/bar");
+    assertEquals(new Path("c:/foo/bar").toString(), "c:/foo/bar");
+    assertEquals(new Path("/c:/foo/bar").toString(), "c:/foo/bar");
+    assertEquals(new Path("file://c:/foo/bar").toString(), "file://c:/foo/bar");
+  }
+
+  /** Test invalid paths on Windows are correctly rejected */
+  @Test (timeout = 5000)
+  public void testInvalidWindowsPaths() throws URISyntaxException, IOException {
+    if (!Path.WINDOWS) {
+      return;
+    }
+
+    String [] invalidPaths = {
+        "hdfs:\\\\\\tmp"
+    };
+
+    for (String path : invalidPaths) {
+      try {
+        Path item = new Path(path);
+        fail("Did not throw for invalid path " + path);
+      } catch (IllegalArgumentException iae) {
+      }
+    }
+  }
+
   /** Test Path objects created from other Path objects */
+  @Test (timeout = 30000)
   public void testChildParentResolution() throws URISyntaxException, IOException {
     Path parent = new Path("foo1://bar1/baz1");
     Path child  = new Path("foo2://bar2/baz2");
     assertEquals(child, new Path(parent, child));
   }
-  
+
+  @Test (timeout = 30000)
   public void testScheme() throws java.io.IOException {
-    assertEquals("foo:/bar", new Path("foo:/","/bar").toString()); 
-    assertEquals("foo://bar/baz", new Path("foo://bar/","/baz").toString()); 
+    assertEquals("foo:/bar", new Path("foo:/","/bar").toString());
+    assertEquals("foo://bar/baz", new Path("foo://bar/","/baz").toString());
   }
 
+  @Test (timeout = 30000)
   public void testURI() throws URISyntaxException, IOException {
     URI uri = new URI("file:///bar#baz");
     Path path = new Path(uri);
@@ -196,14 +308,22 @@ public class TestPath extends TestCase {
   }
 
   /** Test URIs created from Path objects */
+  @Test (timeout = 30000)
   public void testPathToUriConversion() throws URISyntaxException, IOException {
     // Path differs from URI in that it ignores the query part..
-    assertEquals(new URI(null, null, "/foo?bar", null, null),  new Path("/foo?bar").toUri());
-    assertEquals(new URI(null, null, "/foo\"bar", null, null), new Path("/foo\"bar").toUri());
-    assertEquals(new URI(null, null, "/foo bar", null, null),  new Path("/foo bar").toUri());
-    // therefore "foo?bar" is a valid Path, so a URI created from a Path has path "foo?bar" 
-    // where in a straight URI the path part is just "foo"
-    assertEquals("/foo?bar", new Path("http://localhost/foo?bar").toUri().getPath());
+    assertEquals("? mark char in to URI",
+            new URI(null, null, "/foo?bar", null, null),
+            new Path("/foo?bar").toUri());
+    assertEquals("escape slashes chars in to URI",
+            new URI(null, null, "/foo\"bar", null, null),
+            new Path("/foo\"bar").toUri());
+    assertEquals("spaces in chars to URI",
+            new URI(null, null, "/foo bar", null, null),
+            new Path("/foo bar").toUri());
+    // therefore "foo?bar" is a valid Path, so a URI created from a Path
+    // has path "foo?bar" where in a straight URI the path part is just "foo"
+    assertEquals("/foo?bar",
+            new Path("http://localhost/foo?bar").toUri().getPath());
     assertEquals("/foo",     new URI("http://localhost/foo?bar").getPath());
 
     // The path part handling in Path is equivalent to URI
@@ -216,13 +336,17 @@ public class TestPath extends TestCase {
   }
 
   /** Test reserved characters in URIs (and therefore Paths) */
+  @Test (timeout = 30000)
   public void testReservedCharacters() throws URISyntaxException, IOException {
     // URI encodes the path
-    assertEquals("/foo%20bar", new URI(null, null, "/foo bar", null, null).getRawPath());
+    assertEquals("/foo%20bar",
+            new URI(null, null, "/foo bar", null, null).getRawPath());
     // URI#getPath decodes the path
-    assertEquals("/foo bar",   new URI(null, null, "/foo bar", null, null).getPath());
+    assertEquals("/foo bar",
+            new URI(null, null, "/foo bar", null, null).getPath());
     // URI#toString returns an encoded path
-    assertEquals("/foo%20bar", new URI(null, null, "/foo bar", null, null).toString());
+    assertEquals("/foo%20bar",
+            new URI(null, null, "/foo bar", null, null).toString());
     assertEquals("/foo%20bar", new Path("/foo bar").toUri().toString());
     // Reserved chars are not encoded
     assertEquals("/foo;bar",   new URI("/foo;bar").getPath());
@@ -231,12 +355,18 @@ public class TestPath extends TestCase {
     assertEquals("/foo+bar",   new URI("/foo+bar").getRawPath());
 
     // URI#getPath decodes the path part (and URL#getPath does not decode)
-    assertEquals("/foo bar",   new Path("http://localhost/foo bar").toUri().getPath());
-    assertEquals("/foo%20bar", new Path("http://localhost/foo bar").toUri().toURL().getPath());
-    assertEquals("/foo?bar",   new URI("http", "localhost", "/foo?bar", null, null).getPath());
-    assertEquals("/foo%3Fbar", new URI("http", "localhost", "/foo?bar", null, null).toURL().getPath());
+    assertEquals("/foo bar",
+            new Path("http://localhost/foo bar").toUri().getPath());
+    assertEquals("/foo%20bar",
+            new Path("http://localhost/foo bar").toUri().toURL().getPath());
+    assertEquals("/foo?bar",
+            new URI("http", "localhost", "/foo?bar", null, null).getPath());
+    assertEquals("/foo%3Fbar",
+            new URI("http", "localhost", "/foo?bar", null, null).
+                toURL().getPath());
   }
-  
+
+  @Test (timeout = 30000)
   public void testMakeQualified() throws URISyntaxException {
     URI defaultUri = new URI("hdfs://host1/dir1");
     URI wd         = new URI("hdfs://host2/dir2");
@@ -250,6 +380,7 @@ public class TestPath extends TestCase {
                  new Path("file").makeQualified(defaultUri, new Path(wd)));
  }
 
+  @Test (timeout = 30000)
   public void testGetName() {
     assertEquals("", new Path("/").getName());
     assertEquals("foo", new Path("foo").getName());
@@ -259,13 +390,17 @@ public class TestPath extends TestCase {
     assertEquals("bar", new Path("hdfs://host/foo/bar").getName());
   }
   
+  @Test (timeout = 30000)
   public void testAvroReflect() throws Exception {
     AvroTestUtil.testReflect
       (new Path("foo"),
        "{\"type\":\"string\",\"java-class\":\"org.apache.hadoop.fs.Path\"}");
   }
 
+  @Test (timeout = 30000)
   public void testGlobEscapeStatus() throws Exception {
+    // This test is not meaningful on Windows where * is disallowed in file name.
+    if (Shell.WINDOWS) return;
     FileSystem lfs = FileSystem.getLocal(new Configuration());
     Path testRoot = lfs.makeQualified(new Path(
         System.getProperty("test.build.data","test/build/data"),
@@ -295,10 +430,11 @@ public class TestPath extends TestCase {
     // ensure globStatus with "*" finds all dir contents
     stats = lfs.globStatus(new Path(testRoot, "*"));
     Arrays.sort(stats);
-    assertEquals(paths.length, stats.length);
-    for (int i=0; i < paths.length; i++) {
-      assertEquals(paths[i].getParent(), stats[i].getPath());
+    Path parentPaths[] = new Path[paths.length];
+    for (int i = 0; i < paths.length; i++) {
+      parentPaths[i] = paths[i].getParent();
     }
+    assertEquals(mergeStatuses(parentPaths), mergeStatuses(stats));
 
     // ensure that globStatus with an escaped "\*" only finds "*"
     stats = lfs.globStatus(new Path(testRoot, "\\*"));
@@ -308,9 +444,7 @@ public class TestPath extends TestCase {
     // try to glob the inner file for all dirs
     stats = lfs.globStatus(new Path(testRoot, "*/f"));
     assertEquals(paths.length, stats.length);
-    for (int i=0; i < paths.length; i++) {
-      assertEquals(paths[i], stats[i].getPath());
-    }
+    assertEquals(mergeStatuses(paths), mergeStatuses(stats));
 
     // try to get the inner file for only the "*" dir
     stats = lfs.globStatus(new Path(testRoot, "\\*/f"));
@@ -321,5 +455,51 @@ public class TestPath extends TestCase {
     stats = lfs.globStatus(new Path(testRoot, "\\*/*"));
     assertEquals(1, stats.length);
     assertEquals(new Path(testRoot, "*/f"), stats[0].getPath());
+  }
+
+  @Test (timeout = 30000)
+  public void testMergePaths() {
+    assertEquals(new Path("/foo/bar"),
+      Path.mergePaths(new Path("/foo"),
+        new Path("/bar")));
+
+    assertEquals(new Path("/foo/bar/baz"),
+      Path.mergePaths(new Path("/foo/bar"),
+        new Path("/baz")));
+
+    assertEquals(new Path("/foo/bar/baz"),
+      Path.mergePaths(new Path("/foo"),
+        new Path("/bar/baz")));
+
+    assertEquals(new Path(Shell.WINDOWS ? "/C:/foo/bar" : "/C:/foo/C:/bar"),
+      Path.mergePaths(new Path("/C:/foo"),
+        new Path("/C:/bar")));
+
+    assertEquals(new Path(Shell.WINDOWS ? "/C:/bar" : "/C:/C:/bar"),
+        Path.mergePaths(new Path("/C:/"),
+          new Path("/C:/bar")));
+
+    assertEquals(new Path("/bar"),
+        Path.mergePaths(new Path("/"), new Path("/bar")));
+
+    assertEquals(new Path("viewfs:///foo/bar"),
+      Path.mergePaths(new Path("viewfs:///foo"),
+        new Path("file:///bar")));
+
+    assertEquals(new Path("viewfs://vfsauthority/foo/bar"),
+      Path.mergePaths(new Path("viewfs://vfsauthority/foo"),
+        new Path("file://fileauthority/bar")));
+  }
+
+  @Test (timeout = 30000)
+  public void testIsWindowsAbsolutePath() {
+    if (!Shell.WINDOWS) return;
+    assertTrue(Path.isWindowsAbsolutePath("C:\\test", false));
+    assertTrue(Path.isWindowsAbsolutePath("C:/test", false));
+    assertTrue(Path.isWindowsAbsolutePath("/C:/test", true));
+    assertFalse(Path.isWindowsAbsolutePath("/test", false));
+    assertFalse(Path.isWindowsAbsolutePath("/test", true));
+    assertFalse(Path.isWindowsAbsolutePath("C:test", false));
+    assertFalse(Path.isWindowsAbsolutePath("/C:test", true));
   }
 }

@@ -91,7 +91,12 @@
                                     "values": "string"
                                    }
           },
-          {"name": "jobQueueName", "type": "string"}
+          {"name": "jobQueueName", "type": "string"},
+          {"name": "workflowId", "type": ["null","string"], "default": null},
+          {"name": "workflowName", "type": ["null","string"], "default": null},
+          {"name": "workflowNodeName", "type": ["null","string"], "default": null},
+          {"name": "workflowAdjacencies", "type": ["null","string"], "default": null},
+          {"name": "workflowTags", "type": ["null","string"], "default": null}
       ]
      },
 
@@ -117,13 +122,21 @@
       ]
      },
 
+     {"type": "record", "name": "JobQueueChange",
+      "fields": [
+          {"name": "jobid", "type": "string"},
+          {"name": "jobQueueName", "type": "string"}
+      ]
+     },
+
      {"type": "record", "name": "JobUnsuccessfulCompletion",
       "fields": [
           {"name": "jobid", "type": "string"},
           {"name": "finishTime", "type": "long"},
           {"name": "finishedMaps", "type": "int"},
           {"name": "finishedReduces", "type": "int"},
-          {"name": "jobStatus", "type": "string"}
+          {"name": "jobStatus", "type": "string"},
+          {"name": "diagnostics", "type": ["null","string"], "default": null}
       ]
      },
 
@@ -191,7 +204,9 @@
           {"name": "trackerName", "type": "string"},
           {"name": "httpPort", "type": "int"},
           {"name": "shufflePort", "type": "int"},
-          {"name": "containerId", "type": "string"}
+          {"name": "containerId", "type": "string"},
+          {"name": "locality", "type": ["null","string"], "default": null},
+          {"name": "avataar", "type": ["null","string"], "default": null}
       ]
      },
 
@@ -206,6 +221,7 @@
           {"name": "rackname", "type": "string"},
           {"name": "status", "type": "string"},
           {"name": "error", "type": "string"},
+          {"name": "counters", "type": ["null","JhCounters"], "default": null},
           {"name": "clockSplits", "type": { "type": "array", "items": "int"}},
           {"name": "cpuUsages", "type": { "type": "array", "items": "int"}},
           {"name": "vMemKbytes", "type": { "type": "array", "items": "int"}},
@@ -220,7 +236,8 @@
           {"name": "finishTime", "type": "long"},
           {"name": "error", "type": "string"},
           {"name": "failedDueToAttempt", "type": ["null", "string"] },
-          {"name": "status", "type": "string"}
+          {"name": "status", "type": "string"},
+          {"name": "counters", "type": ["null","JhCounters"], "default": null}
       ]
      },
 
@@ -230,7 +247,8 @@
           {"name": "taskType", "type": "string"},
           {"name": "finishTime", "type": "long"},
           {"name": "status", "type": "string"},
-          {"name": "counters", "type": "JhCounters"}
+          {"name": "counters", "type": "JhCounters"},
+          {"name": "successfulAttemptId", "type": ["null","string"], "default": null}
       ]
      },
      	
@@ -257,8 +275,10 @@
           "JOB_FINISHED",
           "JOB_PRIORITY_CHANGED",
           "JOB_STATUS_CHANGED",
+          "JOB_QUEUE_CHANGED",
           "JOB_FAILED",
           "JOB_KILLED",
+          "JOB_ERROR",
           "JOB_INFO_CHANGED",
           "TASK_STARTED",
           "TASK_FINISHED",
@@ -295,6 +315,7 @@
                "JobInited",
                "AMStarted",
                "JobPriorityChange",
+               "JobQueueChange",
                "JobStatusChanged",
                "JobSubmitted",
                "JobUnsuccessfulCompletion",

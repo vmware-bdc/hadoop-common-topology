@@ -44,18 +44,18 @@ class Ls extends FsCommand {
   public static final String NAME = "ls";
   public static final String USAGE = "[-d] [-h] [-R] [<path> ...]";
   public static final String DESCRIPTION =
-    "List the contents that match the specified file pattern. If\n" + 
-    "path is not specified, the contents of /user/<currentUser>\n" +
-    "will be listed. Directory entries are of the form \n" +
-    "\tdirName (full path) <dir> \n" +
-    "and file entries are of the form \n" + 
-    "\tfileName(full path) <r n> size \n" +
-    "where n is the number of replicas specified for the file \n" + 
-    "and size is the size of the file, in bytes.\n" +
-    "  -d  Directories are listed as plain files.\n" +
-    "  -h  Formats the sizes of files in a human-readable fashion\n" +
-    "      rather than a number of bytes.\n" +
-    "  -R  Recursively list the contents of directories.";
+		    "List the contents that match the specified file pattern. If " +
+		    "path is not specified, the contents of /user/<currentUser> " +
+		    "will be listed. Directory entries are of the form:\n" +
+		    "\tpermissions - userId groupId sizeOfDirectory(in bytes) modificationDate(yyyy-MM-dd HH:mm) directoryName\n\n" +
+		    "and file entries are of the form:\n" +
+		    "\tpermissions numberOfReplicas userId groupId sizeOfFile(in bytes) modificationDate(yyyy-MM-dd HH:mm) fileName\n" +
+		    "-d:  Directories are listed as plain files.\n" +
+		    "-h:  Formats the sizes of files in a human-readable fashion " +
+		    "rather than a number of bytes.\n" +
+		    "-R:  Recursively list the contents of directories.";
+		  
+  
 
   protected static final SimpleDateFormat dateFormat = 
     new SimpleDateFormat("yyyy-MM-dd HH:mm");
@@ -65,9 +65,10 @@ class Ls extends FsCommand {
   protected boolean dirRecurse;
 
   protected boolean humanReadable = false;
+
   protected String formatSize(long size) {
     return humanReadable
-      ? StringUtils.humanReadableInt(size)
+      ? StringUtils.TraditionalBinaryPrefix.long2String(size, "", 1)
       : String.valueOf(size);
   }
 
@@ -95,7 +96,7 @@ class Ls extends FsCommand {
   @Override
   protected void processPaths(PathData parent, PathData ... items)
   throws IOException {
-    if (!isRecursive() && items.length != 0) {
+    if (parent != null && !isRecursive() && items.length != 0) {
       out.println("Found " + items.length + " items");
     }
     adjustColumnWidths(items);
@@ -107,7 +108,7 @@ class Ls extends FsCommand {
     FileStatus stat = item.stat;
     String line = String.format(lineFormat,
         (stat.isDirectory() ? "d" : "-"),
-        stat.getPermission(),
+        stat.getPermission() + (stat.getPermission().getAclBit() ? "+" : " "),
         (stat.isFile() ? stat.getReplication() : "-"),
         stat.getOwner(),
         stat.getGroup(),
@@ -132,10 +133,13 @@ class Ls extends FsCommand {
     }
 
     StringBuilder fmt = new StringBuilder();
-    fmt.append("%s%s "); // permission string
+    fmt.append("%s%s"); // permission string
     fmt.append("%"  + maxRepl  + "s ");
-    fmt.append("%-" + maxOwner + "s ");
-    fmt.append("%-" + maxGroup + "s ");
+    // Do not use '%-0s' as a formatting conversion, since it will throw a
+    // a MissingFormatWidthException if it is used in String.format().
+    // http://docs.oracle.com/javase/1.5.0/docs/api/java/util/Formatter.html#intFlags
+    fmt.append((maxOwner > 0) ? "%-" + maxOwner + "s " : "%s");
+    fmt.append((maxGroup > 0) ? "%-" + maxGroup + "s " : "%s");
     fmt.append("%"  + maxLen   + "s ");
     fmt.append("%s %s"); // mod time & path
     lineFormat = fmt.toString();

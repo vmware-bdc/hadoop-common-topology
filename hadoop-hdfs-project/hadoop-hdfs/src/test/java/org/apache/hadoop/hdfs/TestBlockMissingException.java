@@ -17,26 +17,24 @@
  */
 package org.apache.hadoop.hdfs;
 
+import static org.junit.Assert.assertTrue;
+
 import java.io.File;
 import java.io.IOException;
 
-import junit.framework.TestCase;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.FSDataInputStream;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
-import org.apache.hadoop.hdfs.DistributedFileSystem;
-import org.apache.hadoop.hdfs.BlockMissingException;
+import org.junit.Test;
 
-public class TestBlockMissingException extends TestCase {
+public class TestBlockMissingException {
   final static Log LOG = LogFactory.getLog("org.apache.hadoop.hdfs.TestBlockMissing");
   final static int NUM_DATANODES = 3;
 
@@ -47,15 +45,18 @@ public class TestBlockMissingException extends TestCase {
   /**
    * Test DFS Raid
    */
+  @Test
   public void testBlockMissingException() throws Exception {
     LOG.info("Test testBlockMissingException started.");
     long blockSize = 1024L;
     int numBlocks = 4;
     conf = new HdfsConfiguration();
+    // Set short retry timeouts so this test runs faster
+    conf.setInt(DFSConfigKeys.DFS_CLIENT_RETRY_WINDOW_BASE, 10);
     try {
       dfs = new MiniDFSCluster.Builder(conf).numDataNodes(NUM_DATANODES).build();
       dfs.waitActive();
-      fileSys = (DistributedFileSystem)dfs.getFileSystem();
+      fileSys = dfs.getFileSystem();
       Path file1 = new Path("/user/dhruba/raidtest/file1");
       createOldFile(fileSys, file1, 1, numBlocks, blockSize);
 

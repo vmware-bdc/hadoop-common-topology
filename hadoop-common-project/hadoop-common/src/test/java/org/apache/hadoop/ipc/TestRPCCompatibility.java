@@ -26,17 +26,18 @@ import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.ipc.RpcPayloadHeader.RpcKind;
 import org.apache.hadoop.ipc.protobuf.ProtocolInfoProtos.GetProtocolSignatureRequestProto;
 import org.apache.hadoop.ipc.protobuf.ProtocolInfoProtos.GetProtocolSignatureResponseProto;
 import org.apache.hadoop.ipc.protobuf.ProtocolInfoProtos.ProtocolSignatureProto;
+import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.RpcResponseHeaderProto.RpcErrorCodeProto;
 import org.apache.hadoop.net.NetUtils;
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 /** Unit test for supporting method-name based compatible RPCs. */
@@ -56,7 +57,7 @@ public class TestRPCCompatibility {
     void ping() throws IOException;    
   }
   
-  public interface TestProtocol1 extends VersionedProtocol, TestProtocol0 {
+  public interface TestProtocol1 extends TestProtocol0 {
     String echo(String value) throws IOException;
   }
 
@@ -115,9 +116,14 @@ public class TestRPCCompatibility {
     }
 
   }
+
+  @Before
+  public void setUp() {
+    ProtocolSignature.resetCache();
+  }
   
   @After
-  public void tearDown() throws IOException {
+  public void tearDown() {
     if (proxy != null) {
       RPC.stopProxy(proxy.getProxy());
       proxy = null;
@@ -132,9 +138,10 @@ public class TestRPCCompatibility {
   public void testVersion0ClientVersion1Server() throws Exception {
     // create a server with two handlers
     TestImpl1 impl = new TestImpl1();
-    server = RPC.getServer(TestProtocol1.class,
-                            impl, ADDRESS, 0, 2, false, conf, null);
-    server.addProtocol(RpcKind.RPC_WRITABLE, TestProtocol0.class, impl);
+    server = new RPC.Builder(conf).setProtocol(TestProtocol1.class)
+        .setInstance(impl).setBindAddress(ADDRESS).setPort(0).setNumHandlers(2)
+        .setVerbose(false).build();
+    server.addProtocol(RPC.RpcKind.RPC_WRITABLE, TestProtocol0.class, impl);
     server.start();
     addr = NetUtils.getConnectAddress(server);
 
@@ -148,8 +155,9 @@ public class TestRPCCompatibility {
   @Test  // old client vs new server
   public void testVersion1ClientVersion0Server() throws Exception {
     // create a server with two handlers
-    server = RPC.getServer(TestProtocol0.class,
-                              new TestImpl0(), ADDRESS, 0, 2, false, conf, null);
+    server = new RPC.Builder(conf).setProtocol(TestProtocol0.class)
+        .setInstance(new TestImpl0()).setBindAddress(ADDRESS).setPort(0)
+        .setNumHandlers(2).setVerbose(false).build();
     server.start();
     addr = NetUtils.getConnectAddress(server);
 
@@ -199,9 +207,10 @@ System.out.println("echo int is NOT supported");
   public void testVersion2ClientVersion1Server() throws Exception {
     // create a server with two handlers
     TestImpl1 impl = new TestImpl1();
-    server = RPC.getServer(TestProtocol1.class,
-                              impl, ADDRESS, 0, 2, false, conf, null);
-    server.addProtocol(RpcKind.RPC_WRITABLE, TestProtocol0.class, impl);
+    server = new RPC.Builder(conf).setProtocol(TestProtocol1.class)
+        .setInstance(impl).setBindAddress(ADDRESS).setPort(0).setNumHandlers(2)
+        .setVerbose(false).build();
+    server.addProtocol(RPC.RpcKind.RPC_WRITABLE, TestProtocol0.class, impl);
     server.start();
     addr = NetUtils.getConnectAddress(server);
 
@@ -217,12 +226,12 @@ System.out.println("echo int is NOT supported");
   
   @Test // equal version client and server
   public void testVersion2ClientVersion2Server() throws Exception {
-    ProtocolSignature.resetCache();
     // create a server with two handlers
     TestImpl2 impl = new TestImpl2();
-    server = RPC.getServer(TestProtocol2.class,
-                             impl, ADDRESS, 0, 2, false, conf, null);
-    server.addProtocol(RpcKind.RPC_WRITABLE, TestProtocol0.class, impl);
+    server = new RPC.Builder(conf).setProtocol(TestProtocol2.class)
+        .setInstance(impl).setBindAddress(ADDRESS).setPort(0).setNumHandlers(2)
+        .setVerbose(false).build();
+    server.addProtocol(RPC.RpcKind.RPC_WRITABLE, TestProtocol0.class, impl);
     server.start();
     addr = NetUtils.getConnectAddress(server);
 
@@ -269,7 +278,7 @@ System.out.println("echo int is NOT supported");
         TestProtocol3.class.getMethod("echo_alias", int.class));
     assertFalse(intEchoHash == intEchoHashAlias);
     
-    // Make sure that methods with the same returninig type and method name but
+    // Make sure that methods with the same returning type and method name but
     // larger number of parameter types have different hash code
     int intEchoHash2 = ProtocolSignature.getFingerprint(
         TestProtocol3.class.getMethod("echo", int.class, int.class));
@@ -285,13 +294,15 @@ System.out.println("echo int is NOT supported");
       "org.apache.hadoop.ipc.TestRPCCompatibility$TestProtocol1")
   public interface TestProtocol4 extends TestProtocol2 {
     public static final long versionID = 4L;
+    @Override
     int echo(int value)  throws IOException;
   }
   
   @Test
   public void testVersionMismatch() throws IOException {
-    server = RPC.getServer(TestProtocol2.class, new TestImpl2(), ADDRESS, 0, 2,
-        false, conf, null);
+    server = new RPC.Builder(conf).setProtocol(TestProtocol2.class)
+        .setInstance(new TestImpl2()).setBindAddress(ADDRESS).setPort(0)
+        .setNumHandlers(2).setVerbose(false).build();
     server.start();
     addr = NetUtils.getConnectAddress(server);
 
@@ -300,27 +311,32 @@ System.out.println("echo int is NOT supported");
     try {
       proxy.echo(21);
       fail("The call must throw VersionMismatch exception");
-    } catch (IOException ex) {
-      Assert.assertTrue("Expected version mismatch but got " + ex.getMessage(), 
-          ex.getMessage().contains("VersionMismatch"));
+    } catch (RemoteException ex) {
+      Assert.assertEquals(RPC.VersionMismatch.class.getName(), 
+          ex.getClassName());
+      Assert.assertTrue(ex.getErrorCode().equals(
+          RpcErrorCodeProto.ERROR_RPC_VERSION_MISMATCH));
+    }  catch (IOException ex) {
+      fail("Expected version mismatch but got " + ex);
     }
   }
   
   @Test
   public void testIsMethodSupported() throws IOException {
-    server = RPC.getServer(TestProtocol2.class, new TestImpl2(), ADDRESS, 0, 2,
-        false, conf, null);
+    server = new RPC.Builder(conf).setProtocol(TestProtocol2.class)
+        .setInstance(new TestImpl2()).setBindAddress(ADDRESS).setPort(0)
+        .setNumHandlers(2).setVerbose(false).build();
     server.start();
     addr = NetUtils.getConnectAddress(server);
 
     TestProtocol2 proxy = RPC.getProxy(TestProtocol2.class,
         TestProtocol2.versionID, addr, conf);
     boolean supported = RpcClientUtil.isMethodSupported(proxy,
-        TestProtocol2.class, RpcKind.RPC_WRITABLE,
+        TestProtocol2.class, RPC.RpcKind.RPC_WRITABLE,
         RPC.getProtocolVersion(TestProtocol2.class), "echo");
     Assert.assertTrue(supported);
     supported = RpcClientUtil.isMethodSupported(proxy,
-        TestProtocol2.class, RpcKind.RPC_PROTOCOL_BUFFER,
+        TestProtocol2.class, RPC.RpcKind.RPC_PROTOCOL_BUFFER,
         RPC.getProtocolVersion(TestProtocol2.class), "echo");
     Assert.assertFalse(supported);
   }
@@ -332,9 +348,10 @@ System.out.println("echo int is NOT supported");
   @Test
   public void testProtocolMetaInfoSSTranslatorPB() throws Exception {
     TestImpl1 impl = new TestImpl1();
-    server = RPC.getServer(TestProtocol1.class, impl, ADDRESS, 0, 2, false,
-        conf, null);
-    server.addProtocol(RpcKind.RPC_WRITABLE, TestProtocol0.class, impl);
+    server = new RPC.Builder(conf).setProtocol(TestProtocol1.class)
+        .setInstance(impl).setBindAddress(ADDRESS).setPort(0).setNumHandlers(2)
+        .setVerbose(false).build();
+    server.addProtocol(RPC.RpcKind.RPC_WRITABLE, TestProtocol0.class, impl);
     server.start();
 
     ProtocolMetaInfoServerSideTranslatorPB xlator = 
@@ -343,13 +360,13 @@ System.out.println("echo int is NOT supported");
     GetProtocolSignatureResponseProto resp = xlator.getProtocolSignature(
         null,
         createGetProtocolSigRequestProto(TestProtocol1.class,
-            RpcKind.RPC_PROTOCOL_BUFFER));
+            RPC.RpcKind.RPC_PROTOCOL_BUFFER));
     //No signatures should be found
     Assert.assertEquals(0, resp.getProtocolSignatureCount());
     resp = xlator.getProtocolSignature(
         null,
         createGetProtocolSigRequestProto(TestProtocol1.class,
-            RpcKind.RPC_WRITABLE));
+            RPC.RpcKind.RPC_WRITABLE));
     Assert.assertEquals(1, resp.getProtocolSignatureCount());
     ProtocolSignatureProto sig = resp.getProtocolSignatureList().get(0);
     Assert.assertEquals(TestProtocol1.versionID, sig.getVersion());
@@ -366,7 +383,7 @@ System.out.println("echo int is NOT supported");
   }
   
   private GetProtocolSignatureRequestProto createGetProtocolSigRequestProto(
-      Class<?> protocol, RpcKind rpcKind) {
+      Class<?> protocol, RPC.RpcKind rpcKind) {
     GetProtocolSignatureRequestProto.Builder builder = 
         GetProtocolSignatureRequestProto.newBuilder();
     builder.setProtocol(protocol.getName());

@@ -17,11 +17,11 @@
  */
 package org.apache.hadoop.test;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.security.UserGroupInformation;
-
 import java.util.ArrayList;
 import java.util.List;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.security.UserGroupInformation;
 
 /**
  * Helper to configure FileSystemAccess user/group and proxyuser
@@ -145,7 +145,12 @@ public class HadoopUsersConfTestHelper {
    */
   public static String[] getHadoopUserGroups(String user) {
     if (getHadoopUsers() == DEFAULT_USERS) {
-      return DEFAULT_USERS_GROUP;
+      for (String defaultUser : DEFAULT_USERS) {
+        if (defaultUser.equals(user)) {
+          return DEFAULT_USERS_GROUP;
+        }
+      }
+      return new String[0];
     } else {
       String groups = System.getProperty(HADOOP_USER_PREFIX + user);
       return (groups != null) ? groups.split(",") : new String[0];

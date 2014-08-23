@@ -18,27 +18,29 @@
 package org.apache.hadoop.hdfs.server.common;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.lang.management.ManagementFactory;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
 import java.util.ArrayList;
-import java.util.List;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Properties;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.protocol.LayoutVersion;
-import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
+import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
-import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.util.ToolRunner;
 import org.apache.hadoop.util.VersionInfo;
+
+import com.google.common.base.Charsets;
+import com.google.common.base.Preconditions;
 
 
 
@@ -74,8 +76,7 @@ public abstract class Storage extends StorageInfo {
   /** Layout versions of 0.20.203 release */
   public static final int[] LAYOUT_VERSIONS_203 = {-19, -31};
 
-  private   static final String STORAGE_FILE_LOCK     = "in_use.lock";
-  protected static final String STORAGE_FILE_VERSION  = "VERSION";
+  public    static final String STORAGE_FILE_LOCK     = "in_use.lock";
   public    static final String STORAGE_DIR_CURRENT   = "current";
   public    static final String STORAGE_DIR_PREVIOUS  = "previous";
   public    static final String STORAGE_TMP_REMOVED   = "removed.tmp";
@@ -83,6 +84,12 @@ public abstract class Storage extends StorageInfo {
   public    static final String STORAGE_TMP_FINALIZED = "finalized.tmp";
   public    static final String STORAGE_TMP_LAST_CKPT = "lastcheckpoint.tmp";
   public    static final String STORAGE_PREVIOUS_CKPT = "previous.checkpoint";
+  
+  /**
+   * The blocksBeingWritten directory which was used in some 1.x and earlier
+   * releases.
+   */
+  public static final String STORAGE_1_BBW = "blocksBeingWritten";
   
   public enum StorageState {
     NON_EXISTENT,
@@ -108,26 +115,28 @@ public abstract class Storage extends StorageInfo {
     public boolean isOfType(StorageDirType type);
   }
   
-  protected NodeType storageType;    // Type of the node using this storage 
   protected List<StorageDirectory> storageDirs = new ArrayList<StorageDirectory>();
   
   private class DirIterator implements Iterator<StorageDirectory> {
-    StorageDirType dirType;
+    final StorageDirType dirType;
+    final boolean includeShared;
     int prevIndex; // for remove()
     int nextIndex; // for next()
     
-    DirIterator(StorageDirType dirType) {
+    DirIterator(StorageDirType dirType, boolean includeShared) {
       this.dirType = dirType;
       this.nextIndex = 0;
       this.prevIndex = 0;
+      this.includeShared = includeShared;
     }
     
+    @Override
     public boolean hasNext() {
       if (storageDirs.isEmpty() || nextIndex >= storageDirs.size())
         return false;
-      if (dirType != null) {
+      if (dirType != null || !includeShared) {
         while (nextIndex < storageDirs.size()) {
-          if (getStorageDir(nextIndex).getStorageDirType().isOfType(dirType))
+          if (shouldReturnNextDir())
             break;
           nextIndex++;
         }
@@ -137,13 +146,14 @@ public abstract class Storage extends StorageInfo {
       return true;
     }
     
+    @Override
     public StorageDirectory next() {
       StorageDirectory sd = getStorageDir(nextIndex);
       prevIndex = nextIndex;
       nextIndex++;
-      if (dirType != null) {
+      if (dirType != null || !includeShared) {
         while (nextIndex < storageDirs.size()) {
-          if (getStorageDir(nextIndex).getStorageDirType().isOfType(dirType))
+          if (shouldReturnNextDir())
             break;
           nextIndex++;
         }
@@ -151,13 +161,35 @@ public abstract class Storage extends StorageInfo {
       return sd;
     }
     
+    @Override
     public void remove() {
       nextIndex = prevIndex; // restore previous state
       storageDirs.remove(prevIndex); // remove last returned element
       hasNext(); // reset nextIndex to correct place
     }
+    
+    private boolean shouldReturnNextDir() {
+      StorageDirectory sd = getStorageDir(nextIndex);
+      return (dirType == null || sd.getStorageDirType().isOfType(dirType)) &&
+          (includeShared || !sd.isShared());
+    }
   }
   
+  /**
+   * @return A list of the given File in every available storage directory,
+   * regardless of whether it might exist.
+   */
+  public List<File> getFiles(StorageDirType dirType, String fileName) {
+    ArrayList<File> list = new ArrayList<File>();
+    Iterator<StorageDirectory> it =
+      (dirType == null) ? dirIterator() : dirIterator(dirType);
+    for ( ;it.hasNext(); ) {
+      list.add(new File(it.next().getCurrentDir(), fileName));
+    }
+    return list;
+  }
+
+
   /**
    * Return default iterator
    * This iterator returns all entries in storageDirs
@@ -172,7 +204,27 @@ public abstract class Storage extends StorageInfo {
    * them via the Iterator
    */
   public Iterator<StorageDirectory> dirIterator(StorageDirType dirType) {
-    return new DirIterator(dirType);
+    return dirIterator(dirType, true);
+  }
+  
+  /**
+   * Return all entries in storageDirs, potentially excluding shared dirs.
+   * @param includeShared whether or not to include shared dirs.
+   * @return an iterator over the configured storage dirs.
+   */
+  public Iterator<StorageDirectory> dirIterator(boolean includeShared) {
+    return dirIterator(null, includeShared);
+  }
+  
+  /**
+   * @param dirType all entries will be of this type of dir
+   * @param includeShared true to include any shared directories,
+   *        false otherwise
+   * @return an iterator over the configured storage dirs.
+   */
+  public Iterator<StorageDirectory> dirIterator(StorageDirType dirType,
+      boolean includeShared) {
+    return new DirIterator(dirType, includeShared);
   }
   
   public Iterable<StorageDirectory> dirIterable(final StorageDirType dirType) {
@@ -200,33 +252,45 @@ public abstract class Storage extends StorageInfo {
    * One of the storage directories.
    */
   @InterfaceAudience.Private
-  public static class StorageDirectory {
+  public static class StorageDirectory implements FormatConfirmable {
     final File root;              // root directory
-    final boolean useLock;        // flag to enable storage lock
+    // whether or not this dir is shared between two separate NNs for HA, or
+    // between multiple block pools in the case of federation.
+    final boolean isShared;
     final StorageDirType dirType; // storage dir type
     FileLock lock;                // storage lock
+
+    private String storageUuid = null;      // Storage directory identifier.
     
     public StorageDirectory(File dir) {
       // default dirType is null
-      this(dir, null, true);
+      this(dir, null, false);
     }
     
     public StorageDirectory(File dir, StorageDirType dirType) {
-      this(dir, dirType, true);
+      this(dir, dirType, false);
     }
     
+    public void setStorageUuid(String storageUuid) {
+      this.storageUuid = storageUuid;
+    }
+
+    public String getStorageUuid() {
+      return storageUuid;
+    }
+
     /**
      * Constructor
      * @param dir directory corresponding to the storage
      * @param dirType storage directory type
-     * @param useLock true - enables locking on the storage directory and false
-     *          disables locking
+     * @param isShared whether or not this dir is shared between two NNs. true
+     *          disables locking on the storage directory, false enables locking
      */
-    public StorageDirectory(File dir, StorageDirType dirType, boolean useLock) {
+    public StorageDirectory(File dir, StorageDirType dirType, boolean isShared) {
       this.root = dir;
       this.lock = null;
       this.dirType = dirType;
-      this.useLock = useLock;
+      this.isShared = isShared;
     }
     
     /**
@@ -405,7 +469,7 @@ public abstract class Storage extends StorageInfo {
         if (!root.exists()) {
           // storage directory does not exist
           if (startOpt != StartupOption.FORMAT) {
-            LOG.info("Storage directory " + rootPath + " does not exist.");
+            LOG.warn("Storage directory " + rootPath + " does not exist");
             return StorageState.NON_EXISTENT;
           }
           LOG.info(rootPath + " does not exist. Creating ...");
@@ -414,15 +478,15 @@ public abstract class Storage extends StorageInfo {
         }
         // or is inaccessible
         if (!root.isDirectory()) {
-          LOG.info(rootPath + "is not a directory.");
+          LOG.warn(rootPath + "is not a directory");
           return StorageState.NON_EXISTENT;
         }
-        if (!root.canWrite()) {
-          LOG.info("Cannot access storage directory " + rootPath);
+        if (!FileUtil.canWrite(root)) {
+          LOG.warn("Cannot access storage directory " + rootPath);
           return StorageState.NON_EXISTENT;
         }
       } catch(SecurityException ex) {
-        LOG.info("Cannot access storage directory " + rootPath, ex);
+        LOG.warn("Cannot access storage directory " + rootPath, ex);
         return StorageState.NON_EXISTENT;
       }
 
@@ -511,34 +575,34 @@ public abstract class Storage extends StorageInfo {
       switch(curState) {
       case COMPLETE_UPGRADE:  // mv previous.tmp -> previous
         LOG.info("Completing previous upgrade for storage directory " 
-                 + rootPath + ".");
+                 + rootPath);
         rename(getPreviousTmp(), getPreviousDir());
         return;
       case RECOVER_UPGRADE:   // mv previous.tmp -> current
         LOG.info("Recovering storage directory " + rootPath
-                 + " from previous upgrade.");
+                 + " from previous upgrade");
         if (curDir.exists())
           deleteDir(curDir);
         rename(getPreviousTmp(), curDir);
         return;
       case COMPLETE_ROLLBACK: // rm removed.tmp
         LOG.info("Completing previous rollback for storage directory "
-                 + rootPath + ".");
+                 + rootPath);
         deleteDir(getRemovedTmp());
         return;
       case RECOVER_ROLLBACK:  // mv removed.tmp -> current
         LOG.info("Recovering storage directory " + rootPath
-                 + " from previous rollback.");
+                 + " from previous rollback");
         rename(getRemovedTmp(), curDir);
         return;
       case COMPLETE_FINALIZE: // rm finalized.tmp
         LOG.info("Completing previous finalize for storage directory "
-                 + rootPath + ".");
+                 + rootPath);
         deleteDir(getFinalizedTmp());
         return;
       case COMPLETE_CHECKPOINT: // mv lastcheckpoint.tmp -> previous.checkpoint
         LOG.info("Completing previous checkpoint for storage directory " 
-                 + rootPath + ".");
+                 + rootPath);
         File prevCkptDir = getPreviousCheckpoint();
         if (prevCkptDir.exists())
           deleteDir(prevCkptDir);
@@ -546,7 +610,7 @@ public abstract class Storage extends StorageInfo {
         return;
       case RECOVER_CHECKPOINT:  // mv lastcheckpoint.tmp -> current
         LOG.info("Recovering storage directory " + rootPath
-                 + " from failed checkpoint.");
+                 + " from failed checkpoint");
         if (curDir.exists())
           deleteDir(curDir);
         rename(getLastCheckpointTmp(), curDir);
@@ -555,6 +619,36 @@ public abstract class Storage extends StorageInfo {
         throw new IOException("Unexpected FS state: " + curState);
       }
     }
+    
+    /**
+     * @return true if the storage directory should prompt the user prior
+     * to formatting (i.e if the directory appears to contain some data)
+     * @throws IOException if the SD cannot be accessed due to an IO error
+     */
+    @Override
+    public boolean hasSomeData() throws IOException {
+      // Its alright for a dir not to exist, or to exist (properly accessible)
+      // and be completely empty.
+      if (!root.exists()) return false;
+      
+      if (!root.isDirectory()) {
+        // a file where you expect a directory should not cause silent
+        // formatting
+        return true;
+      }
+      
+      if (FileUtil.listFiles(root).length == 0) {
+        // Empty dir can format without prompt.
+        return false;
+      }
+      
+      return true;
+    }
+    
+    public boolean isShared() {
+      return isShared;
+    }
+
 
     /**
      * Lock storage to provide exclusive access.
@@ -568,14 +662,14 @@ public abstract class Storage extends StorageInfo {
      * @throws IOException if locking fails
      */
     public void lock() throws IOException {
-      if (!useLock) {
+      if (isShared()) {
         LOG.info("Locking is disabled");
         return;
       }
       FileLock newLock = tryLock();
       if (newLock == null) {
         String msg = "Cannot lock storage " + this.root 
-          + ". The directory is already locked.";
+          + ". The directory is already locked";
         LOG.info(msg);
         throw new IOException(msg);
       }
@@ -592,6 +686,7 @@ public abstract class Storage extends StorageInfo {
      * <code>null</code> if storage is already locked.
      * @throws IOException if locking fails.
      */
+    @SuppressWarnings("resource")
     FileLock tryLock() throws IOException {
       boolean deletionHookAdded = false;
       File lockF = new File(root, STORAGE_FILE_LOCK);
@@ -600,14 +695,25 @@ public abstract class Storage extends StorageInfo {
         deletionHookAdded = true;
       }
       RandomAccessFile file = new RandomAccessFile(lockF, "rws");
+      String jvmName = ManagementFactory.getRuntimeMXBean().getName();
       FileLock res = null;
       try {
         res = file.getChannel().tryLock();
+        if (null == res) {
+          throw new OverlappingFileLockException();
+        }
+        file.write(jvmName.getBytes(Charsets.UTF_8));
+        LOG.info("Lock on " + lockF + " acquired by nodename " + jvmName);
       } catch(OverlappingFileLockException oe) {
+        // Cannot read from the locked file on Windows.
+        String lockingJvmName = Path.WINDOWS ? "" : (" " + file.readLine());
+        LOG.error("It appears that another namenode" + lockingJvmName
+            + " has already locked the storage directory");
         file.close();
         return null;
       } catch(IOException e) {
-        LOG.error("Cannot create lock on " + lockF, e);
+        LOG.error("Failed to acquire lock on " + lockF + ". If this storage directory is mounted via NFS, " 
+            + "ensure that the appropriate nfs lock services are running.", e);
         file.close();
         throw e;
       }
@@ -677,13 +783,11 @@ public abstract class Storage extends StorageInfo {
    * Create empty storage info of the specified type
    */
   protected Storage(NodeType type) {
-    super();
-    this.storageType = type;
+    super(type);
   }
   
-  protected Storage(NodeType type, StorageInfo storageInfo) {
+  protected Storage(StorageInfo storageInfo) {
     super(storageInfo);
-    this.storageType = type;
   }
   
   public int getNumStorageDirs() {
@@ -692,6 +796,15 @@ public abstract class Storage extends StorageInfo {
   
   public StorageDirectory getStorageDir(int idx) {
     return storageDirs.get(idx);
+  }
+  
+  /**
+   * @return the storage directory, with the precondition that this storage
+   * has exactly one storage directory
+   */
+  public StorageDirectory getSingularStorageDir() {
+    Preconditions.checkState(storageDirs.size() == 1);
+    return storageDirs.get(0);
   }
   
   protected void addStorageDir(StorageDirectory sd) {
@@ -718,10 +831,10 @@ public abstract class Storage extends StorageInfo {
   }
 
   /**
-   * Checks if the upgrade from the given old version is supported. If
-   * no upgrade is supported, it throws IncorrectVersionException.
-   * 
-   * @param oldVersion
+   * Checks if the upgrade from {@code oldVersion} is supported.
+   * @param oldVersion the version of the metadata to check with the current
+   *                   version
+   * @throws IOException if upgrade is not supported
    */
   public static void checkVersionUpgradable(int oldVersion) 
                                      throws IOException {
@@ -743,19 +856,66 @@ public abstract class Storage extends StorageInfo {
   }
   
   /**
-   * Get common storage fields.
-   * Should be overloaded if additional fields need to be get.
+   * Iterate over each of the {@link FormatConfirmable} objects,
+   * potentially checking with the user whether it should be formatted.
    * 
-   * @param props
-   * @throws IOException
+   * If running in interactive mode, will prompt the user for each
+   * directory to allow them to format anyway. Otherwise, returns
+   * false, unless 'force' is specified.
+   * 
+   * @param force format regardless of whether dirs exist
+   * @param interactive prompt the user when a dir exists
+   * @return true if formatting should proceed
+   * @throws IOException if some storage cannot be accessed
    */
-  protected void setFieldsFromProperties(
-      Properties props, StorageDirectory sd) throws IOException {
-    setLayoutVersion(props, sd);
-    setNamespaceID(props, sd);
-    setStorageType(props, sd);
-    setcTime(props, sd);
-    setClusterId(props, layoutVersion, sd);
+  public static boolean confirmFormat(
+      Iterable<? extends FormatConfirmable> items,
+      boolean force, boolean interactive) throws IOException {
+    for (FormatConfirmable item : items) {
+      if (!item.hasSomeData())
+        continue;
+      if (force) { // Don't confirm, always format.
+        System.err.println(
+            "Data exists in " + item + ". Formatting anyway.");
+        continue;
+      }
+      if (!interactive) { // Don't ask - always don't format
+        System.err.println(
+            "Running in non-interactive mode, and data appears to exist in " +
+            item + ". Not formatting.");
+        return false;
+      }
+      if (!ToolRunner.confirmPrompt("Re-format filesystem in " + item + " ?")) {
+        System.err.println("Format aborted in " + item);
+        return false;
+      }
+    }
+    
+    return true;
+  }
+  
+  /**
+   * Interface for classes which need to have the user confirm their
+   * formatting during NameNode -format and other similar operations.
+   * 
+   * This is currently a storage directory or journal manager.
+   */
+  @InterfaceAudience.Private
+  public interface FormatConfirmable {
+    /**
+     * @return true if the storage seems to have some valid data in it,
+     * and the user should be required to confirm the format. Otherwise,
+     * false.
+     * @throws IOException if the storage cannot be accessed at all.
+     */
+    public boolean hasSomeData() throws IOException;
+    
+    /**
+     * @return a string representation of the formattable item, suitable
+     * for display to the user inside a prompt
+     */
+    @Override
+    public String toString();
   }
   
   /**
@@ -771,27 +931,10 @@ public abstract class Storage extends StorageInfo {
     props.setProperty("storageType", storageType.toString());
     props.setProperty("namespaceID", String.valueOf(namespaceID));
     // Set clusterID in version with federation support
-    if (LayoutVersion.supports(Feature.FEDERATION, layoutVersion)) {
+    if (versionSupportsFederation(getServiceLayoutFeatureMap())) {
       props.setProperty("clusterID", clusterID);
     }
     props.setProperty("cTime", String.valueOf(cTime));
-  }
-
-  /**
-   * Read properties from the VERSION file in the given storage directory.
-   */
-  public void readProperties(StorageDirectory sd) throws IOException {
-    Properties props = readPropertiesFile(sd.getVersionFile());
-    setFieldsFromProperties(props, sd);
-  }
-
-  /**
-   * Read properties from the the previous/VERSION file in the given storage directory.
-   */
-  public void readPreviousVersionProperties(StorageDirectory sd)
-      throws IOException {
-    Properties props = readPropertiesFile(sd.getPreviousVersionFile());
-    setFieldsFromProperties(props, sd);
   }
 
   /**
@@ -800,10 +943,15 @@ public abstract class Storage extends StorageInfo {
   public void writeProperties(StorageDirectory sd) throws IOException {
     writeProperties(sd.getVersionFile(), sd);
   }
-
+  
   public void writeProperties(File to, StorageDirectory sd) throws IOException {
     Properties props = new Properties();
     setPropertiesFromFields(props, sd);
+    writeProperties(to, sd, props);
+  }
+
+  public static void writeProperties(File to, StorageDirectory sd,
+      Properties props) throws IOException {
     RandomAccessFile file = new RandomAccessFile(to, "rws");
     FileOutputStream out = null;
     try {
@@ -830,23 +978,6 @@ public abstract class Storage extends StorageInfo {
       file.close();
     }
   }
-  
-  public static Properties readPropertiesFile(File from) throws IOException {
-    RandomAccessFile file = new RandomAccessFile(from, "rws");
-    FileInputStream in = null;
-    Properties props = new Properties();
-    try {
-      in = new FileInputStream(file.getFD());
-      file.seek(0);
-      props.load(in);
-    } finally {
-      if (in != null) {
-        in.close();
-      }
-      file.close();
-    }
-    return props;
-  }
 
   public static void rename(File from, File to) throws IOException {
     if (!from.renameTo(to))
@@ -870,7 +1001,7 @@ public abstract class Storage extends StorageInfo {
    * @throws IOException
    */
   public void writeAll() throws IOException {
-    this.layoutVersion = HdfsConstants.LAYOUT_VERSION;
+    this.layoutVersion = getServiceLayoutVersion();
     for (Iterator<StorageDirectory> it = storageDirs.iterator(); it.hasNext();) {
       writeProperties(it.next());
     }
@@ -893,71 +1024,7 @@ public abstract class Storage extends StorageInfo {
   public static String getRegistrationID(StorageInfo storage) {
     return "NS-" + Integer.toString(storage.getNamespaceID())
       + "-" + storage.getClusterID()
-      + "-" + Integer.toString(storage.getLayoutVersion())
       + "-" + Long.toString(storage.getCTime());
-  }
-  
-  String getProperty(Properties props, StorageDirectory sd,
-      String name) throws InconsistentFSStateException {
-    String property = props.getProperty(name);
-    if (property == null) {
-      throw new InconsistentFSStateException(sd.root, "file "
-          + STORAGE_FILE_VERSION + " has " + name + " missing.");
-    }
-    return property;
-  }
-  
-  /** Validate and set storage type from {@link Properties}*/
-  protected void setStorageType(Properties props, StorageDirectory sd)
-      throws InconsistentFSStateException {
-    NodeType type = NodeType.valueOf(getProperty(props, sd, "storageType"));
-    if (!storageType.equals(type)) {
-      throw new InconsistentFSStateException(sd.root,
-          "node type is incompatible with others.");
-    }
-    storageType = type;
-  }
-  
-  /** Validate and set ctime from {@link Properties}*/
-  protected void setcTime(Properties props, StorageDirectory sd)
-      throws InconsistentFSStateException {
-    cTime = Long.parseLong(getProperty(props, sd, "cTime"));
-  }
-
-  /** Validate and set clusterId from {@link Properties}*/
-  protected void setClusterId(Properties props, int layoutVersion,
-      StorageDirectory sd) throws InconsistentFSStateException {
-    // Set cluster ID in version that supports federation
-    if (LayoutVersion.supports(Feature.FEDERATION, layoutVersion)) {
-      String cid = getProperty(props, sd, "clusterID");
-      if (!(clusterID.equals("") || cid.equals("") || clusterID.equals(cid))) {
-        throw new InconsistentFSStateException(sd.getRoot(),
-            "cluster Id is incompatible with others.");
-      }
-      clusterID = cid;
-    }
-  }
-  
-  /** Validate and set layout version from {@link Properties}*/
-  protected void setLayoutVersion(Properties props, StorageDirectory sd)
-      throws IncorrectVersionException, InconsistentFSStateException {
-    int lv = Integer.parseInt(getProperty(props, sd, "layoutVersion"));
-    if (lv < HdfsConstants.LAYOUT_VERSION) { // future version
-      throw new IncorrectVersionException(lv, "storage directory "
-          + sd.root.getAbsolutePath());
-    }
-    layoutVersion = lv;
-  }
-  
-  /** Validate and set namespaceID version from {@link Properties}*/
-  protected void setNamespaceID(Properties props, StorageDirectory sd)
-      throws InconsistentFSStateException {
-    int nsId = Integer.parseInt(getProperty(props, sd, "namespaceID"));
-    if (namespaceID != 0 && nsId != 0 && namespaceID != nsId) {
-      throw new InconsistentFSStateException(sd.root,
-          "namespaceID is incompatible with others.");
-    }
-    namespaceID = nsId;
   }
   
   public static boolean is203LayoutVersion(int layoutVersion) {

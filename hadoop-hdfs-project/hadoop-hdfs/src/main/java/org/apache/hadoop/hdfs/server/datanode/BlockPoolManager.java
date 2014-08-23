@@ -88,7 +88,11 @@ class BlockPoolManager {
   
   synchronized void remove(BPOfferService t) {
     offerServices.remove(t);
-    bpByBlockPoolId.remove(t.getBlockPoolId());
+    if (t.hasBlockPoolId()) {
+      // It's possible that the block pool never successfully registered
+      // with any NN, so it was never added it to this map
+      bpByBlockPoolId.remove(t.getBlockPoolId());
+    }
     
     boolean removed = false;
     for (Iterator<BPOfferService> it = bpByNameserviceId.values().iterator();
@@ -106,15 +110,15 @@ class BlockPoolManager {
     }
   }
   
-  void shutDownAll() throws InterruptedException {
-    BPOfferService[] bposArray = this.getAllNamenodeThreads();
-    
-    for (BPOfferService bpos : bposArray) {
-      bpos.stop(); //interrupts the threads
-    }
-    //now join
-    for (BPOfferService bpos : bposArray) {
-      bpos.join();
+  void shutDownAll(BPOfferService[] bposArray) throws InterruptedException {
+    if (bposArray != null) {
+      for (BPOfferService bpos : bposArray) {
+        bpos.stop(); //interrupts the threads
+      }
+      //now join
+      for (BPOfferService bpos : bposArray) {
+        bpos.join();
+      }
     }
   }
   
@@ -122,6 +126,7 @@ class BlockPoolManager {
     try {
       UserGroupInformation.getLoginUser().doAs(
           new PrivilegedExceptionAction<Object>() {
+            @Override
             public Object run() throws Exception {
               for (BPOfferService bpos : offerServices) {
                 bpos.start();
@@ -145,7 +150,7 @@ class BlockPoolManager {
   void refreshNamenodes(Configuration conf)
       throws IOException {
     LOG.info("Refresh request received for nameservices: "
-        + conf.get(DFSConfigKeys.DFS_FEDERATION_NAMESERVICES));
+        + conf.get(DFSConfigKeys.DFS_NAMESERVICES));
     
     Map<String, Map<String, InetSocketAddress>> newAddressMap = 
       DFSUtil.getNNServiceRpcAddresses(conf);
@@ -159,8 +164,8 @@ class BlockPoolManager {
       Map<String, Map<String, InetSocketAddress>> addrMap) throws IOException {
     assert Thread.holdsLock(refreshNamenodesLock);
 
-    Set<String> toRefresh = Sets.newHashSet();
-    Set<String> toAdd = Sets.newHashSet();
+    Set<String> toRefresh = Sets.newLinkedHashSet();
+    Set<String> toAdd = Sets.newLinkedHashSet();
     Set<String> toRemove;
     
     synchronized (this) {

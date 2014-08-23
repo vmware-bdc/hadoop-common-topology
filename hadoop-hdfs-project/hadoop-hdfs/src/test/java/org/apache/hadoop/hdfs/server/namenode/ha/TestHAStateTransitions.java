@@ -27,7 +27,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.URI;
-import java.net.URISyntaxException;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.apache.commons.logging.Log;
@@ -37,16 +38,22 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.ha.HAServiceProtocol.RequestSource;
+import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
+import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.HAUtil;
+import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.namenode.EditLogFileOutputStream;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeLayoutVersion;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -58,6 +65,8 @@ import org.apache.log4j.Level;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
+
+import com.google.common.util.concurrent.Uninterruptibles;
 
 /**
  * Tests state transition from active->standby, and manual failover
@@ -71,6 +80,8 @@ public class TestHAStateTransitions {
   private static final String TEST_FILE_STR = TEST_FILE_PATH.toUri().getPath();
   private static final String TEST_FILE_DATA =
     "Hello state transitioning world";
+  private static final StateChangeRequestInfo REQ_INFO = new StateChangeRequestInfo(
+      RequestSource.REQUEST_BY_USER_FORCED);
   
   static {
     ((Log4JLogger)EditLogTailer.LOG).getLogger().setLevel(Level.ALL);
@@ -122,6 +133,17 @@ public class TestHAStateTransitions {
     }
   }
 
+  private void addCrmThreads(MiniDFSCluster cluster,
+      LinkedList<Thread> crmThreads) {
+    for (int nn = 0; nn <= 1; nn++) {
+      Thread thread = cluster.getNameNode(nn).getNamesystem().
+          getCacheManager().getCacheReplicationMonitor();
+      if (thread != null) {
+        crmThreads.add(thread);
+      }
+    }
+  }
+
   /**
    * Test that transitioning a service to the state that it is already
    * in is a nop, specifically, an exception is not thrown.
@@ -129,18 +151,29 @@ public class TestHAStateTransitions {
   @Test
   public void testTransitionToCurrentStateIsANop() throws Exception {
     Configuration conf = new Configuration();
+    conf.setLong(DFSConfigKeys.DFS_NAMENODE_PATH_BASED_CACHE_REFRESH_INTERVAL_MS, 1L);
     MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
       .nnTopology(MiniDFSNNTopology.simpleHATopology())
       .numDataNodes(1)
       .build();
+    LinkedList<Thread> crmThreads = new LinkedList<Thread>();
     try {
       cluster.waitActive();
+      addCrmThreads(cluster, crmThreads);
       cluster.transitionToActive(0);
+      addCrmThreads(cluster, crmThreads);
       cluster.transitionToActive(0);
+      addCrmThreads(cluster, crmThreads);
       cluster.transitionToStandby(0);
+      addCrmThreads(cluster, crmThreads);
       cluster.transitionToStandby(0);
+      addCrmThreads(cluster, crmThreads);
     } finally {
       cluster.shutdown();
+    }
+    // Verify that all cacheReplicationMonitor threads shut down
+    for (Thread thread : crmThreads) {
+      Uninterruptibles.joinUninterruptibly(thread);
     }
   }
 
@@ -314,8 +347,7 @@ public class TestHAStateTransitions {
    * Test that delegation tokens continue to work after the failover.
    */
   @Test
-  public void testDelegationTokensAfterFailover() throws IOException,
-      URISyntaxException {
+  public void testDelegationTokensAfterFailover() throws IOException {
     Configuration conf = new Configuration();
     conf.setBoolean(
         DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_ALWAYS_USE_KEY, true);
@@ -418,7 +450,8 @@ public class TestHAStateTransitions {
     if (writeHeader) {
       DataOutputStream out = new DataOutputStream(new FileOutputStream(
           inProgressFile));
-      EditLogFileOutputStream.writeHeader(out);
+      EditLogFileOutputStream.writeHeader(
+          NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION, out);
       out.close();
     }
   }
@@ -469,7 +502,7 @@ public class TestHAStateTransitions {
       assertFalse(isDTRunning(nn));
       
       banner("Transition 1->2. Should not start secret manager");
-      NameNodeAdapter.leaveSafeMode(nn, false);
+      NameNodeAdapter.leaveSafeMode(nn);
       assertTrue(nn.isStandbyState());
       assertFalse(nn.isInSafeMode());
       assertFalse(isDTRunning(nn));
@@ -481,20 +514,20 @@ public class TestHAStateTransitions {
       assertFalse(isDTRunning(nn));
   
       banner("Transition 1->3. Should not start secret manager.");
-      nn.getRpcServer().transitionToActive();
+      nn.getRpcServer().transitionToActive(REQ_INFO);
       assertFalse(nn.isStandbyState());
       assertTrue(nn.isInSafeMode());
       assertFalse(isDTRunning(nn));
   
       banner("Transition 3->1. Should not start secret manager.");
-      nn.getRpcServer().transitionToStandby();
+      nn.getRpcServer().transitionToStandby(REQ_INFO);
       assertTrue(nn.isStandbyState());
       assertTrue(nn.isInSafeMode());
       assertFalse(isDTRunning(nn));
   
       banner("Transition 1->3->4. Should start secret manager.");
-      nn.getRpcServer().transitionToActive();
-      NameNodeAdapter.leaveSafeMode(nn, false);
+      nn.getRpcServer().transitionToActive(REQ_INFO);
+      NameNodeAdapter.leaveSafeMode(nn);
       assertFalse(nn.isStandbyState());
       assertFalse(nn.isInSafeMode());
       assertTrue(isDTRunning(nn));
@@ -506,7 +539,7 @@ public class TestHAStateTransitions {
       assertFalse(isDTRunning(nn));
   
       banner("Transition 3->4. Should start secret manager");
-      NameNodeAdapter.leaveSafeMode(nn, false);
+      NameNodeAdapter.leaveSafeMode(nn);
       assertFalse(nn.isStandbyState());
       assertFalse(nn.isInSafeMode());
       assertTrue(isDTRunning(nn));
@@ -514,19 +547,58 @@ public class TestHAStateTransitions {
       for (int i = 0; i < 20; i++) {
         // Loop the last check to suss out races.
         banner("Transition 4->2. Should stop secret manager.");
-        nn.getRpcServer().transitionToStandby();
+        nn.getRpcServer().transitionToStandby(REQ_INFO);
         assertTrue(nn.isStandbyState());
         assertFalse(nn.isInSafeMode());
         assertFalse(isDTRunning(nn));
     
         banner("Transition 2->4. Should start secret manager");
-        nn.getRpcServer().transitionToActive();
+        nn.getRpcServer().transitionToActive(REQ_INFO);
         assertFalse(nn.isStandbyState());
         assertFalse(nn.isInSafeMode());
         assertTrue(isDTRunning(nn));
       }
     } finally {
       cluster.shutdown();
+    }
+  }
+  
+  /**
+   * This test also serves to test
+   * {@link HAUtil#getProxiesForAllNameNodesInNameservice(Configuration, String)} and
+   * {@link DFSUtil#getRpcAddressesForNameserviceId(Configuration, String, String)}
+   * by virtue of the fact that it wouldn't work properly if the proxies
+   * returned were not for the correct NNs.
+   */
+  @Test
+  public void testIsAtLeastOneActive() throws Exception {
+    MiniDFSCluster cluster = new MiniDFSCluster.Builder(new HdfsConfiguration())
+        .nnTopology(MiniDFSNNTopology.simpleHATopology())
+        .numDataNodes(0)
+        .build();
+    try {
+      Configuration conf = new HdfsConfiguration();
+      HATestUtil.setFailoverConfigurations(cluster, conf);
+      
+      List<ClientProtocol> namenodes =
+          HAUtil.getProxiesForAllNameNodesInNameservice(conf,
+              HATestUtil.getLogicalHostname(cluster));
+      
+      assertEquals(2, namenodes.size());
+      
+      assertFalse(HAUtil.isAtLeastOneActive(namenodes));
+      cluster.transitionToActive(0);
+      assertTrue(HAUtil.isAtLeastOneActive(namenodes));
+      cluster.transitionToStandby(0);
+      assertFalse(HAUtil.isAtLeastOneActive(namenodes));
+      cluster.transitionToActive(1);
+      assertTrue(HAUtil.isAtLeastOneActive(namenodes));
+      cluster.transitionToStandby(1);
+      assertFalse(HAUtil.isAtLeastOneActive(namenodes));
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
     }
   }
   

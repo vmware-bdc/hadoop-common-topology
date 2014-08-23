@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.io.RandomAccessFile;
 import java.util.Random;
+import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -63,24 +64,21 @@ public class TestClientReportBadBlock {
   private static int buffersize;
   private static MiniDFSCluster cluster;
   private static DistributedFileSystem dfs;
-  private static int numDataNodes = 3;
+  private static final int numDataNodes = 3;
   private static final Configuration conf = new HdfsConfiguration();
 
   Random rand = new Random();
 
   @Before
   public void startUpCluster() throws IOException {
-    if (System.getProperty("test.build.data") == null) { // to allow test to be
-      // run outside of Ant
-      System.setProperty("test.build.data", "build/test/data");
-    }
     // disable block scanner
     conf.setInt(DFSConfigKeys.DFS_DATANODE_SCAN_PERIOD_HOURS_KEY, -1); 
-    
+    // Set short retry timeouts so this test runs faster
+    conf.setInt(DFSConfigKeys.DFS_CLIENT_RETRY_WINDOW_BASE, 10);
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDataNodes)
         .build();
     cluster.waitActive();
-    dfs = (DistributedFileSystem) cluster.getFileSystem();
+    dfs = cluster.getFileSystem();
     buffersize = conf.getInt(CommonConfigurationKeys.IO_FILE_BUFFER_SIZE_KEY, 4096);
   }
 
@@ -199,11 +197,11 @@ public class TestClientReportBadBlock {
   }
 
   /**
-   * create a file with one block and corrupt some/all of the block replicas.
+   * Create a file with one block and corrupt some/all of the block replicas.
    */
   private void createAFileWithCorruptedBlockReplicas(Path filePath, short repl,
       int corruptBlockCount) throws IOException, AccessControlException,
-      FileNotFoundException, UnresolvedLinkException {
+      FileNotFoundException, UnresolvedLinkException, InterruptedException, TimeoutException {
     DFSTestUtil.createFile(dfs, filePath, BLOCK_SIZE, repl, 0);
     DFSTestUtil.waitReplication(dfs, filePath, repl);
     // Locate the file blocks by asking name node

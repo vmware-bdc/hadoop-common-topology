@@ -23,6 +23,8 @@ import java.util.Arrays;
 
 import org.apache.hadoop.io.*;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenIdentifier;
+import org.apache.hadoop.security.token.delegation.TestDelegationToken.TestDelegationTokenIdentifier;
+import org.apache.hadoop.security.token.delegation.TestDelegationToken.TestDelegationTokenSecretManager;
 
 import junit.framework.TestCase;
 
@@ -93,6 +95,21 @@ public class TestToken extends TestCase {
       assertEquals(orig, copy);
       checkUrlSafe(encode);
     }
+  }
+  
+  public void testDecodeIdentifier() throws IOException {
+    TestDelegationTokenSecretManager secretManager =
+      new TestDelegationTokenSecretManager(0, 0, 0, 0);
+    secretManager.startThreads();
+    TestDelegationTokenIdentifier id = new TestDelegationTokenIdentifier(
+        new Text("owner"), new Text("renewer"), new Text("realUser"));
+    
+    Token<TestDelegationTokenIdentifier> token =
+      new Token<TestDelegationTokenIdentifier>(id, secretManager);
+    TokenIdentifier idCopy = token.decodeIdentifier();
+    
+    assertNotSame(id, idCopy);
+    assertEquals(id, idCopy);
   }
 
 }

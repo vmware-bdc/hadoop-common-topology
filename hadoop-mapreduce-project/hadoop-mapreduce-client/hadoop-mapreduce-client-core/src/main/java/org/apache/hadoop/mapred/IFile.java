@@ -33,6 +33,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.io.DataOutputBuffer;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.WritableUtils;
 import org.apache.hadoop.io.compress.CodecPool;
 import org.apache.hadoop.io.compress.CompressionCodec;
@@ -89,13 +90,11 @@ public class IFile {
     
     DataOutputBuffer buffer = new DataOutputBuffer();
 
-    public Writer(Configuration conf, FileSystem fs, Path file, 
-                  Class<K> keyClass, Class<V> valueClass,
-                  CompressionCodec codec,
-                  Counters.Counter writesCounter) throws IOException {
-      this(conf, fs.create(file), keyClass, valueClass, codec,
-           writesCounter);
-      ownOutputStream = true;
+    public Writer(Configuration conf, FSDataOutputStream out,
+        Class<K> keyClass, Class<V> valueClass,
+        CompressionCodec codec, Counters.Counter writesCounter)
+        throws IOException {
+      this(conf, out, keyClass, valueClass, codec, writesCounter, false);
     }
     
     protected Writer(Counters.Counter writesCounter) {
@@ -104,7 +103,8 @@ public class IFile {
 
     public Writer(Configuration conf, FSDataOutputStream out, 
         Class<K> keyClass, Class<V> valueClass,
-        CompressionCodec codec, Counters.Counter writesCounter)
+        CompressionCodec codec, Counters.Counter writesCounter,
+        boolean ownOutputStream)
         throws IOException {
       this.writtenRecordsCounter = writesCounter;
       this.checksumOut = new IFileOutputStream(out);
@@ -136,11 +136,7 @@ public class IFile {
         this.valueSerializer = serializationFactory.getSerializer(valueClass);
         this.valueSerializer.open(buffer);
       }
-    }
-
-    public Writer(Configuration conf, FileSystem fs, Path file) 
-    throws IOException {
-      this(conf, fs, file, null, null, null, null);
+      this.ownOutputStream = ownOutputStream;
     }
 
     public void close() throws IOException {
@@ -339,7 +335,7 @@ public class IFile {
                   CompressionCodec codec,
                   Counters.Counter readsCounter) throws IOException {
       readRecordsCounter = readsCounter;
-      checksumIn = new IFileInputStream(in,length);
+      checksumIn = new IFileInputStream(in,length, conf);
       if (codec != null) {
         decompressor = CodecPool.getDecompressor(codec);
         if (decompressor != null) {
@@ -379,7 +375,8 @@ public class IFile {
     private int readData(byte[] buf, int off, int len) throws IOException {
       int bytesRead = 0;
       while (bytesRead < len) {
-        int n = in.read(buf, off+bytesRead, len-bytesRead);
+        int n = IOUtils.wrappedReadForCompressedData(in, buf, off + bytesRead,
+            len - bytesRead);
         if (n < 0) {
           return bytesRead;
         }

@@ -42,10 +42,22 @@ public interface DatanodeStatistics {
 
   /** @return the percentage of the block pool used space over the total capacity. */
   public float getPercentBlockPoolUsed();
+  
+  /** @return the total cache capacity of all DataNodes */
+  public long getCacheCapacity();
+
+  /** @return the total cache used by all DataNodes */
+  public long getCacheUsed();
 
   /** @return the xceiver count */
   public int getXceiverCount();
 
+  /** @return average xceiver count for non-decommission(ing|ed) nodes */
+  public int getInServiceXceiverCount();
+  
+  /** @return number of non-decommission(ing|ed) nodes */
+  public int getNumDatanodesInService();
+  
   /**
    * @return the total used space by data nodes for non-DFS purposes
    * such as storing temporary files on the local file system

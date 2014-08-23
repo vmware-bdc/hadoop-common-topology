@@ -23,8 +23,9 @@ import java.util.LinkedList;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIOException;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIsDirectoryException;
+import org.apache.hadoop.fs.PathIOException;
+import org.apache.hadoop.fs.PathIsDirectoryException;
+import org.apache.hadoop.fs.PathNotFoundException;
 
 /**
  * Unix touch like commands 
@@ -46,8 +47,8 @@ class Touch extends FsCommand {
     public static final String NAME = "touchz";
     public static final String USAGE = "<path> ...";
     public static final String DESCRIPTION =
-      "Creates a file of zero length\n" +
-      "at <path> with current time as the timestamp of that <path>.\n" +
+      "Creates a file of zero length " +
+      "at <path> with current time as the timestamp of that <path>. " +
       "An error is returned if the file exists with non-zero length\n";
 
     @Override
@@ -70,6 +71,9 @@ class Touch extends FsCommand {
 
     @Override
     protected void processNonexistentPath(PathData item) throws IOException {
+      if (!item.parentExists()) {
+        throw new PathNotFoundException(item.toString());
+      }
       touchz(item);
     }
 

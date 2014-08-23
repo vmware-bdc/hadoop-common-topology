@@ -23,36 +23,59 @@ import java.net.HttpURLConnection;
 public class GetOpParam extends HttpOpParam<GetOpParam.Op> {
   /** Get operations. */
   public static enum Op implements HttpOpParam.Op {
-    OPEN(HttpURLConnection.HTTP_OK),
+    OPEN(true, HttpURLConnection.HTTP_OK),
 
-    GETFILESTATUS(HttpURLConnection.HTTP_OK),
-    LISTSTATUS(HttpURLConnection.HTTP_OK),
-    GETCONTENTSUMMARY(HttpURLConnection.HTTP_OK),
-    GETFILECHECKSUM(HttpURLConnection.HTTP_OK),
+    GETFILESTATUS(false, HttpURLConnection.HTTP_OK),
+    LISTSTATUS(false, HttpURLConnection.HTTP_OK),
+    GETCONTENTSUMMARY(false, HttpURLConnection.HTTP_OK),
+    GETFILECHECKSUM(true, HttpURLConnection.HTTP_OK),
 
-    GETHOMEDIRECTORY(HttpURLConnection.HTTP_OK),
-    GETDELEGATIONTOKEN(HttpURLConnection.HTTP_OK),
-    GETDELEGATIONTOKENS(HttpURLConnection.HTTP_OK),
+    GETHOMEDIRECTORY(false, HttpURLConnection.HTTP_OK),
+    GETDELEGATIONTOKEN(false, HttpURLConnection.HTTP_OK, true),
 
     /** GET_BLOCK_LOCATIONS is a private unstable op. */
-    GET_BLOCK_LOCATIONS(HttpURLConnection.HTTP_OK),
+    GET_BLOCK_LOCATIONS(false, HttpURLConnection.HTTP_OK),
+    GETACLSTATUS(false, HttpURLConnection.HTTP_OK),
+    GETXATTRS(false, HttpURLConnection.HTTP_OK),
+    LISTXATTRS(false, HttpURLConnection.HTTP_OK),
 
-    NULL(HttpURLConnection.HTTP_NOT_IMPLEMENTED);
+    NULL(false, HttpURLConnection.HTTP_NOT_IMPLEMENTED),
 
+    CHECKACCESS(false, HttpURLConnection.HTTP_OK);
+
+    final boolean redirect;
     final int expectedHttpResponseCode;
+    final boolean requireAuth;
 
-    Op(final int expectedHttpResponseCode) {
+    Op(final boolean redirect, final int expectedHttpResponseCode) {
+      this(redirect, expectedHttpResponseCode, false);
+    }
+    
+    Op(final boolean redirect, final int expectedHttpResponseCode,
+       final boolean requireAuth) {
+      this.redirect = redirect;
       this.expectedHttpResponseCode = expectedHttpResponseCode;
+      this.requireAuth = requireAuth;
     }
 
     @Override
     public HttpOpParam.Type getType() {
       return HttpOpParam.Type.GET;
     }
+    
+    @Override
+    public boolean getRequireAuth() {
+      return requireAuth;
+    }
 
     @Override
     public boolean getDoOutput() {
       return false;
+    }
+
+    @Override
+    public boolean getRedirect() {
+      return redirect;
     }
 
     @Override

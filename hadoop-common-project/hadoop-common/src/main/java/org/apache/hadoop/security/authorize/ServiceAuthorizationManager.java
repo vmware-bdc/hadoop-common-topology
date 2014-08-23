@@ -26,12 +26,15 @@ import java.util.Set;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.security.KerberosInfo;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * An authorization manager which handles service-level authorization
@@ -40,10 +43,14 @@ import org.apache.hadoop.security.UserGroupInformation;
 @InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
 @InterfaceStability.Evolving
 public class ServiceAuthorizationManager {
+  static final String BLOCKED = ".blocked";
+
   private static final String HADOOP_POLICY_FILE = "hadoop-policy.xml";
 
-  private Map<Class<?>, AccessControlList> protocolToAcl =
-    new IdentityHashMap<Class<?>, AccessControlList>();
+  // For each class, first ACL in the array specifies the allowed entries
+  // and second ACL specifies blocked entries.
+  private volatile Map<Class<?>, AccessControlList[]> protocolToAcls =
+    new IdentityHashMap<Class<?>, AccessControlList[]>();
   
   /**
    * Configuration key for controlling service-level authorization for Hadoop.
@@ -59,7 +66,7 @@ public class ServiceAuthorizationManager {
   public static final Log AUDITLOG =
     LogFactory.getLog("SecurityLogger."+ServiceAuthorizationManager.class.getName());
 
-  private static final String AUTHZ_SUCCESSFULL_FOR = "Authorization successfull for ";
+  private static final String AUTHZ_SUCCESSFUL_FOR = "Authorization successful for ";
   private static final String AUTHZ_FAILED_FOR = "Authorization failed for ";
 
   
@@ -77,8 +84,8 @@ public class ServiceAuthorizationManager {
                                Configuration conf,
                                InetAddress addr
                                ) throws AuthorizationException {
-    AccessControlList acl = protocolToAcl.get(protocol);
-    if (acl == null) {
+    AccessControlList[] acls = protocolToAcls.get(protocol);
+    if (acls == null) {
       throw new AuthorizationException("Protocol " + protocol + 
                                        " is not known.");
     }
@@ -88,7 +95,7 @@ public class ServiceAuthorizationManager {
     String clientPrincipal = null; 
     if (krbInfo != null) {
       String clientKey = krbInfo.clientPrincipal();
-      if (clientKey != null && !clientKey.equals("")) {
+      if (clientKey != null && !clientKey.isEmpty()) {
         try {
           clientPrincipal = SecurityUtil.getServerPrincipal(
               conf.get(clientKey), addr);
@@ -101,17 +108,17 @@ public class ServiceAuthorizationManager {
       }
     }
     if((clientPrincipal != null && !clientPrincipal.equals(user.getUserName())) || 
-        !acl.isUserAllowed(user)) {
+       acls.length != 2  || !acls[0].isUserAllowed(user) || acls[1].isUserAllowed(user)) {
       AUDITLOG.warn(AUTHZ_FAILED_FOR + user + " for protocol=" + protocol
           + ", expected client Kerberos principal is " + clientPrincipal);
       throw new AuthorizationException("User " + user + 
           " is not authorized for protocol " + protocol + 
           ", expected client Kerberos principal is " + clientPrincipal);
     }
-    AUDITLOG.info(AUTHZ_SUCCESSFULL_FOR + user + " for protocol="+protocol);
+    AUDITLOG.info(AUTHZ_SUCCESSFUL_FOR + user + " for protocol="+protocol);
   }
 
-  public synchronized void refresh(Configuration conf,
+  public void refresh(Configuration conf,
                                           PolicyProvider provider) {
     // Get the system property 'hadoop.policy.file'
     String policyFile = 
@@ -120,29 +127,55 @@ public class ServiceAuthorizationManager {
     // Make a copy of the original config, and load the policy file
     Configuration policyConf = new Configuration(conf);
     policyConf.addResource(policyFile);
+    refreshWithLoadedConfiguration(policyConf, provider);
+  }
+
+  @Private
+  public void refreshWithLoadedConfiguration(Configuration conf,
+      PolicyProvider provider) {
+    final Map<Class<?>, AccessControlList[]> newAcls =
+      new IdentityHashMap<Class<?>, AccessControlList[]>();
     
-    final Map<Class<?>, AccessControlList> newAcls =
-      new IdentityHashMap<Class<?>, AccessControlList>();
+    String defaultAcl = conf.get(
+        CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_AUTHORIZATION_DEFAULT_ACL,
+        AccessControlList.WILDCARD_ACL_VALUE);
+
+    String defaultBlockedAcl = conf.get(
+      CommonConfigurationKeys.HADOOP_SECURITY_SERVICE_AUTHORIZATION_DEFAULT_BLOCKED_ACL, "");
 
     // Parse the config file
     Service[] services = provider.getServices();
     if (services != null) {
       for (Service service : services) {
-        AccessControlList acl = 
-          new AccessControlList(
-              policyConf.get(service.getServiceKey(), 
-                             AccessControlList.WILDCARD_ACL_VALUE)
-              );
-        newAcls.put(service.getProtocol(), acl);
+        AccessControlList acl =
+            new AccessControlList(
+                conf.get(service.getServiceKey(),
+                    defaultAcl)
+            );
+        AccessControlList blockedAcl =
+           new AccessControlList(
+           conf.get(service.getServiceKey() + BLOCKED,
+           defaultBlockedAcl));
+        newAcls.put(service.getProtocol(), new AccessControlList[] {acl, blockedAcl});
       }
     }
 
     // Flip to the newly parsed permissions
-    protocolToAcl = newAcls;
+    protocolToAcls = newAcls;
   }
 
-  // Package-protected for use in tests.
-  Set<Class<?>> getProtocolsWithAcls() {
-    return protocolToAcl.keySet();
+  @VisibleForTesting
+  public Set<Class<?>> getProtocolsWithAcls() {
+    return protocolToAcls.keySet();
+  }
+
+  @VisibleForTesting
+  public AccessControlList getProtocolsAcls(Class<?> className) {
+    return protocolToAcls.get(className)[0];
+  }
+
+  @VisibleForTesting
+  public AccessControlList getProtocolsBlockedAcls(Class<?> className) {
+    return protocolToAcls.get(className)[1];
   }
 }

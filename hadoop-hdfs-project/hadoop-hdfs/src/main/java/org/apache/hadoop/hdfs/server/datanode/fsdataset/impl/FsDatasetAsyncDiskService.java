@@ -19,6 +19,7 @@
 package org.apache.hadoop.hdfs.server.datanode.fsdataset.impl;
 
 import java.io.File;
+import java.io.FileDescriptor;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -31,6 +32,8 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.protocol.BlockCommand;
+import org.apache.hadoop.io.nativeio.NativeIO;
+import org.apache.hadoop.io.nativeio.NativeIOException;
 
 /**
  * This class is a container of multiple thread pools, each for a volume,
@@ -42,6 +45,7 @@ import org.apache.hadoop.hdfs.server.protocol.BlockCommand;
  * can be slow, and we don't want to use a single thread pool because that
  * is inefficient when we have more than 1 volume.  AsyncDiskService is the
  * solution for these.
+ * Another example of async disk operation is requesting sync_file_range().
  * 
  * This class and {@link org.apache.hadoop.util.AsyncDiskService} are similar.
  * They should be combined.
@@ -57,6 +61,7 @@ class FsDatasetAsyncDiskService {
   private static final long THREADS_KEEP_ALIVE_SECONDS = 60; 
   
   private final DataNode datanode;
+  private final ThreadGroup threadGroup;
   private Map<File, ThreadPoolExecutor> executors
       = new HashMap<File, ThreadPoolExecutor>();
   
@@ -66,42 +71,52 @@ class FsDatasetAsyncDiskService {
    * 
    * The AsyncDiskServices uses one ThreadPool per volume to do the async
    * disk operations.
-   * 
-   * @param volumes The roots of the data volumes.
    */
-  FsDatasetAsyncDiskService(DataNode datanode, File[] volumes) {
+  FsDatasetAsyncDiskService(DataNode datanode) {
     this.datanode = datanode;
+    this.threadGroup = new ThreadGroup(getClass().getSimpleName());
+  }
 
-    final ThreadGroup threadGroup = new ThreadGroup(getClass().getSimpleName());
-    // Create one ThreadPool per volume
-    for (int v = 0 ; v < volumes.length; v++) {
-      final File vol = volumes[v];
-      ThreadFactory threadFactory = new ThreadFactory() {
-          int counter = 0;
+  private void addExecutorForVolume(final File volume) {
+    ThreadFactory threadFactory = new ThreadFactory() {
+      int counter = 0;
 
-          @Override
-          public Thread newThread(Runnable r) {
-            int thisIndex;
-            synchronized (this) {
-              thisIndex = counter++;
-            }
-            Thread t = new Thread(threadGroup, r);
-            t.setName("Async disk worker #" + thisIndex +
-                      " for volume " + vol);
-            return t;
-          }
-        };
+      @Override
+      public Thread newThread(Runnable r) {
+        int thisIndex;
+        synchronized (this) {
+          thisIndex = counter++;
+        }
+        Thread t = new Thread(threadGroup, r);
+        t.setName("Async disk worker #" + thisIndex +
+            " for volume " + volume);
+        return t;
+      }
+    };
 
-      ThreadPoolExecutor executor = new ThreadPoolExecutor(
-          CORE_THREADS_PER_VOLUME, MAXIMUM_THREADS_PER_VOLUME, 
-          THREADS_KEEP_ALIVE_SECONDS, TimeUnit.SECONDS, 
-          new LinkedBlockingQueue<Runnable>(), threadFactory);
+    ThreadPoolExecutor executor = new ThreadPoolExecutor(
+        CORE_THREADS_PER_VOLUME, MAXIMUM_THREADS_PER_VOLUME,
+        THREADS_KEEP_ALIVE_SECONDS, TimeUnit.SECONDS,
+        new LinkedBlockingQueue<Runnable>(), threadFactory);
 
-      // This can reduce the number of running threads
-      executor.allowCoreThreadTimeOut(true);
-      executors.put(vol, executor);
+    // This can reduce the number of running threads
+    executor.allowCoreThreadTimeOut(true);
+    executors.put(volume, executor);
+  }
+
+  /**
+   * Starts AsyncDiskService for a new volume
+   * @param volume the root of the new data volume.
+   */
+  synchronized void addVolume(File volume) {
+    if (executors == null) {
+      throw new RuntimeException("AsyncDiskService is already shutdown");
     }
-    
+    ThreadPoolExecutor executor = executors.get(volume);
+    if (executor != null) {
+      throw new RuntimeException("Volume " + volume + " is already existed.");
+    }
+    addExecutorForVolume(volume);
   }
   
   synchronized long countPendingDeletions() {
@@ -136,7 +151,7 @@ class FsDatasetAsyncDiskService {
     if (executors == null) {
       LOG.warn("AsyncDiskService has already shut down.");
     } else {
-      LOG.info("Shutting down all async disk service threads...");
+      LOG.info("Shutting down all async disk service threads");
       
       for (Map.Entry<File, ThreadPoolExecutor> e : executors.entrySet()) {
         e.getValue().shutdown();
@@ -144,8 +159,23 @@ class FsDatasetAsyncDiskService {
       // clear the executor map so that calling execute again will fail.
       executors = null;
       
-      LOG.info("All async disk service threads have been shut down.");
+      LOG.info("All async disk service threads have been shut down");
     }
+  }
+
+  public void submitSyncFileRangeRequest(FsVolumeImpl volume,
+      final FileDescriptor fd, final long offset, final long nbytes,
+      final int flags) {
+    execute(volume.getCurrentDir(), new Runnable() {
+      @Override
+      public void run() {
+        try {
+          NativeIO.POSIX.syncFileRangeIfPossible(fd, offset, nbytes, flags);
+        } catch (NativeIOException e) {
+          LOG.warn("sync_file_range error", e);
+        }
+      }
+    });
   }
 
   /**
@@ -153,29 +183,34 @@ class FsDatasetAsyncDiskService {
    * dfsUsed statistics accordingly.
    */
   void deleteAsync(FsVolumeImpl volume, File blockFile, File metaFile,
-      ExtendedBlock block) {
-    LOG.info("Scheduling block " + block.getLocalBlock()
+      ExtendedBlock block, String trashDirectory) {
+    LOG.info("Scheduling " + block.getLocalBlock()
         + " file " + blockFile + " for deletion");
     ReplicaFileDeleteTask deletionTask = new ReplicaFileDeleteTask(
-        volume, blockFile, metaFile, block);
+        volume, blockFile, metaFile, block, trashDirectory);
     execute(volume.getCurrentDir(), deletionTask);
   }
   
   /** A task for deleting a block file and its associated meta file, as well
-   *  as decrement the dfs usage of the volume. 
+   *  as decrement the dfs usage of the volume.
+   *  Optionally accepts a trash directory. If one is specified then the files
+   *  are moved to trash instead of being deleted. If none is specified then the
+   *  files are deleted immediately.
    */
   class ReplicaFileDeleteTask implements Runnable {
     final FsVolumeImpl volume;
     final File blockFile;
     final File metaFile;
     final ExtendedBlock block;
+    final String trashDirectory;
     
     ReplicaFileDeleteTask(FsVolumeImpl volume, File blockFile,
-        File metaFile, ExtendedBlock block) {
+        File metaFile, ExtendedBlock block, String trashDirectory) {
       this.volume = volume;
       this.blockFile = blockFile;
       this.metaFile = metaFile;
       this.block = block;
+      this.trashDirectory = trashDirectory;
     }
 
     @Override
@@ -186,20 +221,47 @@ class FsDatasetAsyncDiskService {
           + " and meta file " + metaFile + " from volume " + volume;
     }
 
+    private boolean deleteFiles() {
+      return blockFile.delete() && (metaFile.delete() || !metaFile.exists());
+    }
+
+    private boolean moveFiles() {
+      File trashDirFile = new File(trashDirectory);
+      if (!trashDirFile.exists() && !trashDirFile.mkdirs()) {
+        LOG.error("Failed to create trash directory " + trashDirectory);
+        return false;
+      }
+
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Moving files " + blockFile.getName() + " and " +
+            metaFile.getName() + " to trash.");
+      }
+
+      File newBlockFile = new File(trashDirectory, blockFile.getName());
+      File newMetaFile = new File(trashDirectory, metaFile.getName());
+      return (blockFile.renameTo(newBlockFile) &&
+              metaFile.renameTo(newMetaFile));
+    }
+
     @Override
     public void run() {
       long dfsBytes = blockFile.length() + metaFile.length();
-      if (!blockFile.delete() || (!metaFile.delete() && metaFile.exists())) {
-        LOG.warn("Unexpected error trying to delete block "
-            + block.getBlockPoolId() + " " + block.getLocalBlock()
+      boolean result;
+
+      result = (trashDirectory == null) ? deleteFiles() : moveFiles();
+
+      if (!result) {
+        LOG.warn("Unexpected error trying to "
+            + (trashDirectory == null ? "delete" : "move")
+            + " block " + block.getBlockPoolId() + " " + block.getLocalBlock()
             + " at file " + blockFile + ". Ignored.");
       } else {
         if(block.getLocalBlock().getNumBytes() != BlockCommand.NO_ACK){
-          datanode.notifyNamenodeDeletedBlock(block);
+          datanode.notifyNamenodeDeletedBlock(block, volume.getStorageID());
         }
         volume.decDfsUsed(block.getBlockPoolId(), dfsBytes);
-        LOG.info("Deleted block " + block.getBlockPoolId() + " "
-            + block.getLocalBlock() + " at file " + blockFile);
+        LOG.info("Deleted " + block.getBlockPoolId() + " "
+            + block.getLocalBlock() + " file " + blockFile);
       }
     }
   }

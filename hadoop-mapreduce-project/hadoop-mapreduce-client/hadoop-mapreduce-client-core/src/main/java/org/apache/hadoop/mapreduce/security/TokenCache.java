@@ -19,7 +19,8 @@
 package org.apache.hadoop.mapreduce.security;
 
 import java.io.IOException;
-import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -28,7 +29,6 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.Master;
@@ -92,8 +92,11 @@ public class TokenCache {
 
   static void obtainTokensForNamenodesInternal(Credentials credentials,
       Path[] ps, Configuration conf) throws IOException {
+    Set<FileSystem> fsSet = new HashSet<FileSystem>();
     for(Path p: ps) {
-      FileSystem fs = FileSystem.get(p.toUri(), conf);
+      fsSet.add(p.getFileSystem(conf));
+    }
+    for (FileSystem fs : fsSet) {
       obtainTokensForNamenodesInternal(fs, credentials, conf);
     }
   }
@@ -106,7 +109,6 @@ public class TokenCache {
    * @param conf
    * @throws IOException
    */
-  @SuppressWarnings("deprecation")
   static void obtainTokensForNamenodesInternal(FileSystem fs, 
       Credentials credentials, Configuration conf) throws IOException {
     String delegTokenRenewer = Master.getMasterPrincipal(conf);
@@ -116,26 +118,11 @@ public class TokenCache {
     }
     mergeBinaryTokens(credentials, conf);
 
-    String fsName = fs.getCanonicalServiceName();
-    if (TokenCache.getDelegationToken(credentials, fsName) == null) {
-      List<Token<?>> tokens =
-          fs.getDelegationTokens(delegTokenRenewer, credentials);
-      if (tokens != null) {
-        for (Token<?> token : tokens) {
-          credentials.addToken(token.getService(), token);
-          LOG.info("Got dt for " + fs.getUri() + ";uri="+ fsName + 
-              ";t.service="+token.getService());
-        }
-      }
-      //Call getDelegationToken as well for now - for FS implementations
-      // which may not have implmented getDelegationTokens (hftp)
-      if (tokens == null || tokens.size() == 0) {
-        Token<?> token = fs.getDelegationToken(delegTokenRenewer);
-        if (token != null) {
-          credentials.addToken(token.getService(), token);
-          LOG.info("Got dt for " + fs.getUri() + ";uri=" + fsName
-              + ";t.service=" + token.getService());
-        }
+    final Token<?> tokens[] = fs.addDelegationTokens(delegTokenRenewer,
+                                                     credentials);
+    if (tokens != null) {
+      for (Token<?> token : tokens) {
+        LOG.info("Got dt for " + fs.getUri() + "; "+token);
       }
     }
   }
@@ -167,32 +154,19 @@ public class TokenCache {
    */
   @InterfaceAudience.Private
   public static final String JOB_TOKENS_FILENAME = "mapreduce.job.jobTokenFile";
-  private static final Text JOB_TOKEN = new Text("ShuffleAndJobToken");
+  private static final Text JOB_TOKEN = new Text("JobToken");
+  private static final Text SHUFFLE_TOKEN = new Text("MapReduceShuffleToken");
   
   /**
-   * 
-   * @param namenode
-   * @return delegation token
-   */
-  @SuppressWarnings("unchecked")
-  @InterfaceAudience.Private
-  public static Token<DelegationTokenIdentifier> getDelegationToken(
-      Credentials credentials, String namenode) {
-    //No fs specific tokens issues by this fs. It may however issue tokens
-    // for other filesystems - which would be keyed by that filesystems name.
-    if (namenode == null)  
-      return null;
-    return (Token<DelegationTokenIdentifier>) credentials.getToken(new Text(
-        namenode));
-  }
-
-  /**
    * load job token from a file
+   * @deprecated Use {@link Credentials#readTokenStorageFile} instead,
+   * this method is included for compatibility against Hadoop-1.
    * @param conf
    * @throws IOException
    */
   @InterfaceAudience.Private
-  public static Credentials loadTokens(String jobTokenFile, JobConf conf) 
+  @Deprecated
+  public static Credentials loadTokens(String jobTokenFile, JobConf conf)
   throws IOException {
     Path localJobTokenFile = new Path ("file:///" + jobTokenFile);
 
@@ -206,6 +180,21 @@ public class TokenCache {
     }
     return ts;
   }
+  
+  /**
+   * load job token from a file
+   * @deprecated Use {@link Credentials#readTokenStorageFile} instead,
+   * this method is included for compatibility against Hadoop-1.
+   * @param conf
+   * @throws IOException
+   */
+  @InterfaceAudience.Private
+  @Deprecated
+  public static Credentials loadTokens(String jobTokenFile, Configuration conf)
+      throws IOException {
+    return loadTokens(jobTokenFile, new JobConf(conf));
+  }
+  
   /**
    * store job token
    * @param t
@@ -223,5 +212,30 @@ public class TokenCache {
   @InterfaceAudience.Private
   public static Token<JobTokenIdentifier> getJobToken(Credentials credentials) {
     return (Token<JobTokenIdentifier>) credentials.getToken(JOB_TOKEN);
+  }
+
+  @InterfaceAudience.Private
+  public static void setShuffleSecretKey(byte[] key, Credentials credentials) {
+    credentials.addSecretKey(SHUFFLE_TOKEN, key);
+  }
+
+  @InterfaceAudience.Private
+  public static byte[] getShuffleSecretKey(Credentials credentials) {
+    return getSecretKey(credentials, SHUFFLE_TOKEN);
+  }
+
+  /**
+   * @deprecated Use {@link Credentials#getToken(org.apache.hadoop.io.Text)}
+   * instead, this method is included for compatibility against Hadoop-1
+   * @param namenode
+   * @return delegation token
+   */
+  @InterfaceAudience.Private
+  @Deprecated
+  public static
+      Token<?> getDelegationToken(
+          Credentials credentials, String namenode) {
+    return (Token<?>) credentials.getToken(new Text(
+      namenode));
   }
 }

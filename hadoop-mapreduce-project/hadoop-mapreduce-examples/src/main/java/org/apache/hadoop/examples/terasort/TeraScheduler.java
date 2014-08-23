@@ -24,10 +24,11 @@ import java.util.*;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.examples.terasort.TeraInputFormat.TeraFileSplit;
 import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.lib.input.FileSplit;
 import org.apache.hadoop.mapreduce.server.tasktracker.TTConfig;
+
+import com.google.common.base.Charsets;
 
 class TeraScheduler {
   static String USE = "mapreduce.terasort.use.terascheduler";
@@ -73,7 +74,8 @@ class TeraScheduler {
 
   List<String> readFile(String filename) throws IOException {
     List<String> result = new ArrayList<String>(10000);
-    BufferedReader in = new BufferedReader(new FileReader(filename));
+    BufferedReader in = new BufferedReader(
+        new InputStreamReader(new FileInputStream(filename), Charsets.UTF_8));
     String line = in.readLine();
     while (line != null) {
       result.add(line);
@@ -211,8 +213,9 @@ class TeraScheduler {
     for(int i=0; i < splits.length; ++i) {
       if (splits[i].isAssigned) {
         // copy the split and fix up the locations
-        ((TeraFileSplit) realSplits[i]).setLocations
-           (new String[]{splits[i].locations.get(0).hostname});
+        String[] newLocations = {splits[i].locations.get(0).hostname};
+        realSplits[i] = new FileSplit(realSplits[i].getPath(),
+            realSplits[i].getStart(), realSplits[i].getLength(), newLocations);
         result[left++] = realSplits[i];
       } else {
         result[right--] = realSplits[i];

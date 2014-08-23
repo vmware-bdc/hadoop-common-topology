@@ -20,6 +20,7 @@ package org.apache.hadoop.fs;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.util.Shell;
 
 import java.io.BufferedReader;
@@ -46,17 +47,32 @@ public class DU extends Shell {
    * @throws IOException if we fail to refresh the disk usage
    */
   public DU(File path, long interval) throws IOException {
+    this(path, interval, -1L);
+  }
+  
+  /**
+   * Keeps track of disk usage.
+   * @param path the path to check disk usage in
+   * @param interval refresh the disk usage at this interval
+   * @param initialUsed use this value until next refresh
+   * @throws IOException if we fail to refresh the disk usage
+   */
+  public DU(File path, long interval, long initialUsed) throws IOException { 
     super(0);
-    
+
     //we set the Shell interval to 0 so it will always run our command
     //and use this one to set the thread sleep interval
     this.refreshInterval = interval;
     this.dirPath = path.getCanonicalPath();
-    
-    //populate the used variable
-    run();
+
+    //populate the used variable if the initial value is not specified.
+    if (initialUsed < 0) {
+      run();
+    } else {
+      this.used.set(initialUsed);
+    }
   }
-  
+
   /**
    * Keeps track of disk usage.
    * @param path the path to check disk usage in
@@ -64,9 +80,23 @@ public class DU extends Shell {
    * @throws IOException if we fail to refresh the disk usage
    */
   public DU(File path, Configuration conf) throws IOException {
-    this(path, 600000L);
-    //10 minutes default refresh interval
+    this(path, conf, -1L);
   }
+
+  /**
+   * Keeps track of disk usage.
+   * @param path the path to check disk usage in
+   * @param conf configuration object
+   * @param initialUsed use it until the next refresh.
+   * @throws IOException if we fail to refresh the disk usage
+   */
+  public DU(File path, Configuration conf, long initialUsed)
+      throws IOException {
+    this(path, conf.getLong(CommonConfigurationKeys.FS_DU_INTERVAL_KEY,
+                CommonConfigurationKeys.FS_DU_INTERVAL_DEFAULT), initialUsed);
+  }
+    
+  
 
   /**
    * This thread refreshes the "used" variable.
@@ -76,6 +106,7 @@ public class DU extends Shell {
    **/
   class DURefreshThread implements Runnable {
     
+    @Override
     public void run() {
       
       while(shouldRun) {
@@ -135,7 +166,7 @@ public class DU extends Shell {
       }
     }
     
-    return used.longValue();
+    return Math.max(used.longValue(), 0L);
   }
 
   /**
@@ -143,6 +174,20 @@ public class DU extends Shell {
    */
   public String getDirPath() {
     return dirPath;
+  }
+
+
+  /**
+   * Override to hook in DUHelper class. Maybe this can be used more
+   * generally as well on Unix/Linux based systems
+   */
+  @Override
+  protected void run() throws IOException {
+    if (WINDOWS) {
+      used.set(DUHelper.getFolderUsage(dirPath));
+      return;
+    }
+    super.run();
   }
   
   /**
@@ -169,16 +214,19 @@ public class DU extends Shell {
     }
   }
   
+  @Override
   public String toString() {
     return
       "du -sk " + dirPath +"\n" +
       used + "\t" + dirPath;
   }
 
+  @Override
   protected String[] getExecString() {
     return new String[] {"du", "-sk", dirPath};
   }
   
+  @Override
   protected void parseExecResult(BufferedReader lines) throws IOException {
     String line = lines.readLine();
     if (line == null) {

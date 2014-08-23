@@ -18,14 +18,23 @@
 
 package org.apache.hadoop.util;
 
+import static org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix.long2String;
+import static org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix.string2long;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.apache.hadoop.test.UnitTestcaseTimeLimit;
+import org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix;
 import org.junit.Test;
 
 public class TestStringUtils extends UnitTestcaseTimeLimit {
@@ -40,7 +49,7 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
   final private static String ESCAPED_STR_WITH_BOTH2 = 
     "\\,A\\\\\\,\\,B\\\\\\\\\\,";
   
-  @Test
+  @Test (timeout = 30000)
   public void testEscapeString() throws Exception {
     assertEquals(NULL_STR, StringUtils.escapeString(NULL_STR));
     assertEquals(EMPTY_STR, StringUtils.escapeString(EMPTY_STR));
@@ -54,7 +63,7 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
         StringUtils.escapeString(STR_WITH_BOTH2));
   }
   
-  @Test
+  @Test (timeout = 30000)
   public void testSplit() throws Exception {
     assertEquals(NULL_STR, StringUtils.split(NULL_STR));
     String[] splits = StringUtils.split(EMPTY_STR);
@@ -84,7 +93,7 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
     assertEquals(ESCAPED_STR_WITH_BOTH2, splits[0]);    
   }
   
-  @Test
+  @Test (timeout = 30000)
   public void testSimpleSplit() throws Exception {
     final String[] TO_TEST = {
         "a/b/c",
@@ -100,7 +109,7 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
     }
   }
 
-  @Test
+  @Test (timeout = 30000)
   public void testUnescapeString() throws Exception {
     assertEquals(NULL_STR, StringUtils.unEscapeString(NULL_STR));
     assertEquals(EMPTY_STR, StringUtils.unEscapeString(EMPTY_STR));
@@ -132,47 +141,36 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
         StringUtils.unEscapeString(ESCAPED_STR_WITH_BOTH2));
   }
   
-  @Test
+  @Test (timeout = 30000)
   public void testTraditionalBinaryPrefix() throws Exception {
+    //test string2long(..)
     String[] symbol = {"k", "m", "g", "t", "p", "e"};
     long m = 1024;
     for(String s : symbol) {
-      assertEquals(0, StringUtils.TraditionalBinaryPrefix.string2long(0 + s));
-      assertEquals(m, StringUtils.TraditionalBinaryPrefix.string2long(1 + s));
+      assertEquals(0, string2long(0 + s));
+      assertEquals(m, string2long(1 + s));
       m *= 1024;
     }
     
-    assertEquals(0L, StringUtils.TraditionalBinaryPrefix.string2long("0"));
-    assertEquals(1024L, StringUtils.TraditionalBinaryPrefix.string2long("1k"));
-    assertEquals(-1024L, StringUtils.TraditionalBinaryPrefix.string2long("-1k"));
-    assertEquals(1259520L,
-        StringUtils.TraditionalBinaryPrefix.string2long("1230K"));
-    assertEquals(-1259520L,
-        StringUtils.TraditionalBinaryPrefix.string2long("-1230K"));
-    assertEquals(104857600L,
-        StringUtils.TraditionalBinaryPrefix.string2long("100m"));
-    assertEquals(-104857600L,
-        StringUtils.TraditionalBinaryPrefix.string2long("-100M"));
-    assertEquals(956703965184L,
-        StringUtils.TraditionalBinaryPrefix.string2long("891g"));
-    assertEquals(-956703965184L,
-        StringUtils.TraditionalBinaryPrefix.string2long("-891G"));
-    assertEquals(501377302265856L,
-        StringUtils.TraditionalBinaryPrefix.string2long("456t"));
-    assertEquals(-501377302265856L,
-        StringUtils.TraditionalBinaryPrefix.string2long("-456T"));
-    assertEquals(11258999068426240L,
-        StringUtils.TraditionalBinaryPrefix.string2long("10p"));
-    assertEquals(-11258999068426240L,
-        StringUtils.TraditionalBinaryPrefix.string2long("-10P"));
-    assertEquals(1152921504606846976L,
-        StringUtils.TraditionalBinaryPrefix.string2long("1e"));
-    assertEquals(-1152921504606846976L,
-        StringUtils.TraditionalBinaryPrefix.string2long("-1E"));
+    assertEquals(0L, string2long("0"));
+    assertEquals(1024L, string2long("1k"));
+    assertEquals(-1024L, string2long("-1k"));
+    assertEquals(1259520L, string2long("1230K"));
+    assertEquals(-1259520L, string2long("-1230K"));
+    assertEquals(104857600L, string2long("100m"));
+    assertEquals(-104857600L, string2long("-100M"));
+    assertEquals(956703965184L, string2long("891g"));
+    assertEquals(-956703965184L, string2long("-891G"));
+    assertEquals(501377302265856L, string2long("456t"));
+    assertEquals(-501377302265856L, string2long("-456T"));
+    assertEquals(11258999068426240L, string2long("10p"));
+    assertEquals(-11258999068426240L, string2long("-10P"));
+    assertEquals(1152921504606846976L, string2long("1e"));
+    assertEquals(-1152921504606846976L, string2long("-1E"));
 
     String tooLargeNumStr = "10e";
     try {
-      StringUtils.TraditionalBinaryPrefix.string2long(tooLargeNumStr);
+      string2long(tooLargeNumStr);
       fail("Test passed for a number " + tooLargeNumStr + " too large");
     } catch (IllegalArgumentException e) {
       assertEquals(tooLargeNumStr + " does not fit in a Long", e.getMessage());
@@ -180,7 +178,7 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
 
     String tooSmallNumStr = "-10e";
     try {
-      StringUtils.TraditionalBinaryPrefix.string2long(tooSmallNumStr);
+      string2long(tooSmallNumStr);
       fail("Test passed for a number " + tooSmallNumStr + " too small");
     } catch (IllegalArgumentException e) {
       assertEquals(tooSmallNumStr + " does not fit in a Long", e.getMessage());
@@ -189,7 +187,7 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
     String invalidFormatNumStr = "10kb";
     char invalidPrefix = 'b';
     try {
-      StringUtils.TraditionalBinaryPrefix.string2long(invalidFormatNumStr);
+      string2long(invalidFormatNumStr);
       fail("Test passed for a number " + invalidFormatNumStr
           + " has invalid format");
     } catch (IllegalArgumentException e) {
@@ -199,9 +197,77 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
           e.getMessage());
     }
 
+    //test long2string(..)
+    assertEquals("0", long2String(0, null, 2));
+    for(int decimalPlace = 0; decimalPlace < 2; decimalPlace++) {
+      for(int n = 1; n < TraditionalBinaryPrefix.KILO.value; n++) {
+        assertEquals(n + "", long2String(n, null, decimalPlace));
+        assertEquals(-n + "", long2String(-n, null, decimalPlace));
+      }
+      assertEquals("1 K", long2String(1L << 10, null, decimalPlace));
+      assertEquals("-1 K", long2String(-1L << 10, null, decimalPlace));
+    }
+
+    assertEquals("8.00 E", long2String(Long.MAX_VALUE, null, 2));
+    assertEquals("8.00 E", long2String(Long.MAX_VALUE - 1, null, 2));
+    assertEquals("-8 E", long2String(Long.MIN_VALUE, null, 2));
+    assertEquals("-8.00 E", long2String(Long.MIN_VALUE + 1, null, 2));
+
+    final String[] zeros = {" ", ".0 ", ".00 "};
+    for(int decimalPlace = 0; decimalPlace < zeros.length; decimalPlace++) {
+      final String trailingZeros = zeros[decimalPlace]; 
+
+      for(int e = 11; e < Long.SIZE - 1; e++) {
+        final TraditionalBinaryPrefix p
+            = TraditionalBinaryPrefix.values()[e/10 - 1]; 
+  
+        { // n = 2^e
+          final long n = 1L << e;
+          final String expected = (n/p.value) + " " + p.symbol;
+          assertEquals("n=" + n, expected, long2String(n, null, 2));
+        }
+  
+        { // n = 2^e + 1
+          final long n = (1L << e) + 1;
+          final String expected = (n/p.value) + trailingZeros + p.symbol;
+          assertEquals("n=" + n, expected, long2String(n, null, decimalPlace));
+        }
+  
+        { // n = 2^e - 1
+          final long n = (1L << e) - 1;
+          final String expected = ((n+1)/p.value) + trailingZeros + p.symbol;
+          assertEquals("n=" + n, expected, long2String(n, null, decimalPlace));
+        }
+      }
+    }
+
+    assertEquals("1.50 K", long2String(3L << 9, null, 2));
+    assertEquals("1.5 K", long2String(3L << 9, null, 1));
+    assertEquals("1.50 M", long2String(3L << 19, null, 2));
+    assertEquals("2 M", long2String(3L << 19, null, 0));
+    assertEquals("3 G", long2String(3L << 30, null, 2));
+
+    // test byteDesc(..)
+    assertEquals("0 B", StringUtils.byteDesc(0));
+    assertEquals("-100 B", StringUtils.byteDesc(-100));
+    assertEquals("1 KB", StringUtils.byteDesc(1024));
+    assertEquals("1.50 KB", StringUtils.byteDesc(3L << 9));
+    assertEquals("1.50 MB", StringUtils.byteDesc(3L << 19));
+    assertEquals("3 GB", StringUtils.byteDesc(3L << 30));
+    
+    // test formatPercent(..)
+    assertEquals("10%", StringUtils.formatPercent(0.1, 0));
+    assertEquals("10.0%", StringUtils.formatPercent(0.1, 1));
+    assertEquals("10.00%", StringUtils.formatPercent(0.1, 2));
+
+    assertEquals("1%", StringUtils.formatPercent(0.00543, 0));
+    assertEquals("0.5%", StringUtils.formatPercent(0.00543, 1));
+    assertEquals("0.54%", StringUtils.formatPercent(0.00543, 2));
+    assertEquals("0.543%", StringUtils.formatPercent(0.00543, 3));
+    assertEquals("0.5430%", StringUtils.formatPercent(0.00543, 4));
   }
 
-  @Test
+  @Test (timeout = 30000)
   public void testJoin() {
     List<String> s = new ArrayList<String>();
     s.add("a");
@@ -213,7 +279,7 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
     assertEquals("a:b:c", StringUtils.join(":", s.subList(0, 3)));
   }
   
-  @Test
+  @Test (timeout = 30000)
   public void testGetTrimmedStrings() throws Exception {
     String compactDirList = "/spindle1/hdfs,/spindle2/hdfs,/spindle3/hdfs";
     String spacedDirList = "/spindle1/hdfs, /spindle2/hdfs, /spindle3/hdfs";
@@ -231,10 +297,11 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
     assertArrayEquals(expectedArray, StringUtils.getTrimmedStrings(pathologicalDirList2));
     
     assertArrayEquals(emptyArray, StringUtils.getTrimmedStrings(emptyList1));
-    assertArrayEquals(emptyArray, StringUtils.getTrimmedStrings(emptyList2));
+    String[] estring = StringUtils.getTrimmedStrings(emptyList2);
+    assertArrayEquals(emptyArray, estring);
   } 
 
-  @Test
+  @Test (timeout = 30000)
   public void testCamelize() {
     // common use cases
     assertEquals("Map", StringUtils.camelize("MAP"));
@@ -269,6 +336,81 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
     assertEquals("Yy", StringUtils.camelize("yY"));
     assertEquals("Zz", StringUtils.camelize("zZ"));
   }
+  
+  @Test (timeout = 30000)
+  public void testStringToURI() {
+    String[] str = new String[] { "file://" };
+    try {
+      StringUtils.stringToURI(str);
+      fail("Ignoring URISyntaxException while creating URI from string file://");
+    } catch (IllegalArgumentException iae) {
+      assertEquals("Failed to create uri for file://", iae.getMessage());
+    }
+  }
+
+  @Test (timeout = 30000)
+  public void testSimpleHostName() {
+    assertEquals("Should return hostname when FQDN is specified",
+            "hadoop01",
+            StringUtils.simpleHostname("hadoop01.domain.com"));
+    assertEquals("Should return hostname when only hostname is specified",
+            "hadoop01",
+            StringUtils.simpleHostname("hadoop01"));
+    assertEquals("Should not truncate when IP address is passed",
+            "10.10.5.68",
+            StringUtils.simpleHostname("10.10.5.68"));
+  }
+
+  @Test (timeout = 5000)
+  public void testReplaceTokensShellEnvVars() {
+    Pattern pattern = StringUtils.SHELL_ENV_VAR_PATTERN;
+    Map<String, String> replacements = new HashMap<String, String>();
+    replacements.put("FOO", "one");
+    replacements.put("BAZ", "two");
+    replacements.put("NUMBERS123", "one-two-three");
+    replacements.put("UNDER_SCORES", "___");
+
+    assertEquals("one", StringUtils.replaceTokens("$FOO", pattern,
+      replacements));
+    assertEquals("two", StringUtils.replaceTokens("$BAZ", pattern,
+      replacements));
+    assertEquals("", StringUtils.replaceTokens("$BAR", pattern, replacements));
+    assertEquals("", StringUtils.replaceTokens("", pattern, replacements));
+    assertEquals("one-two-three", StringUtils.replaceTokens("$NUMBERS123",
+      pattern, replacements));
+    assertEquals("___", StringUtils.replaceTokens("$UNDER_SCORES", pattern,
+      replacements));
+    assertEquals("//one//two//", StringUtils.replaceTokens("//$FOO/$BAR/$BAZ//",
+      pattern, replacements));
+  }
+
+  @Test (timeout = 5000)
+  public void testReplaceTokensWinEnvVars() {
+    Pattern pattern = StringUtils.WIN_ENV_VAR_PATTERN;
+    Map<String, String> replacements = new HashMap<String, String>();
+    replacements.put("foo", "zoo");
+    replacements.put("baz", "zaz");
+
+    assertEquals("zoo", StringUtils.replaceTokens("%foo%", pattern,
+      replacements));
+    assertEquals("zaz", StringUtils.replaceTokens("%baz%", pattern,
+      replacements));
+    assertEquals("", StringUtils.replaceTokens("%bar%", pattern,
+      replacements));
+    assertEquals("", StringUtils.replaceTokens("", pattern, replacements));
+    assertEquals("zoo__zaz", StringUtils.replaceTokens("%foo%_%bar%_%baz%",
+      pattern, replacements));
+    assertEquals("begin zoo__zaz end", StringUtils.replaceTokens(
+      "begin %foo%_%bar%_%baz% end", pattern, replacements));
+  }
+
+  @Test 
+  public void testGetUniqueNonEmptyTrimmedStrings (){
+    final String TO_SPLIT = ",foo, bar,baz,,blah,blah,bar,";
+    Collection<String> col = StringUtils.getTrimmedStringCollection(TO_SPLIT);
+    assertEquals(4, col.size());
+    assertTrue(col.containsAll(Arrays.asList(new String[]{"foo","bar","baz","blah"})));
+  }
 
   // Benchmark for StringUtils split
   public static void main(String []args) {
@@ -289,10 +431,9 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
         }
         long et = System.nanoTime();
         if (outer > 3) {
-          System.out.println(
-            (useOurs ? "StringUtils impl" : "Java impl") +
-            " #" + outer + ":" +
-            (et - st)/1000000 + "ms");
+          System.out.println( (useOurs ? "StringUtils impl" : "Java impl")
+              + " #" + outer + ":" + (et - st)/1000000 + "ms, components="
+              + components  );
         }
       }
     }

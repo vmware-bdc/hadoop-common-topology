@@ -20,15 +20,14 @@ package org.apache.hadoop.mapred;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.io.PrintStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -39,25 +38,31 @@ import org.apache.hadoop.fs.LocalDirAllocator;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.IOUtils;
-import org.apache.hadoop.io.Text;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.mapreduce.MRConfig;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TaskType;
+import org.apache.hadoop.mapreduce.counters.Limits;
 import org.apache.hadoop.mapreduce.filecache.DistributedCache;
 import org.apache.hadoop.mapreduce.security.TokenCache;
 import org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier;
 import org.apache.hadoop.mapreduce.security.token.JobTokenSecretManager;
+import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
+import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
-import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
+import org.apache.hadoop.util.ShutdownHookManager;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.yarn.YarnUncaughtExceptionHandler;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
-import org.apache.log4j.LogManager;
+import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.util.ConverterUtils;
 
 /**
  * The main() for MapReduce task processes.
@@ -69,15 +74,18 @@ class YarnChild {
   static volatile TaskAttemptID taskid = null;
 
   public static void main(String[] args) throws Throwable {
+    Thread.setDefaultUncaughtExceptionHandler(new YarnUncaughtExceptionHandler());
     LOG.debug("Child starting");
 
-    final JobConf defaultConf = new JobConf();
-    defaultConf.addResource(MRJobConfig.JOB_CONF_FILE);
-    UserGroupInformation.setConfiguration(defaultConf);
+    final JobConf job = new JobConf(MRJobConfig.JOB_CONF_FILE);
+    // Initing with our JobConf allows us to avoid loading confs twice
+    Limits.init(job);
+    UserGroupInformation.setConfiguration(job);
 
     String host = args[0];
     int port = Integer.parseInt(args[1]);
-    final InetSocketAddress address = new InetSocketAddress(host, port);
+    final InetSocketAddress address =
+        NetUtils.createSocketAddrForHost(host, port);
     final TaskAttemptID firstTaskid = TaskAttemptID.forName(args[2]);
     int jvmIdInt = Integer.parseInt(args[3]);
     JVMId jvmId = new JVMId(firstTaskid.getJobID(),
@@ -87,18 +95,26 @@ class YarnChild {
     DefaultMetricsSystem.initialize(
         StringUtils.camelize(firstTaskid.getTaskType().name()) +"Task");
 
-    Token<JobTokenIdentifier> jt = loadCredentials(defaultConf, address);
+    // Security framework already loaded the tokens into current ugi
+    Credentials credentials =
+        UserGroupInformation.getCurrentUser().getCredentials();
+    LOG.info("Executing with tokens:");
+    for (Token<?> token: credentials.getAllTokens()) {
+      LOG.info(token);
+    }
 
     // Create TaskUmbilicalProtocol as actual task owner.
     UserGroupInformation taskOwner =
       UserGroupInformation.createRemoteUser(firstTaskid.getJobID().toString());
+    Token<JobTokenIdentifier> jt = TokenCache.getJobToken(credentials);
+    SecurityUtil.setTokenService(jt, address);
     taskOwner.addToken(jt);
     final TaskUmbilicalProtocol umbilical =
       taskOwner.doAs(new PrivilegedExceptionAction<TaskUmbilicalProtocol>() {
       @Override
       public TaskUmbilicalProtocol run() throws Exception {
         return (TaskUmbilicalProtocol)RPC.getProxy(TaskUmbilicalProtocol.class,
-            TaskUmbilicalProtocol.versionID, address, defaultConf);
+            TaskUmbilicalProtocol.versionID, address, job);
       }
     });
 
@@ -107,6 +123,7 @@ class YarnChild {
     LOG.debug("PID: " + System.getenv().get("JVM_PID"));
     Task task = null;
     UserGroupInformation childUGI = null;
+    ScheduledExecutorService logSyncer = null;
 
     try {
       int idleLoopCount = 0;
@@ -127,17 +144,25 @@ class YarnChild {
       YarnChild.taskid = task.getTaskID();
 
       // Create the job-conf and set credentials
-      final JobConf job =
-        configureTask(task, defaultConf.getCredentials(), jt);
+      configureTask(job, task, credentials, jt);
+
+      // log the system properties
+      String systemPropsToLog = MRApps.getSystemPropertiesToLog(job);
+      if (systemPropsToLog != null) {
+        LOG.info(systemPropsToLog);
+      }
 
       // Initiate Java VM metrics
       JvmMetrics.initSingleton(jvmId.toString(), job.getSessionId());
       childUGI = UserGroupInformation.createRemoteUser(System
           .getenv(ApplicationConstants.Environment.USER.toString()));
       // Add tokens to new user so that it may execute its task correctly.
-      for(Token<?> token : UserGroupInformation.getCurrentUser().getTokens()) {
-        childUGI.addToken(token);
-      }
+      childUGI.addCredentials(credentials);
+
+      // set job classloader if configured before invoking the task
+      MRApps.setJobClassLoader(job);
+
+      logSyncer = TaskLog.createLogSyncer();
 
       // Create a final reference to the task for the doAs block
       final Task taskFinal = task;
@@ -152,7 +177,9 @@ class YarnChild {
       });
     } catch (FSError e) {
       LOG.fatal("FSError from child", e);
-      umbilical.fsError(taskid, e.getMessage());
+      if (!ShutdownHookManager.get().isShutdownInProgress()) {
+        umbilical.fsError(taskid, e.getMessage());
+      }
     } catch (Exception exception) {
       LOG.warn("Exception running child : "
           + StringUtils.stringifyException(exception));
@@ -176,54 +203,29 @@ class YarnChild {
         LOG.info("Exception cleaning up: " + StringUtils.stringifyException(e));
       }
       // Report back any failures, for diagnostic purposes
-      ByteArrayOutputStream baos = new ByteArrayOutputStream();
-      exception.printStackTrace(new PrintStream(baos));
       if (taskid != null) {
-        umbilical.fatalError(taskid, baos.toString());
+        if (!ShutdownHookManager.get().isShutdownInProgress()) {
+          umbilical.fatalError(taskid,
+              StringUtils.stringifyException(exception));
+        }
       }
     } catch (Throwable throwable) {
       LOG.fatal("Error running child : "
     	        + StringUtils.stringifyException(throwable));
       if (taskid != null) {
-        Throwable tCause = throwable.getCause();
-        String cause = tCause == null
-                                 ? throwable.getMessage()
-                                 : StringUtils.stringifyException(tCause);
-        umbilical.fatalError(taskid, cause);
+        if (!ShutdownHookManager.get().isShutdownInProgress()) {
+          Throwable tCause = throwable.getCause();
+          String cause =
+              tCause == null ? throwable.getMessage() : StringUtils
+                  .stringifyException(tCause);
+          umbilical.fatalError(taskid, cause);
+        }
       }
     } finally {
       RPC.stopProxy(umbilical);
       DefaultMetricsSystem.shutdown();
-      // Shutting down log4j of the child-vm...
-      // This assumes that on return from Task.run()
-      // there is no more logging done.
-      LogManager.shutdown();
+      TaskLog.syncLogsShutdown(logSyncer);
     }
-  }
-
-  private static Token<JobTokenIdentifier> loadCredentials(JobConf conf,
-      InetSocketAddress address) throws IOException {
-    //load token cache storage
-    String tokenFileLocation =
-        System.getenv(ApplicationConstants.CONTAINER_TOKEN_FILE_ENV_NAME);
-    String jobTokenFile =
-        new Path(tokenFileLocation).makeQualified(FileSystem.getLocal(conf))
-            .toUri().getPath();
-    Credentials credentials =
-      TokenCache.loadTokens(jobTokenFile, conf);
-    LOG.debug("loading token. # keys =" +credentials.numberOfSecretKeys() +
-        "; from file=" + jobTokenFile);
-    Token<JobTokenIdentifier> jt = TokenCache.getJobToken(credentials);
-    jt.setService(new Text(address.getAddress().getHostAddress() + ":"
-        + address.getPort()));
-    UserGroupInformation current = UserGroupInformation.getCurrentUser();
-    current.addToken(jt);
-    for (Token<? extends TokenIdentifier> tok : credentials.getAllTokens()) {
-      current.addToken(tok);
-    }
-    // Set the credentials
-    conf.setCredentials(credentials);
-    return jt;
   }
 
   /**
@@ -233,7 +235,7 @@ class YarnChild {
    */
   private static void configureLocalDirs(Task task, JobConf job) throws IOException {
     String[] localSysDirs = StringUtils.getTrimmedStrings(
-        System.getenv(ApplicationConstants.LOCAL_DIR_ENV));
+        System.getenv(Environment.LOCAL_DIRS.name()));
     job.setStrings(MRConfig.LOCAL_DIR, localSysDirs);
     LOG.info(MRConfig.LOCAL_DIR + " for child: " + job.get(MRConfig.LOCAL_DIR));
     LocalDirAllocator lDirAlloc = new LocalDirAllocator(MRConfig.LOCAL_DIR);
@@ -268,25 +270,34 @@ class YarnChild {
     job.set(MRJobConfig.JOB_LOCAL_DIR,workDir.toString());
   }
 
-  private static JobConf configureTask(Task task, Credentials credentials,
-      Token<JobTokenIdentifier> jt) throws IOException {
-    final JobConf job = new JobConf(MRJobConfig.JOB_CONF_FILE);
+  private static void configureTask(JobConf job, Task task,
+      Credentials credentials, Token<JobTokenIdentifier> jt) throws IOException {
     job.setCredentials(credentials);
     
-    String appAttemptIdEnv = System
-        .getenv(MRJobConfig.APPLICATION_ATTEMPT_ID_ENV);
-    LOG.debug("APPLICATION_ATTEMPT_ID: " + appAttemptIdEnv);
+    ApplicationAttemptId appAttemptId =
+        ConverterUtils.toContainerId(
+            System.getenv(Environment.CONTAINER_ID.name()))
+            .getApplicationAttemptId();
+    LOG.debug("APPLICATION_ATTEMPT_ID: " + appAttemptId);
     // Set it in conf, so as to be able to be used the the OutputCommitter.
-    job.setInt(MRJobConfig.APPLICATION_ATTEMPT_ID, Integer
-        .parseInt(appAttemptIdEnv));
+    job.setInt(MRJobConfig.APPLICATION_ATTEMPT_ID,
+        appAttemptId.getAttemptId());
 
     // set tcp nodelay
     job.setBoolean("ipc.client.tcpnodelay", true);
     job.setClass(MRConfig.TASK_LOCAL_OUTPUT_CLASS,
         YarnOutputFiles.class, MapOutputFile.class);
-    // set the jobTokenFile into task
+    // set the jobToken and shuffle secrets into task
     task.setJobTokenSecret(
         JobTokenSecretManager.createSecretKey(jt.getPassword()));
+    byte[] shuffleSecret = TokenCache.getShuffleSecretKey(credentials);
+    if (shuffleSecret == null) {
+      LOG.warn("Shuffle secret missing from task credentials."
+          + " Using job token secret as shuffle secret.");
+      shuffleSecret = jt.getPassword();
+    }
+    task.setShuffleSecret(
+        JobTokenSecretManager.createSecretKey(shuffleSecret));
 
     // setup the child's MRConfig.LOCAL_DIR.
     configureLocalDirs(task, job);
@@ -304,7 +315,6 @@ class YarnChild {
     writeLocalJobFile(localTaskFile, job);
     task.setJobFile(localTaskFile.toString());
     task.setConf(job);
-    return job;
   }
 
   /**

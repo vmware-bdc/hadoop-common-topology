@@ -117,7 +117,7 @@ public class HadoopArchives implements Tool {
     // will when running the mapreduce job.
     String testJar = System.getProperty(TEST_HADOOP_ARCHIVES_JAR_PATH, null);
     if (testJar != null) {
-      ((JobConf)conf).setJar(testJar);
+      this.conf.setJar(testJar);
     }
   }
 
@@ -338,7 +338,7 @@ public class HadoopArchives implements Tool {
    * directories to
    * @param paths the source paths provided by the user. They
    * are glob free and have full path (not relative paths)
-   * @param parentPath the parent path that you wnat the archives
+   * @param parentPath the parent path that you want the archives
    * to be relative to. example - /home/user/dir1 can be archived with
    * parent as /home or /home/user.
    * @throws IOException
@@ -613,7 +613,7 @@ public class HadoopArchives implements Tool {
           destFs.delete(tmpOutput, false);
         } 
         partStream = destFs.create(tmpOutput, false, conf.getInt("io.file.buffer.size", 4096), 
-            destFs.getDefaultReplication(), blockSize);
+            destFs.getDefaultReplication(tmpOutput), blockSize);
       } catch(IOException ie) {
         throw new RuntimeException("Unable to open output file " + tmpOutput, ie);
       }

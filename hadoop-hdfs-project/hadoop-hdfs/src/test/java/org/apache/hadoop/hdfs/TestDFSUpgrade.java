@@ -19,6 +19,13 @@ package org.apache.hadoop.hdfs;
 
 import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType.DATA_NODE;
 import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType.NAME_NODE;
+import static org.apache.hadoop.hdfs.server.namenode.NNStorage.getImageFileName;
+import static org.apache.hadoop.hdfs.server.namenode.NNStorage.getInProgressEditsFileName;
+import static org.apache.hadoop.test.GenericTestUtils.assertExists;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.File;
 import java.io.IOException;
@@ -27,14 +34,16 @@ import java.util.regex.Pattern;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.RollingUpgradeAction;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+import org.apache.hadoop.hdfs.server.common.InconsistentFSStateException;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
-import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.namenode.TestParallelImageWrite;
-import static org.apache.hadoop.hdfs.server.namenode.NNStorage.getInProgressEditsFileName;
-import static org.apache.hadoop.hdfs.server.namenode.NNStorage.getImageFileName;
-
-import static org.apache.hadoop.test.GenericTestUtils.assertExists;
+import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.util.StringUtils;
 import org.junit.BeforeClass;
 import org.junit.Ignore;
@@ -43,8 +52,6 @@ import org.junit.Test;
 import com.google.common.base.Charsets;
 import com.google.common.base.Joiner;
 
-import static org.junit.Assert.*;
-
 /**
 * This test ensures the appropriate response (successful or failure) from
 * the system when the system is upgraded under various storage state and
@@ -52,7 +59,9 @@ import static org.junit.Assert.*;
 */
 public class TestDFSUpgrade {
  
-  private static final int EXPECTED_TXID = 49;
+  // TODO: Avoid hard-coding expected_txid. The test should be more robust.
+  private static final int EXPECTED_TXID = 61;
+
   private static final Log LOG = LogFactory.getLog(TestDFSUpgrade.class.getName());
   private Configuration conf;
   private int testCounter = 0;
@@ -91,7 +100,7 @@ public class TestDFSUpgrade {
       
       File previous = new File(baseDir, "previous");
       assertExists(previous);
-      assertEquals(UpgradeUtilities.checksumContents(NAME_NODE, previous),
+      assertEquals(UpgradeUtilities.checksumContents(NAME_NODE, previous, false),
           UpgradeUtilities.checksumMasterNameNodeContents());
     }
   }
@@ -105,23 +114,25 @@ public class TestDFSUpgrade {
   void checkDataNode(String[] baseDirs, String bpid) throws IOException {
     for (int i = 0; i < baseDirs.length; i++) {
       File current = new File(baseDirs[i], "current/" + bpid + "/current");
-      assertEquals(UpgradeUtilities.checksumContents(DATA_NODE, current),
+      assertEquals(UpgradeUtilities.checksumContents(DATA_NODE, current, false),
         UpgradeUtilities.checksumMasterDataNodeContents());
       
       // block files are placed under <sd>/current/<bpid>/current/finalized
       File currentFinalized = 
         MiniDFSCluster.getFinalizedDir(new File(baseDirs[i]), bpid);
-      assertEquals(UpgradeUtilities.checksumContents(DATA_NODE, currentFinalized),
+      assertEquals(UpgradeUtilities.checksumContents(DATA_NODE,
+          currentFinalized, true),
           UpgradeUtilities.checksumMasterBlockPoolFinalizedContents());
       
       File previous = new File(baseDirs[i], "current/" + bpid + "/previous");
       assertTrue(previous.isDirectory());
-      assertEquals(UpgradeUtilities.checksumContents(DATA_NODE, previous),
+      assertEquals(UpgradeUtilities.checksumContents(DATA_NODE, previous, false),
           UpgradeUtilities.checksumMasterDataNodeContents());
       
       File previousFinalized = 
         new File(baseDirs[i], "current/" + bpid + "/previous"+"/finalized");
-      assertEquals(UpgradeUtilities.checksumContents(DATA_NODE, previousFinalized),
+      assertEquals(UpgradeUtilities.checksumContents(DATA_NODE,
+          previousFinalized, true),
           UpgradeUtilities.checksumMasterBlockPoolFinalizedContents());
       
     }
@@ -209,7 +220,7 @@ public class TestDFSUpgrade {
    * This test attempts to upgrade the NameNode and DataNode under
    * a number of valid and invalid conditions.
    */
-  @Test
+  @Test(timeout = 60000)
   public void testUpgrade() throws Exception {
     File[] baseDirs;
     StorageInfo storageInfo = null;
@@ -222,6 +233,19 @@ public class TestDFSUpgrade {
       log("Normal NameNode upgrade", numDirs);
       UpgradeUtilities.createNameNodeStorageDirs(nameNodeDirs, "current");
       cluster = createCluster();
+
+      // make sure that rolling upgrade cannot be started
+      try {
+        final DistributedFileSystem dfs = cluster.getFileSystem();
+        dfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+        dfs.rollingUpgrade(RollingUpgradeAction.PREPARE);
+        fail();
+      } catch(RemoteException re) {
+        assertEquals(InconsistentFSStateException.class.getName(),
+            re.getClassName());
+        LOG.info("The exception is expected.", re);
+      }
+
       checkNameNode(nameNodeDirs, EXPECTED_TXID);
       if (numDirs > 1)
         TestParallelImageWrite.checkImages(cluster.getNamesystem(), numDirs);
@@ -259,10 +283,10 @@ public class TestDFSUpgrade {
       UpgradeUtilities.createNameNodeStorageDirs(nameNodeDirs, "current");
       cluster = createCluster();
       baseDirs = UpgradeUtilities.createDataNodeStorageDirs(dataNodeDirs, "current");
-      storageInfo = new StorageInfo(Integer.MIN_VALUE, 
+      storageInfo = new StorageInfo(Integer.MIN_VALUE,
           UpgradeUtilities.getCurrentNamespaceID(cluster),
           UpgradeUtilities.getCurrentClusterID(cluster),
-          UpgradeUtilities.getCurrentFsscTime(cluster));
+          UpgradeUtilities.getCurrentFsscTime(cluster), NodeType.DATA_NODE);
       
       UpgradeUtilities.createDataNodeVersionFile(baseDirs, storageInfo,
           UpgradeUtilities.getCurrentBlockPoolID(cluster));
@@ -277,9 +301,10 @@ public class TestDFSUpgrade {
       UpgradeUtilities.createNameNodeStorageDirs(nameNodeDirs, "current");
       cluster = createCluster();
       baseDirs = UpgradeUtilities.createDataNodeStorageDirs(dataNodeDirs, "current");
-      storageInfo = new StorageInfo(UpgradeUtilities.getCurrentLayoutVersion(), 
+      storageInfo = new StorageInfo(HdfsConstants.DATANODE_LAYOUT_VERSION,
           UpgradeUtilities.getCurrentNamespaceID(cluster),
-          UpgradeUtilities.getCurrentClusterID(cluster), Long.MAX_VALUE);
+          UpgradeUtilities.getCurrentClusterID(cluster), Long.MAX_VALUE,
+          NodeType.DATA_NODE);
           
       UpgradeUtilities.createDataNodeVersionFile(baseDirs, storageInfo, 
           UpgradeUtilities.getCurrentBlockPoolID(cluster));
@@ -318,7 +343,7 @@ public class TestDFSUpgrade {
       storageInfo = new StorageInfo(Storage.LAST_UPGRADABLE_LAYOUT_VERSION + 1, 
           UpgradeUtilities.getCurrentNamespaceID(null),
           UpgradeUtilities.getCurrentClusterID(null),
-          UpgradeUtilities.getCurrentFsscTime(null));
+          UpgradeUtilities.getCurrentFsscTime(null), NodeType.NAME_NODE);
       
       UpgradeUtilities.createNameNodeVersionFile(conf, baseDirs, storageInfo,
           UpgradeUtilities.getCurrentBlockPoolID(cluster));
@@ -331,7 +356,7 @@ public class TestDFSUpgrade {
       storageInfo = new StorageInfo(Integer.MIN_VALUE, 
           UpgradeUtilities.getCurrentNamespaceID(null),
           UpgradeUtilities.getCurrentClusterID(null),
-          UpgradeUtilities.getCurrentFsscTime(null));
+          UpgradeUtilities.getCurrentFsscTime(null), NodeType.NAME_NODE);
       
       UpgradeUtilities.createNameNodeVersionFile(conf, baseDirs, storageInfo,
           UpgradeUtilities.getCurrentBlockPoolID(cluster));
@@ -351,6 +376,19 @@ public class TestDFSUpgrade {
       log("Normal NameNode upgrade", numDirs);
       UpgradeUtilities.createNameNodeStorageDirs(nameNodeDirs, "current");
       cluster = createCluster();
+
+      // make sure that rolling upgrade cannot be started
+      try {
+        final DistributedFileSystem dfs = cluster.getFileSystem();
+        dfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+        dfs.rollingUpgrade(RollingUpgradeAction.PREPARE);
+        fail();
+      } catch(RemoteException re) {
+        assertEquals(InconsistentFSStateException.class.getName(),
+            re.getClassName());
+        LOG.info("The exception is expected.", re);
+      }
+
       checkNameNode(nameNodeDirs, EXPECTED_TXID);
       TestParallelImageWrite.checkImages(cluster.getNamesystem(), numDirs);
       cluster.shutdown();

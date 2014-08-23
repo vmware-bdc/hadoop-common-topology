@@ -48,10 +48,15 @@ public abstract class NativeS3FileSystemContractBaseTest
     store.purge("test");
     super.tearDown();
   }
-  
+
+  public void testCanonicalName() throws Exception {
+    assertNull("s3n doesn't support security token and shouldn't have canonical name",
+               fs.getCanonicalServiceName());
+  }
+
   public void testListStatusForRoot() throws Exception {
     FileStatus[] paths = fs.listStatus(path("/"));
-    assertEquals(0, paths.length);
+    assertEquals("Root directory is not empty; ", 0, paths.length);
     
     Path testDir = path("/test");
     assertTrue(fs.mkdirs(testDir));
@@ -60,7 +65,7 @@ public abstract class NativeS3FileSystemContractBaseTest
     assertEquals(1, paths.length);
     assertEquals(path("/test"), paths[0].getPath());
   }
-  
+
   public void testNoTrailingBackslashOnBucket() throws Exception {
     assertTrue(fs.getFileStatus(new Path(fs.getUri().toString())).isDirectory());
   }
@@ -141,11 +146,11 @@ public abstract class NativeS3FileSystemContractBaseTest
   public void testBlockSize() throws Exception {
     Path file = path("/test/hadoop/file");
     createFile(file);
-    assertEquals("Default block size", fs.getDefaultBlockSize(),
+    assertEquals("Default block size", fs.getDefaultBlockSize(file),
     fs.getFileStatus(file).getBlockSize());
 
     // Block size is determined at read time
-    long newBlockSize = fs.getDefaultBlockSize() * 2;
+    long newBlockSize = fs.getDefaultBlockSize(file) * 2;
     fs.getConf().setLong("fs.s3n.block.size", newBlockSize);
     assertEquals("Double default block size", newBlockSize,
     fs.getFileStatus(file).getBlockSize());

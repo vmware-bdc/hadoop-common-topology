@@ -30,7 +30,6 @@ import org.apache.hadoop.mapreduce.v2.api.records.TaskType;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.util.BuilderUtils;
 import org.apache.hadoop.yarn.util.Records;
 
 public class MRBuilderUtils {
@@ -43,7 +42,7 @@ public class MRBuilderUtils {
   }
 
   public static JobId newJobId(long clusterTs, int appIdInt, int id) {
-    ApplicationId appId = BuilderUtils.newApplicationId(clusterTs, appIdInt);
+    ApplicationId appId = ApplicationId.newInstance(clusterTs, appIdInt);
     return MRBuilderUtils.newJobId(appId, id);
   }
 
@@ -67,7 +66,7 @@ public class MRBuilderUtils {
       String userName, JobState state, long submitTime, long startTime, long finishTime,
       float setupProgress, float mapProgress, float reduceProgress,
       float cleanupProgress, String jobFile, List<AMInfo> amInfos,
-      boolean isUber) {
+      boolean isUber, String diagnostics) {
     JobReport report = Records.newRecord(JobReport.class);
     report.setJobId(jobId);
     report.setJobName(jobName);
@@ -83,6 +82,7 @@ public class MRBuilderUtils {
     report.setJobFile(jobFile);
     report.setAMInfos(amInfos);
     report.setIsUber(isUber);
+    report.setDiagnostics(diagnostics);
     return report;
   }
 

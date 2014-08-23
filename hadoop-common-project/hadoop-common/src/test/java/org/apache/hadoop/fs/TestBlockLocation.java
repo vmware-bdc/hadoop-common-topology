@@ -17,62 +17,92 @@
  */
 package org.apache.hadoop.fs;
 
-import java.io.ByteArrayInputStream;
-import java.io.DataInput;
-import java.io.DataInputStream;
-import java.io.IOException;
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 
-import junit.framework.TestCase;
+import org.junit.Test;
 
-import org.apache.hadoop.io.DataOutputBuffer;
+public class TestBlockLocation {
 
-public class TestBlockLocation extends TestCase {
-  // Verify fix of bug identified in HADOOP-6004
-  public void testDeserialization() throws IOException {
-    // Create a test BlockLocation
-    String[] names = {"one", "two" };
-    String[] hosts = {"three", "four" };
-    String[] topologyPaths = {"five", "six"};
-    long offset = 25l;
-    long length = 55l;
-    
-    BlockLocation bl = new BlockLocation(names, hosts, topologyPaths, 
-                                         offset, length);
-    
-    DataOutputBuffer dob = new DataOutputBuffer();
-    
-    // Serialize it
-    try {
-      bl.write(dob);
-    } catch (IOException e) {
-      fail("Unable to serialize data: " + e.getMessage());
-    }
+  private static final String[] EMPTY_STR_ARRAY = new String[0];
 
-    byte[] bytes = dob.getData();
-    DataInput da = new DataInputStream(new ByteArrayInputStream(bytes));
-
-    // Try to re-create the BlockLocation the same way as is done during
-    // deserialization
-    BlockLocation bl2 = new BlockLocation();
-    
-    try {
-      bl2.readFields(da);
-    } catch (IOException e) {
-      fail("Unable to deserialize BlockLocation: " + e.getMessage());
-    }
-    
-    // Check that we got back what we started with
-    verifyDeserialization(bl2.getHosts(), hosts);
-    verifyDeserialization(bl2.getNames(), names);
-    verifyDeserialization(bl2.getTopologyPaths(), topologyPaths);
-    assertEquals(bl2.getOffset(), offset);
-    assertEquals(bl2.getLength(), length);
+  private static void checkBlockLocation(final BlockLocation loc)
+      throws Exception {
+    checkBlockLocation(loc, 0, 0, false);
   }
 
-  private void verifyDeserialization(String[] ar1, String[] ar2) {
-    assertEquals(ar1.length, ar2.length);
-    
-    for(int i = 0; i < ar1.length; i++)
-      assertEquals(ar1[i], ar2[i]);
+  private static void checkBlockLocation(final BlockLocation loc,
+      final long offset, final long length, final boolean corrupt)
+      throws Exception {
+    checkBlockLocation(loc, EMPTY_STR_ARRAY, EMPTY_STR_ARRAY, EMPTY_STR_ARRAY,
+        EMPTY_STR_ARRAY, offset, length, corrupt);
+  }
+
+  private static void checkBlockLocation(final BlockLocation loc,
+      String[] names, String[] hosts, String[] cachedHosts,
+      String[] topologyPaths, final long offset, final long length,
+      final boolean corrupt) throws Exception {
+    assertNotNull(loc.getHosts());
+    assertNotNull(loc.getCachedHosts());
+    assertNotNull(loc.getNames());
+    assertNotNull(loc.getTopologyPaths());
+
+    assertArrayEquals(hosts, loc.getHosts());
+    assertArrayEquals(cachedHosts, loc.getCachedHosts());
+    assertArrayEquals(names, loc.getNames());
+    assertArrayEquals(topologyPaths, loc.getTopologyPaths());
+
+    assertEquals(offset, loc.getOffset());
+    assertEquals(length, loc.getLength());
+    assertEquals(corrupt, loc.isCorrupt());
+  }
+
+  /**
+   * Call all the constructors and verify the delegation is working properly
+   */
+  @Test(timeout = 5000)
+  public void testBlockLocationConstructors() throws Exception {
+    //
+    BlockLocation loc;
+    loc = new BlockLocation();
+    checkBlockLocation(loc);
+    loc = new BlockLocation(null, null, 1, 2);
+    checkBlockLocation(loc, 1, 2, false);
+    loc = new BlockLocation(null, null, null, 1, 2);
+    checkBlockLocation(loc, 1, 2, false);
+    loc = new BlockLocation(null, null, null, 1, 2, true);
+    checkBlockLocation(loc, 1, 2, true);
+    loc = new BlockLocation(null, null, null, null, 1, 2, true);
+    checkBlockLocation(loc, 1, 2, true);
+  }
+
+  /**
+   * Call each of the setters and verify
+   */
+  @Test(timeout = 5000)
+  public void testBlockLocationSetters() throws Exception {
+    BlockLocation loc;
+    loc = new BlockLocation();
+    // Test that null sets the empty array
+    loc.setHosts(null);
+    loc.setCachedHosts(null);
+    loc.setNames(null);
+    loc.setTopologyPaths(null);
+    checkBlockLocation(loc);
+    // Test that not-null gets set properly
+    String[] names = new String[] { "name" };
+    String[] hosts = new String[] { "host" };
+    String[] cachedHosts = new String[] { "cachedHost" };
+    String[] topologyPaths = new String[] { "path" };
+    loc.setNames(names);
+    loc.setHosts(hosts);
+    loc.setCachedHosts(cachedHosts);
+    loc.setTopologyPaths(topologyPaths);
+    loc.setOffset(1);
+    loc.setLength(2);
+    loc.setCorrupt(true);
+    checkBlockLocation(loc, names, hosts, cachedHosts, topologyPaths, 1, 2,
+        true);
   }
 }

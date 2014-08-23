@@ -25,25 +25,27 @@ import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Enumeration;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.ipc.ProtocolSignature;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.ipc.VersionedProtocol;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
+import org.apache.hadoop.security.authorize.DefaultImpersonationProvider;
 import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenInfo;
+import org.junit.Before;
 import org.junit.Test;
-import org.apache.hadoop.ipc.TestSaslRPC;
 import org.apache.hadoop.ipc.TestSaslRPC.TestTokenSecretManager;
 import org.apache.hadoop.ipc.TestSaslRPC.TestTokenIdentifier;
 import org.apache.hadoop.ipc.TestSaslRPC.TestTokenSelector;
 import org.apache.commons.logging.*;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 
 /**
  *
@@ -58,7 +60,7 @@ public class TestDoAsEffectiveUser {
       GROUP2_NAME };
   private static final String ADDRESS = "0.0.0.0";
   private TestProtocol proxy;
-  private static Configuration masterConf = new Configuration();
+  private static final Configuration masterConf = new Configuration();
   
   
   public static final Log LOG = LogFactory
@@ -66,11 +68,16 @@ public class TestDoAsEffectiveUser {
   
   
   static {
-    masterConf.set("hadoop.security.auth_to_local",
+    masterConf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTH_TO_LOCAL,
         "RULE:[2:$1@$0](.*@HADOOP.APACHE.ORG)s/@.*//" +
         "RULE:[1:$1@$0](.*@HADOOP.APACHE.ORG)s/@.*//"
         + "DEFAULT");
+  }
+
+  @Before
+  public void setMasterConf() throws IOException {
     UserGroupInformation.setConfiguration(masterConf);
+    refreshConf(masterConf);
   }
 
   private void configureSuperUserIPAddresses(Configuration conf,
@@ -94,7 +101,8 @@ public class TestDoAsEffectiveUser {
     builder.append("127.0.1.1,");
     builder.append(InetAddress.getLocalHost().getCanonicalHostName());
     LOG.info("Local Ip addresses: "+builder.toString());
-    conf.setStrings(ProxyUsers.getProxySuperuserIpConfKey(superUserShortName),
+    conf.setStrings(DefaultImpersonationProvider.getTestProvider().
+            getProxySuperuserIpConfKey(superUserShortName),
         builder.toString());
   }
   
@@ -112,6 +120,7 @@ public class TestDoAsEffectiveUser {
         PROXY_USER_NAME, realUserUgi);
     UserGroupInformation curUGI = proxyUserUgi
         .doAs(new PrivilegedExceptionAction<UserGroupInformation>() {
+          @Override
           public UserGroupInformation run() throws IOException {
             return UserGroupInformation.getCurrentUser();
           }
@@ -126,14 +135,22 @@ public class TestDoAsEffectiveUser {
     public static final long versionID = 1L;
 
     String aMethod() throws IOException;
+    String getServerRemoteUser() throws IOException;
   }
 
   public class TestImpl implements TestProtocol {
 
+    @Override
     public String aMethod() throws IOException {
       return UserGroupInformation.getCurrentUser().toString();
     }
 
+    @Override
+    public String getServerRemoteUser() throws IOException {
+      return Server.getRemoteUser().toString();
+    }
+    
+    @Override
     public long getProtocolVersion(String protocol, long clientVersion)
         throws IOException {
       return TestProtocol.versionID;
@@ -146,36 +163,43 @@ public class TestDoAsEffectiveUser {
     }
   }
 
-  @Test
+  private void checkRemoteUgi(final Server server,
+      final UserGroupInformation ugi, final Configuration conf)
+          throws Exception {
+    ugi.doAs(new PrivilegedExceptionAction<Void>() {
+      @Override
+      public Void run() throws IOException {
+        proxy = RPC.getProxy(
+            TestProtocol.class, TestProtocol.versionID,
+            NetUtils.getConnectAddress(server), conf);
+        Assert.assertEquals(ugi.toString(), proxy.aMethod());
+        Assert.assertEquals(ugi.toString(), proxy.getServerRemoteUser());
+        return null;
+      }
+    });    
+  }
+  
+  @Test(timeout=4000)
   public void testRealUserSetup() throws IOException {
     final Configuration conf = new Configuration();
-    conf.setStrings(ProxyUsers
-        .getProxySuperuserGroupConfKey(REAL_USER_SHORT_NAME), "group1");
+    conf.setStrings(DefaultImpersonationProvider.getTestProvider().
+        getProxySuperuserGroupConfKey(REAL_USER_SHORT_NAME), "group1");
     configureSuperUserIPAddresses(conf, REAL_USER_SHORT_NAME);
-    Server server = RPC.getServer(TestProtocol.class, new TestImpl(), ADDRESS,
-        0, 5, true, conf, null);
+    Server server = new RPC.Builder(conf).setProtocol(TestProtocol.class)
+        .setInstance(new TestImpl()).setBindAddress(ADDRESS).setPort(0)
+        .setNumHandlers(5).setVerbose(true).build();
 
     refreshConf(conf);
     try {
       server.start();
 
-      final InetSocketAddress addr = NetUtils.getConnectAddress(server);
-
       UserGroupInformation realUserUgi = UserGroupInformation
           .createRemoteUser(REAL_USER_NAME);
+      checkRemoteUgi(server, realUserUgi, conf);
+      
       UserGroupInformation proxyUserUgi = UserGroupInformation.createProxyUserForTesting(
           PROXY_USER_NAME, realUserUgi, GROUP_NAMES);
-      String retVal = proxyUserUgi
-          .doAs(new PrivilegedExceptionAction<String>() {
-            public String run() throws IOException {
-              proxy = RPC.getProxy(TestProtocol.class,
-                  TestProtocol.versionID, addr, conf);
-              String ret = proxy.aMethod();
-              return ret;
-            }
-          });
-
-      Assert.assertEquals(PROXY_USER_NAME + " (auth:SIMPLE) via " + REAL_USER_NAME + " (auth:SIMPLE)", retVal);
+      checkRemoteUgi(server, proxyUserUgi, conf);
     } catch (Exception e) {
       e.printStackTrace();
       Assert.fail();
@@ -187,37 +211,28 @@ public class TestDoAsEffectiveUser {
     }
   }
 
-  @Test
+  @Test(timeout=4000)
   public void testRealUserAuthorizationSuccess() throws IOException {
     final Configuration conf = new Configuration();
     configureSuperUserIPAddresses(conf, REAL_USER_SHORT_NAME);
-    conf.setStrings(ProxyUsers.getProxySuperuserGroupConfKey(REAL_USER_SHORT_NAME),
+    conf.setStrings(DefaultImpersonationProvider.getTestProvider().
+            getProxySuperuserGroupConfKey(REAL_USER_SHORT_NAME),
         "group1");
-    Server server = RPC.getServer(TestProtocol.class, new TestImpl(), ADDRESS,
-        0, 2, false, conf, null);
+    Server server = new RPC.Builder(conf).setProtocol(TestProtocol.class)
+        .setInstance(new TestImpl()).setBindAddress(ADDRESS).setPort(0)
+        .setNumHandlers(2).setVerbose(false).build();
 
     refreshConf(conf);
     try {
       server.start();
 
-      final InetSocketAddress addr = NetUtils.getConnectAddress(server);
-
       UserGroupInformation realUserUgi = UserGroupInformation
           .createRemoteUser(REAL_USER_NAME);
+      checkRemoteUgi(server, realUserUgi, conf);
 
       UserGroupInformation proxyUserUgi = UserGroupInformation
           .createProxyUserForTesting(PROXY_USER_NAME, realUserUgi, GROUP_NAMES);
-      String retVal = proxyUserUgi
-          .doAs(new PrivilegedExceptionAction<String>() {
-            public String run() throws IOException {
-              proxy = RPC.getProxy(TestProtocol.class,
-                  TestProtocol.versionID, addr, conf);
-              String ret = proxy.aMethod();
-              return ret;
-            }
-          });
-
-      Assert.assertEquals(PROXY_USER_NAME + " (auth:SIMPLE) via " + REAL_USER_NAME + " (auth:SIMPLE)", retVal);
+      checkRemoteUgi(server, proxyUserUgi, conf);
     } catch (Exception e) {
       e.printStackTrace();
       Assert.fail();
@@ -235,12 +250,15 @@ public class TestDoAsEffectiveUser {
   @Test
   public void testRealUserIPAuthorizationFailure() throws IOException {
     final Configuration conf = new Configuration();
-    conf.setStrings(ProxyUsers.getProxySuperuserIpConfKey(REAL_USER_SHORT_NAME),
+    conf.setStrings(DefaultImpersonationProvider.getTestProvider().
+            getProxySuperuserIpConfKey(REAL_USER_SHORT_NAME),
         "20.20.20.20"); //Authorized IP address
-    conf.setStrings(ProxyUsers.getProxySuperuserGroupConfKey(REAL_USER_SHORT_NAME),
+    conf.setStrings(DefaultImpersonationProvider.getTestProvider().
+            getProxySuperuserGroupConfKey(REAL_USER_SHORT_NAME),
         "group1");
-    Server server = RPC.getServer(TestProtocol.class, new TestImpl(), ADDRESS,
-        0, 2, false, conf, null);
+    Server server = new RPC.Builder(conf).setProtocol(TestProtocol.class)
+        .setInstance(new TestImpl()).setBindAddress(ADDRESS).setPort(0)
+        .setNumHandlers(2).setVerbose(false).build();
 
     refreshConf(conf);
     
@@ -256,6 +274,7 @@ public class TestDoAsEffectiveUser {
           .createProxyUserForTesting(PROXY_USER_NAME, realUserUgi, GROUP_NAMES);
       String retVal = proxyUserUgi
           .doAs(new PrivilegedExceptionAction<String>() {
+            @Override
             public String run() throws IOException {
               proxy = RPC.getProxy(TestProtocol.class,
                   TestProtocol.versionID, addr, conf);
@@ -278,10 +297,13 @@ public class TestDoAsEffectiveUser {
   @Test
   public void testRealUserIPNotSpecified() throws IOException {
     final Configuration conf = new Configuration();
-    conf.setStrings(ProxyUsers
-        .getProxySuperuserGroupConfKey(REAL_USER_SHORT_NAME), "group1");
-    Server server = RPC.getServer(TestProtocol.class, new TestImpl(), ADDRESS,
-        0, 2, false, conf, null);
+    conf.setStrings(DefaultImpersonationProvider.getTestProvider().
+        getProxySuperuserGroupConfKey(REAL_USER_SHORT_NAME), "group1");
+    Server server = new RPC.Builder(conf).setProtocol(TestProtocol.class)
+        .setInstance(new TestImpl()).setBindAddress(ADDRESS).setPort(0)
+        .setNumHandlers(2).setVerbose(false).build();
+
+    refreshConf(conf);
 
     try {
       server.start();
@@ -295,6 +317,7 @@ public class TestDoAsEffectiveUser {
           .createProxyUserForTesting(PROXY_USER_NAME, realUserUgi, GROUP_NAMES);
       String retVal = proxyUserUgi
           .doAs(new PrivilegedExceptionAction<String>() {
+            @Override
             public String run() throws IOException {
               proxy = RPC.getProxy(TestProtocol.class,
                   TestProtocol.versionID, addr, conf);
@@ -318,8 +341,9 @@ public class TestDoAsEffectiveUser {
   public void testRealUserGroupNotSpecified() throws IOException {
     final Configuration conf = new Configuration();
     configureSuperUserIPAddresses(conf, REAL_USER_SHORT_NAME);
-    Server server = RPC.getServer(TestProtocol.class, new TestImpl(), ADDRESS,
-        0, 2, false, conf, null);
+    Server server = new RPC.Builder(conf).setProtocol(TestProtocol.class)
+        .setInstance(new TestImpl()).setBindAddress(ADDRESS).setPort(0)
+        .setNumHandlers(2).setVerbose(false).build();
 
     try {
       server.start();
@@ -333,6 +357,7 @@ public class TestDoAsEffectiveUser {
           .createProxyUserForTesting(PROXY_USER_NAME, realUserUgi, GROUP_NAMES);
       String retVal = proxyUserUgi
           .doAs(new PrivilegedExceptionAction<String>() {
+            @Override
             public String run() throws IOException {
               proxy = (TestProtocol) RPC.getProxy(TestProtocol.class,
                   TestProtocol.versionID, addr, conf);
@@ -356,12 +381,15 @@ public class TestDoAsEffectiveUser {
   public void testRealUserGroupAuthorizationFailure() throws IOException {
     final Configuration conf = new Configuration();
     configureSuperUserIPAddresses(conf, REAL_USER_SHORT_NAME);
-    conf.setStrings(ProxyUsers.getProxySuperuserGroupConfKey(REAL_USER_SHORT_NAME),
+    conf.setStrings(DefaultImpersonationProvider.getTestProvider().
+            getProxySuperuserGroupConfKey(REAL_USER_SHORT_NAME),
         "group3");
-    Server server = RPC.getServer(TestProtocol.class, new TestImpl(), ADDRESS,
-        0, 2, false, conf, null);
-
+    Server server = new RPC.Builder(conf).setProtocol(TestProtocol.class)
+        .setInstance(new TestImpl()).setBindAddress(ADDRESS).setPort(0)
+        .setNumHandlers(2).setVerbose(false).build();
     
+    refreshConf(conf);
+
     try {
       server.start();
 
@@ -374,6 +402,7 @@ public class TestDoAsEffectiveUser {
           .createProxyUserForTesting(PROXY_USER_NAME, realUserUgi, GROUP_NAMES);
       String retVal = proxyUserUgi
           .doAs(new PrivilegedExceptionAction<String>() {
+            @Override
             public String run() throws IOException {
               proxy = RPC.getProxy(TestProtocol.class,
                   TestProtocol.versionID, addr, conf);
@@ -402,11 +431,11 @@ public class TestDoAsEffectiveUser {
   public void testProxyWithToken() throws Exception {
     final Configuration conf = new Configuration(masterConf);
     TestTokenSecretManager sm = new TestTokenSecretManager();
-    conf
-        .set(CommonConfigurationKeys.HADOOP_SECURITY_AUTHENTICATION, "kerberos");
+    SecurityUtil.setAuthenticationMethod(AuthenticationMethod.KERBEROS, conf);
     UserGroupInformation.setConfiguration(conf);
-    final Server server = RPC.getServer(TestProtocol.class, new TestImpl(),
-        ADDRESS, 0, 5, true, conf, sm);
+    final Server server = new RPC.Builder(conf).setProtocol(TestProtocol.class)
+        .setInstance(new TestImpl()).setBindAddress(ADDRESS).setPort(0)
+        .setNumHandlers(5).setVerbose(true).setSecretManager(sm).build();
 
     server.start();
 
@@ -456,11 +485,12 @@ public class TestDoAsEffectiveUser {
   public void testTokenBySuperUser() throws Exception {
     TestTokenSecretManager sm = new TestTokenSecretManager();
     final Configuration newConf = new Configuration(masterConf);
-    newConf.set(CommonConfigurationKeys.HADOOP_SECURITY_AUTHENTICATION,
-        "kerberos");
+    SecurityUtil.setAuthenticationMethod(AuthenticationMethod.KERBEROS, newConf);
     UserGroupInformation.setConfiguration(newConf);
-    final Server server = RPC.getServer(TestProtocol.class, new TestImpl(),
-        ADDRESS, 0, 5, true, newConf, sm);
+    final Server server = new RPC.Builder(newConf)
+        .setProtocol(TestProtocol.class).setInstance(new TestImpl())
+        .setBindAddress(ADDRESS).setPort(0).setNumHandlers(5).setVerbose(true)
+        .setSecretManager(sm).build();
 
     server.start();
 

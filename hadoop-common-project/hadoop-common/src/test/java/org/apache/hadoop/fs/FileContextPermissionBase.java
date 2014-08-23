@@ -23,7 +23,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.StringTokenizer;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -35,6 +35,7 @@ import org.junit.Test;
 
 import static org.apache.hadoop.fs.FileContextTestHelper.*;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 /**
  * <p>
@@ -68,16 +69,25 @@ public abstract class FileContextPermissionBase {
     }
   }
   
-  protected static FileContext fc;
+  protected FileContextTestHelper fileContextTestHelper;
+  protected FileContext fc;
 
+  protected FileContextTestHelper getFileContextHelper() {
+      return new FileContextTestHelper(); 
+  }
+  
+  protected abstract FileContext getFileContext() throws Exception;
+  
   @Before
   public void setUp() throws Exception {
-    fc.mkdir(getTestRootPath(fc), FileContext.DEFAULT_PERM, true);
+    fileContextTestHelper = getFileContextHelper();
+    fc = getFileContext();
+    fc.mkdir(fileContextTestHelper.getTestRootPath(fc), FileContext.DEFAULT_PERM, true);
   }
 
   @After
   public void tearDown() throws Exception {
-    fc.delete(getTestRootPath(fc), true);
+    fc.delete(fileContextTestHelper.getTestRootPath(fc), true);
   }
   
   private void cleanupFile(FileContext fc, Path name) throws IOException {
@@ -93,9 +103,9 @@ public abstract class FileContextPermissionBase {
       return;
     }
     String filename = "foo";
-    Path f = getTestRootPath(fc, filename);
-    createFile(fc, filename);
-    doFilePermissionCheck(FileContext.DEFAULT_PERM.applyUMask(fc.getUMask()),
+    Path f = fileContextTestHelper.getTestRootPath(fc, filename);
+    fileContextTestHelper.createFile(fc, filename);
+    doFilePermissionCheck(FileContext.FILE_DEFAULT_PERM.applyUMask(fc.getUMask()),
                         fc.getFileStatus(f).getPermission());
   }
   
@@ -108,7 +118,7 @@ public abstract class FileContextPermissionBase {
     }
 
     String filename = "foo";
-    Path f = getTestRootPath(fc, filename);
+    Path f = fileContextTestHelper.getTestRootPath(fc, filename);
     createFile(fc, f);
 
     try {
@@ -133,7 +143,7 @@ public abstract class FileContextPermissionBase {
     }
 
     String filename = "bar";
-    Path f = getTestRootPath(fc, filename);
+    Path f = fileContextTestHelper.getTestRootPath(fc, filename);
     createFile(fc, f);
     List<String> groups = null;
     try {
@@ -165,6 +175,13 @@ public abstract class FileContextPermissionBase {
         System.out.println("Not testing changing the group since user " +
                            "belongs to only one group.");
       }
+      
+      try {
+        fc.setOwner(f, null, null);
+        fail("Exception expected.");
+      } catch (IllegalArgumentException iae) {
+        // okay
+      }
     } 
     finally {cleanupFile(fc, f);}
   }
@@ -176,6 +193,7 @@ public abstract class FileContextPermissionBase {
         .createRemoteUser("otherUser");
     FileContext newFc = otherUser.doAs(new PrivilegedExceptionAction<FileContext>() {
 
+      @Override
       public FileContext run() throws Exception {
         FileContext newFc = FileContext.getFileContext();
         return newFc;
@@ -201,8 +219,6 @@ public abstract class FileContextPermissionBase {
   
   
   /*
-   * Some filesystem like HDFS ignore the "x" bit if the permission.
-   * Others like localFs does not.
    * Override the method below if the file system being tested masks our
    * certain bits for file masks.
    */

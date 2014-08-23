@@ -24,11 +24,14 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.HashMap;
+import java.util.HashSet;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.mapred.jobcontrol.Job;
 import org.apache.hadoop.mapreduce.lib.jobcontrol.ControlledJob.State;
 import org.apache.hadoop.util.StringUtils;
 
@@ -79,10 +82,8 @@ public class JobControl implements Runnable {
   private static List<ControlledJob> toList(
                    LinkedList<ControlledJob> jobs) {
     ArrayList<ControlledJob> retv = new ArrayList<ControlledJob>();
-    synchronized (jobs) {
-      for (ControlledJob job : jobs) {
-        retv.add(job);
-      }
+    for (ControlledJob job : jobs) {
+      retv.add(job);
     }
     return retv;
   }
@@ -121,11 +122,11 @@ public class JobControl implements Runnable {
   /**
    * @return the jobs in the success state
    */
-  public List<ControlledJob> getSuccessfulJobList() {
+  synchronized public List<ControlledJob> getSuccessfulJobList() {
     return toList(this.successfulJobs);
   }
 	
-  public List<ControlledJob> getFailedJobList() {
+  synchronized public List<ControlledJob> getFailedJobList() {
     return toList(this.failedJobs);
   }
 	
@@ -135,8 +136,8 @@ public class JobControl implements Runnable {
   }
 
   /**
-   * Add a new job.
-   * @param aJob the new job
+   * Add a new controlled job.
+   * @param aJob the new controlled job
    */
   synchronized public String addJob(ControlledJob aJob) {
     String id = this.getNextJobID();
@@ -145,7 +146,15 @@ public class JobControl implements Runnable {
     jobsInProgress.add(aJob);
     return id;	
   }
-	
+
+  /**
+   * Add a new job.
+   * @param aJob the new job
+   */
+  synchronized public String addJob(Job aJob) {
+    return addJob((ControlledJob) aJob);
+  }
+
   /**
    * Add a collection of jobs
    * 
@@ -202,6 +211,9 @@ public class JobControl implements Runnable {
    *  	Submit the jobs in ready state
    */
   public void run() {
+    if (isCircular(jobsInProgress)) {
+      throw new IllegalArgumentException("job control has circular dependency");
+    }
     try {
       this.runnerState = ThreadState.RUNNING;
       while (true) {
@@ -280,5 +292,65 @@ public class JobControl implements Runnable {
         it.remove();
       }
     }
+  }
+
+ /**
+   * Uses topological sorting algorithm for finding circular dependency
+   */
+  private boolean isCircular(final List<ControlledJob> jobList) {
+    boolean cyclePresent = false;
+    HashSet<ControlledJob> SourceSet = new HashSet<ControlledJob>();
+    HashMap<ControlledJob, List<ControlledJob>> processedMap =
+	new HashMap<ControlledJob, List<ControlledJob>>();
+    for (ControlledJob n : jobList) {
+      processedMap.put(n, new ArrayList<ControlledJob>());
+    }
+    for (ControlledJob n : jobList) {
+      if (!hasInComingEdge(n, jobList, processedMap)) {
+	SourceSet.add(n);
+      }
+    }
+    while (!SourceSet.isEmpty()) {
+      ControlledJob controlledJob = SourceSet.iterator().next();
+      SourceSet.remove(controlledJob);
+      if (controlledJob.getDependentJobs() != null) {
+	for (int i = 0; i < controlledJob.getDependentJobs().size(); i++) {
+	  ControlledJob depenControlledJob =
+	      controlledJob.getDependentJobs().get(i);
+	  processedMap.get(controlledJob).add(depenControlledJob);
+	  if (!hasInComingEdge(controlledJob, jobList, processedMap)) {
+	    SourceSet.add(depenControlledJob);
+	  }
+	}
+      }
+    }
+
+    for (ControlledJob controlledJob : jobList) {
+      if (controlledJob.getDependentJobs() != null
+	  && controlledJob.getDependentJobs().size() != processedMap.get(
+	      controlledJob).size()) {
+	cyclePresent = true;
+	LOG.error("Job control has circular dependency for the  job "
+	    + controlledJob.getJobName());
+	break;
+      }
+    }
+    return cyclePresent;
+  }
+
+  private boolean hasInComingEdge(ControlledJob controlledJob,
+      List<ControlledJob> controlledJobList,
+      HashMap<ControlledJob, List<ControlledJob>> processedMap) {
+    boolean hasIncomingEdge = false;
+    for (ControlledJob k : controlledJobList) {
+      if (k != controlledJob && k.getDependentJobs() != null
+	  && !processedMap.get(k).contains(controlledJob)
+	  && k.getDependentJobs().contains(controlledJob)) {
+	hasIncomingEdge = true;
+	break;
+      }
+    }
+    return hasIncomingEdge;
+
   }
 }

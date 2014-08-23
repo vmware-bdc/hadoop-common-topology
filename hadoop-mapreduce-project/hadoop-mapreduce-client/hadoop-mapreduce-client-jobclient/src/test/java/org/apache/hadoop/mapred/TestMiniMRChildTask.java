@@ -22,29 +22,34 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-import java.io.*;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.util.HashMap;
 import java.util.Iterator;
-
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableComparable;
-import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.lib.IdentityReducer;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.MRJobConfig;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.mapreduce.v2.MiniMRYarnCluster;
+import org.apache.hadoop.mapreduce.v2.util.MRApps;
+import org.apache.hadoop.util.Shell;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
+import org.junit.Test;
 
 /**
  * Class to test mapred task's 
@@ -106,6 +111,29 @@ public class TestMiniMRChildTask {
         }
       }
   }
+  
+  /**
+   * Map class which checks if hadoop lib location 
+   * is in the execution path
+   */
+  public static class ExecutionEnvCheckMapClass extends MapReduceBase
+      implements Mapper<LongWritable, Text, Text, IntWritable> {
+      public void map (LongWritable key, Text value, 
+          OutputCollector<Text, IntWritable> output, 
+          Reporter reporter) throws IOException {
+      }
+      public void configure(JobConf job) {
+        String executionEnvPathVariable = System.getenv(Shell.WINDOWS ? "PATH"
+            : "LD_LIBRARY_PATH");
+        String hadoopHome = System.getenv("HADOOP_COMMON_HOME");
+        if (hadoopHome == null) {
+          hadoopHome = "";
+        }
+        String hadoopLibLocation = hadoopHome 
+            + (Shell.WINDOWS ? "\\bin" : "/lib/native");
+        assertTrue(executionEnvPathVariable.contains(hadoopLibLocation));
+      }
+  }
 
   // configure a job
   private void configure(JobConf conf, Path inDir, Path outDir, String input,
@@ -152,8 +180,6 @@ public class TestMiniMRChildTask {
                          Path outDir,
                          String input)
   throws IOException, InterruptedException, ClassNotFoundException {
-    configure(conf, inDir, outDir, input, 
-              MapClass.class, IdentityReducer.class);
 
     FileSystem outFs = outDir.getFileSystem(conf);
     
@@ -172,10 +198,10 @@ public class TestMiniMRChildTask {
   private static void checkEnv(String envName, String expValue, String mode) {
     String envValue = System.getenv(envName).trim();
     if ("append".equals(mode)) {
-      if (envValue == null || !envValue.contains(":")) {
+      if (envValue == null || !envValue.contains(File.pathSeparator)) {
         throw new RuntimeException("Missing env variable");
       } else {
-        String parts[] = envValue.split(":");
+        String parts[] = envValue.split(File.pathSeparator);
         // check if the value is appended
         if (!parts[parts.length - 1].equals(expValue)) {
           throw new RuntimeException("Wrong env variable in append mode");
@@ -225,10 +251,23 @@ public class TestMiniMRChildTask {
       // check if X=/tmp for a new env variable
       checkEnv("MY_PATH", "/tmp", "noappend");
       // check if X=$X:/tmp works for a new env var and results into :/tmp
-      checkEnv("NEW_PATH", ":/tmp", "noappend");
+      checkEnv("NEW_PATH", File.pathSeparator + "/tmp", "noappend");
       // check if X=$(tt's X var):/tmp for an old env variable inherited from 
       // the tt
-      checkEnv("PATH",  path + ":/tmp", "noappend");
+      if (Shell.WINDOWS) {
+        // On Windows, PATH is replaced one more time as part of default config
+        // of "mapreduce.admin.user.env", i.e. on Windows,
+        // "mapreduce.admin.user.env" is set to
+        // "PATH=%PATH%;%HADOOP_COMMON_HOME%\\bin"
+        String hadoopHome = System.getenv("HADOOP_COMMON_HOME");
+        if (hadoopHome == null) {
+          hadoopHome = "";
+        }
+        String hadoopLibLocation = hadoopHome + "\\bin";
+        path += File.pathSeparator + hadoopLibLocation;
+        path += File.pathSeparator + path;
+      }
+      checkEnv("PATH",  path + File.pathSeparator + "/tmp", "noappend");
 
       String jobLocalDir = job.get(MRJobConfig.JOB_LOCAL_DIR);
       assertNotNull(MRJobConfig.JOB_LOCAL_DIR + " is null",
@@ -279,10 +318,23 @@ public class TestMiniMRChildTask {
       // check if X=/tmp for a new env variable
       checkEnv("MY_PATH", "/tmp", "noappend");
       // check if X=$X:/tmp works for a new env var and results into :/tmp
-      checkEnv("NEW_PATH", ":/tmp", "noappend");
+      checkEnv("NEW_PATH", File.pathSeparator + "/tmp", "noappend");
       // check if X=$(tt's X var):/tmp for an old env variable inherited from 
       // the tt
-      checkEnv("PATH",  path + ":/tmp", "noappend");
+      if (Shell.WINDOWS) {
+        // On Windows, PATH is replaced one more time as part of default config
+        // of "mapreduce.admin.user.env", i.e. on Windows,
+        // "mapreduce.admin.user.env"
+        // is set to "PATH=%PATH%;%HADOOP_COMMON_HOME%\\bin"
+        String hadoopHome = System.getenv("HADOOP_COMMON_HOME");
+        if (hadoopHome == null) {
+          hadoopHome = "";
+        }
+        String hadoopLibLocation = hadoopHome + "\\bin";
+        path += File.pathSeparator + hadoopLibLocation;
+        path += File.pathSeparator + path;
+      }
+      checkEnv("PATH",  path + File.pathSeparator + "/tmp", "noappend");
 
     }
 
@@ -298,7 +350,7 @@ public class TestMiniMRChildTask {
   @BeforeClass
   public static void setup() throws IOException {
     // create configuration, dfs, file system and mapred cluster 
-    dfs = new MiniDFSCluster(conf, 1, true, null);
+    dfs = new MiniDFSCluster.Builder(conf).build();
     fileSys = dfs.getFileSystem();
 
     if (!(new File(MiniMRYarnCluster.APPJAR)).exists()) {
@@ -358,7 +410,8 @@ public class TestMiniMRChildTask {
       Path inDir = new Path("testing/wc/input");
       Path outDir = new Path("testing/wc/output");
       String input = "The input";
-      
+      configure(conf, inDir, outDir, input, 
+          MapClass.class, IdentityReducer.class);
       launchTest(conf, inDir, outDir, input);
       
     } catch(Exception e) {
@@ -368,6 +421,66 @@ public class TestMiniMRChildTask {
     }
   }
 
+  /**
+   * To test OS dependent setting of default execution path for a MapRed task.
+   * Mainly that we can use MRJobConfig.DEFAULT_MAPRED_ADMIN_USER_ENV to set -
+   * for WINDOWS: %HADOOP_COMMON_HOME%\bin is expected to be included in PATH - for
+   * Linux: $HADOOP_COMMON_HOME/lib/native is expected to be included in
+   * LD_LIBRARY_PATH
+   */
+  @Test
+  public void testMapRedExecutionEnv() {
+    // test if the env variable can be set
+    try {
+      // Application environment
+      Map<String, String> environment = new HashMap<String, String>();
+      String setupHadoopHomeCommand = Shell.WINDOWS ? 
+          "HADOOP_COMMON_HOME=C:\\fake\\PATH\\to\\hadoop\\common\\home" :
+          "HADOOP_COMMON_HOME=/fake/path/to/hadoop/common/home";
+      MRApps.setEnvFromInputString(environment, setupHadoopHomeCommand, conf);
+
+      // Add the env variables passed by the admin
+      MRApps.setEnvFromInputString(environment, conf.get(
+          MRJobConfig.MAPRED_ADMIN_USER_ENV,
+          MRJobConfig.DEFAULT_MAPRED_ADMIN_USER_ENV), conf);
+      
+      String executionPaths = environment.get(
+          Shell.WINDOWS ? "PATH" : "LD_LIBRARY_PATH");
+      String toFind = Shell.WINDOWS ? 
+          "C:\\fake\\PATH\\to\\hadoop\\common\\home\\bin" : 
+          "/fake/path/to/hadoop/common/home/lib/native";
+      
+      // Ensure execution PATH/LD_LIBRARY_PATH set up pointing to hadoop lib
+      assertTrue("execution path does not include the hadoop lib location "
+          + toFind, executionPaths.contains(toFind));
+    } catch (Exception e) {
+      e.printStackTrace();
+      fail("Exception in testing execution environment for MapReduce task");
+      tearDown();
+    }
+    
+    // now launch a mapreduce job to ensure that the child 
+    // also gets the configured setting for hadoop lib
+    try {
+      
+      JobConf conf = new JobConf(mr.getConfig());      
+      // initialize input, output directories
+      Path inDir = new Path("input");
+      Path outDir = new Path("output");
+      String input = "The input";
+      
+      // set config to use the ExecutionEnvCheckMapClass map class
+      configure(conf, inDir, outDir, input, 
+          ExecutionEnvCheckMapClass.class, IdentityReducer.class);
+      launchTest(conf, inDir, outDir, input);
+                 
+    } catch(Exception e) {
+      e.printStackTrace();
+      fail("Exception in testing propagation of env setting to child task");
+      tearDown();
+    }
+  }
+  
   /**
    * Test to test if the user set env variables reflect in the child
    * processes. Mainly
@@ -437,12 +550,18 @@ public class TestMiniMRChildTask {
       mapTaskJavaOptsKey = reduceTaskJavaOptsKey = JobConf.MAPRED_TASK_JAVA_OPTS;
       mapTaskJavaOpts = reduceTaskJavaOpts = TASK_OPTS_VAL;
     }
-    conf.set(mapTaskEnvKey, 
-             "MY_PATH=/tmp,LANG=en_us_8859_1,LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/tmp," +
-             "PATH=$PATH:/tmp,NEW_PATH=$NEW_PATH:/tmp");
-    conf.set(reduceTaskEnvKey, 
-             "MY_PATH=/tmp,LANG=en_us_8859_1,LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/tmp," +
-             "PATH=$PATH:/tmp,NEW_PATH=$NEW_PATH:/tmp");
+    conf.set(
+        mapTaskEnvKey,
+        Shell.WINDOWS ? "MY_PATH=/tmp,LANG=en_us_8859_1,LD_LIBRARY_PATH=%LD_LIBRARY_PATH%;/tmp,"
+            + "PATH=%PATH%;/tmp,NEW_PATH=%NEW_PATH%;/tmp"
+            : "MY_PATH=/tmp,LANG=en_us_8859_1,LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/tmp,"
+                + "PATH=$PATH:/tmp,NEW_PATH=$NEW_PATH:/tmp");
+    conf.set(
+        reduceTaskEnvKey,
+        Shell.WINDOWS ? "MY_PATH=/tmp,LANG=en_us_8859_1,LD_LIBRARY_PATH=%LD_LIBRARY_PATH%;/tmp,"
+            + "PATH=%PATH%;/tmp,NEW_PATH=%NEW_PATH%;/tmp"
+            : "MY_PATH=/tmp,LANG=en_us_8859_1,LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/tmp,"
+                + "PATH=$PATH:/tmp,NEW_PATH=$NEW_PATH:/tmp");
     conf.set("path", System.getenv("PATH"));
     conf.set(mapTaskJavaOptsKey, mapTaskJavaOpts);
     conf.set(reduceTaskJavaOptsKey, reduceTaskJavaOpts);

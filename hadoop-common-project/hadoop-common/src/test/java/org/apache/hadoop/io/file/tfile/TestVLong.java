@@ -21,7 +21,7 @@ package org.apache.hadoop.io.file.tfile;
 import java.io.IOException;
 import java.util.Random;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 import junit.framework.TestCase;
 
 import org.apache.hadoop.conf.Configuration;
@@ -141,7 +141,7 @@ public class TestVLong extends TestCase {
       int shift = rng.nextInt(Long.SIZE) + 1;
       long mask = (1L << shift) - 1;
       long a = ((long) rng.nextInt()) << 32;
-      long b = ((long) rng.nextInt()) & 0xffffffff;
+      long b = ((long) rng.nextInt()) & 0xffffffffL;
       data[i] = (a + b) & mask;
     }
     

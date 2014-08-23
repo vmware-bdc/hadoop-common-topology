@@ -149,4 +149,16 @@ public class CachedDNSToSwitchMapping extends AbstractDNSToSwitchMapping {
   public boolean isSingleSwitch() {
     return isMappingSingleSwitch(rawMapping);
   }
+  
+  @Override
+  public void reloadCachedMappings() {
+    cache.clear();
+  }
+
+  @Override
+  public void reloadCachedMappings(List<String> names) {
+    for (String name : names) {
+      cache.remove(name);
+    }
+  }
 }

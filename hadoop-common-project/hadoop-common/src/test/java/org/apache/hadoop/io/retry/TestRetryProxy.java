@@ -26,26 +26,37 @@ import static org.apache.hadoop.io.retry.RetryPolicies.retryUpToMaximumCountWith
 import static org.apache.hadoop.io.retry.RetryPolicies.retryUpToMaximumCountWithProportionalSleep;
 import static org.apache.hadoop.io.retry.RetryPolicies.retryUpToMaximumTimeWithFixedSleep;
 import static org.apache.hadoop.io.retry.RetryPolicies.exponentialBackoffRetry;
+import static org.junit.Assert.*;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-
-import junit.framework.TestCase;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.hadoop.io.retry.UnreliableInterface.FatalException;
 import org.apache.hadoop.io.retry.UnreliableInterface.UnreliableException;
+import org.apache.hadoop.ipc.ProtocolTranslator;
 import org.apache.hadoop.ipc.RemoteException;
+import org.junit.Before;
+import org.junit.Test;
 
-public class TestRetryProxy extends TestCase {
+import java.lang.reflect.UndeclaredThrowableException;
+
+public class TestRetryProxy {
   
   private UnreliableImplementation unreliableImpl;
   
-  @Override
-  protected void setUp() throws Exception {
+  @Before
+  public void setUp() throws Exception {
     unreliableImpl = new UnreliableImplementation();
   }
 
+  @Test
   public void testTryOnceThenFail() throws UnreliableException {
     UnreliableInterface unreliable = (UnreliableInterface)
       RetryProxy.create(UnreliableInterface.class, unreliableImpl, TRY_ONCE_THEN_FAIL);
@@ -58,6 +69,40 @@ public class TestRetryProxy extends TestCase {
     }
   }
   
+  /**
+   * Test for {@link RetryInvocationHandler#isRpcInvocation(Object)}
+   */
+  @Test
+  public void testRpcInvocation() throws Exception {
+    // For a proxy method should return true
+    final UnreliableInterface unreliable = (UnreliableInterface)
+      RetryProxy.create(UnreliableInterface.class, unreliableImpl, RETRY_FOREVER);
+    assertTrue(RetryInvocationHandler.isRpcInvocation(unreliable));
+    
+    // Embed the proxy in ProtocolTranslator
+    ProtocolTranslator xlator = new ProtocolTranslator() {
+      int count = 0;
+      @Override
+      public Object getUnderlyingProxyObject() {
+        count++;
+        return unreliable;
+      }
+      @Override
+      public String toString() {
+        return "" + count;
+      }
+    };
+    
+    // For a proxy wrapped in ProtocolTranslator method should return true
+    assertTrue(RetryInvocationHandler.isRpcInvocation(xlator));
+    // Ensure underlying proxy was looked at
+    assertEquals(xlator.toString(), "1");
+    
+    // For non-proxy the method must return false
+    assertFalse(RetryInvocationHandler.isRpcInvocation(new Object()));
+  }
+  
+  @Test
   public void testRetryForever() throws UnreliableException {
     UnreliableInterface unreliable = (UnreliableInterface)
       RetryProxy.create(UnreliableInterface.class, unreliableImpl, RETRY_FOREVER);
@@ -66,6 +111,7 @@ public class TestRetryProxy extends TestCase {
     unreliable.failsTenTimesThenSucceeds();
   }
   
+  @Test
   public void testRetryUpToMaximumCountWithFixedSleep() throws UnreliableException {
     UnreliableInterface unreliable = (UnreliableInterface)
       RetryProxy.create(UnreliableInterface.class, unreliableImpl,
@@ -80,6 +126,7 @@ public class TestRetryProxy extends TestCase {
     }
   }
   
+  @Test
   public void testRetryUpToMaximumTimeWithFixedSleep() throws UnreliableException {
     UnreliableInterface unreliable = (UnreliableInterface)
       RetryProxy.create(UnreliableInterface.class, unreliableImpl,
@@ -94,6 +141,7 @@ public class TestRetryProxy extends TestCase {
     }
   }
   
+  @Test
   public void testRetryUpToMaximumCountWithProportionalSleep() throws UnreliableException {
     UnreliableInterface unreliable = (UnreliableInterface)
       RetryProxy.create(UnreliableInterface.class, unreliableImpl,
@@ -108,6 +156,7 @@ public class TestRetryProxy extends TestCase {
     }
   }
   
+  @Test
   public void testExponentialRetry() throws UnreliableException {
     UnreliableInterface unreliable = (UnreliableInterface)
       RetryProxy.create(UnreliableInterface.class, unreliableImpl,
@@ -122,6 +171,7 @@ public class TestRetryProxy extends TestCase {
     }
   }
   
+  @Test
   public void testRetryByException() throws UnreliableException {
     Map<Class<? extends Exception>, RetryPolicy> exceptionToPolicyMap =
       Collections.<Class<? extends Exception>, RetryPolicy>singletonMap(FatalException.class, TRY_ONCE_THEN_FAIL);
@@ -138,7 +188,8 @@ public class TestRetryProxy extends TestCase {
     }
   }
   
-  public void testRetryByRemoteException() throws UnreliableException {
+  @Test
+  public void testRetryByRemoteException() {
     Map<Class<? extends Exception>, RetryPolicy> exceptionToPolicyMap =
       Collections.<Class<? extends Exception>, RetryPolicy>singletonMap(FatalException.class, TRY_ONCE_THEN_FAIL);
     
@@ -153,4 +204,35 @@ public class TestRetryProxy extends TestCase {
     }
   }  
   
+  @Test
+  public void testRetryInterruptible() throws Throwable {
+    final UnreliableInterface unreliable = (UnreliableInterface)
+        RetryProxy.create(UnreliableInterface.class, unreliableImpl,
+            retryUpToMaximumTimeWithFixedSleep(10, 10, TimeUnit.SECONDS));
+    
+    final CountDownLatch latch = new CountDownLatch(1);
+    final AtomicReference<Thread> futureThread = new AtomicReference<Thread>();
+    ExecutorService exec = Executors.newSingleThreadExecutor();
+    Future<Throwable> future = exec.submit(new Callable<Throwable>(){
+      @Override
+      public Throwable call() throws Exception {
+        futureThread.set(Thread.currentThread());
+        latch.countDown();
+        try {
+          unreliable.alwaysFailsWithFatalException();
+        } catch (UndeclaredThrowableException ute) {
+          return ute.getCause();
+        }
+        return null;
+      }
+    });
+    latch.await();
+    Thread.sleep(1000); // time to fail and sleep
+    assertTrue(futureThread.get().isAlive());
+    futureThread.get().interrupt();
+    Throwable e = future.get(1, TimeUnit.SECONDS); // should return immediately 
+    assertNotNull(e);
+    assertEquals(InterruptedException.class, e.getClass());
+    assertEquals("sleep interrupted", e.getMessage());
+  }
 }

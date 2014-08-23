@@ -18,13 +18,9 @@
 package org.apache.hadoop.fs.viewfs;
 
 
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.FileContextMainOperationsBaseTest;
-import org.apache.hadoop.fs.FileContextTestHelper;
-import org.apache.hadoop.fs.FsConstants;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.viewfs.ConfigUtil;
 
 import org.junit.After;
 import org.junit.Before;
@@ -36,52 +32,22 @@ public class TestFcMainOperationsLocalFs  extends
   FileContext fclocal;
   Path targetOfTests;
 
+  @Override
   @Before
   public void setUp() throws Exception {
-    /**
-     * create the test root on local_fs - the  mount table will point here
-     */
-    fclocal = FileContext.getLocalFSFileContext();
-    targetOfTests = FileContextTestHelper.getTestRootPath(fclocal);
-    // In case previous test was killed before cleanup
-    fclocal.delete(targetOfTests, true);
-    
-    fclocal.mkdir(targetOfTests, FileContext.DEFAULT_PERM, true);
-
-    
-    
-    
-    // We create mount table so that the test root on the viewFs points to 
-    // to the test root on the target.
-    // DOing this helps verify the FileStatus.path.
-    //
-    // The test root by default when running eclipse 
-    // is a test dir below the working directory. 
-    // (see FileContextTestHelper).
-    // Since viewFs has no built-in wd, its wd is /user/<username>.
-    // If this test launched via ant (build.xml) the test root is absolute path
-    
-    String srcTestRoot;
-    if (FileContextTestHelper.TEST_ROOT_DIR.startsWith("/")) {
-      srcTestRoot = FileContextTestHelper.TEST_ROOT_DIR;
-    } else {
-      srcTestRoot = "/user/"  + System.getProperty("user.name") + "/" +
-      FileContextTestHelper.TEST_ROOT_DIR;
-    }
-
-    Configuration conf = new Configuration();
-    ConfigUtil.addLink(conf, srcTestRoot,
-        targetOfTests.toUri());
-    
-    fc = FileContext.getFileContext(FsConstants.VIEWFS_URI, conf);
-    //System.out.println("SRCOfTests = "+ FileContextTestHelper.getTestRootPath(fc, "test"));
-    //System.out.println("TargetOfTests = "+ targetOfTests.toUri());
+    fc = ViewFsTestSetup.setupForViewFsLocalFs(fileContextTestHelper);
     super.setUp();
   }
   
+  @Override
   @After
   public void tearDown() throws Exception {
     super.tearDown();
-    fclocal.delete(targetOfTests, true);
+    ViewFsTestSetup.tearDownForViewFsLocalFs(fileContextTestHelper);
+  }
+  
+  @Override
+  protected boolean listCorruptedBlocksSupported() {
+    return false;
   }
 }

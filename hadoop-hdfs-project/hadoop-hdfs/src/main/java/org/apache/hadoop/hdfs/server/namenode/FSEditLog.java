@@ -17,34 +17,85 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import static org.apache.hadoop.hdfs.server.common.Util.now;
-import java.net.URI;
+import static org.apache.hadoop.util.ExitUtil.terminate;
+import static org.apache.hadoop.util.Time.now;
+
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
-import java.lang.reflect.Constructor;
 
-import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Options;
+import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.fs.permission.PermissionStatus;
+import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
+import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
+import org.apache.hadoop.hdfs.server.common.Storage.FormatConfirmable;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
-import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.*;
+import org.apache.hadoop.hdfs.server.common.StorageInfo;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddBlockOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddCacheDirectiveInfoOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddCachePoolOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AddOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AllocateBlockIdOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.AllowSnapshotOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.CancelDelegationTokenOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.CloseOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ConcatDeleteOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.CreateSnapshotOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.DeleteOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.DeleteSnapshotOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.DisallowSnapshotOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.GetDelegationTokenOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.LogSegmentOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.MkdirOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ModifyCacheDirectiveInfoOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ModifyCachePoolOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.OpInstanceCache;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.ReassignLeaseOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RemoveCacheDirectiveInfoOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RemoveCachePoolOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RemoveXAttrOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RenameOldOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RenameOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RenameSnapshotOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RenewDelegationTokenOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.SetAclOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.SetGenstampV1Op;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.SetGenstampV2Op;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.SetOwnerOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.SetPermissionsOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.SetQuotaOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.SetReplicationOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.SetXAttrOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.SymlinkOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.TimesOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.UpdateBlocksOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.UpdateMasterKeyOp;
+import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.RollingUpgradeOp;
 import org.apache.hadoop.hdfs.server.namenode.JournalSet.JournalAndStream;
 import org.apache.hadoop.hdfs.server.namenode.metrics.NameNodeMetrics;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeRegistration;
+import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
-import org.apache.hadoop.conf.Configuration;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -56,7 +107,7 @@ import com.google.common.collect.Lists;
  */
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
-public class FSEditLog  {
+public class FSEditLog implements LogsPurgeable {
 
   static final Log LOG = LogFactory.getLog(FSEditLog.class);
 
@@ -113,22 +164,18 @@ public class FSEditLog  {
   // is an automatic sync scheduled?
   private volatile boolean isAutoSyncScheduled = false;
   
-  // Used to exit in the event of a failure to sync to all journals. It's a
-  // member variable so it can be swapped out for testing.
-  private Runtime runtime = Runtime.getRuntime();
-
   // these are statistics counters.
   private long numTransactions;        // number of transactions
   private long numTransactionsBatchedInSync;
   private long totalTimeTransactions;  // total time for all transactions
   private NameNodeMetrics metrics;
 
-  private NNStorage storage;
-  private Configuration conf;
+  private final NNStorage storage;
+  private final Configuration conf;
   
-  private List<URI> editsDirs;
+  private final List<URI> editsDirs;
 
-  private ThreadLocal<OpInstanceCache> cache =
+  private final ThreadLocal<OpInstanceCache> cache =
       new ThreadLocal<OpInstanceCache>() {
     @Override
     protected OpInstanceCache initialValue() {
@@ -139,7 +186,7 @@ public class FSEditLog  {
   /**
    * The edit directories that are shared between primary and secondary.
    */
-  private List<URI> sharedEditsDirs;
+  private final List<URI> sharedEditsDirs;
 
   private static class TransactionId {
     public long txid;
@@ -151,24 +198,11 @@ public class FSEditLog  {
 
   // stores the most current transactionId of this thread.
   private static final ThreadLocal<TransactionId> myTransactionId = new ThreadLocal<TransactionId>() {
+    @Override
     protected synchronized TransactionId initialValue() {
       return new TransactionId(Long.MAX_VALUE);
     }
   };
-
-  /**
-   * Construct FSEditLog with default configuration, taking editDirs from NNStorage
-   * 
-   * @param storage Storage object used by namenode
-   */
-  @VisibleForTesting
-  FSEditLog(NNStorage storage) throws IOException {
-    Configuration conf = new Configuration();
-    // Make sure the edits dirs are set in the provided configuration object.
-    conf.set(DFSConfigKeys.DFS_NAMENODE_EDITS_DIR_KEY,
-        StringUtils.join(storage.getEditsDirectories(), ","));
-    init(conf, storage, FSNamesystem.getNamespaceEditsDirs(conf));
-  }
 
   /**
    * Constructor for FSEditLog. Underlying journals are constructed, but 
@@ -179,10 +213,6 @@ public class FSEditLog  {
    * @param editsDirs List of journals to use
    */
   FSEditLog(Configuration conf, NNStorage storage, List<URI> editsDirs) {
-    init(conf, storage, editsDirs);
-  }
-  
-  private void init(Configuration conf, NNStorage storage, List<URI> editsDirs) {
     isSyncRunning = false;
     this.conf = conf;
     this.storage = storage;
@@ -223,16 +253,19 @@ public class FSEditLog  {
         DFSConfigKeys.DFS_NAMENODE_EDITS_DIR_MINIMUM_DEFAULT);
 
     journalSet = new JournalSet(minimumRedundantJournals);
+
     for (URI u : dirs) {
       boolean required = FSNamesystem.getRequiredNamespaceEditsDirs(conf)
           .contains(u);
       if (u.getScheme().equals(NNStorage.LOCAL_URI_SCHEME)) {
         StorageDirectory sd = storage.getStorageDirectory(u);
         if (sd != null) {
-          journalSet.add(new FileJournalManager(sd, storage), required);
+          journalSet.add(new FileJournalManager(conf, sd, storage),
+              required, sharedEditsDirs.contains(u));
         }
       } else {
-        journalSet.add(createJournal(u), required);
+        journalSet.add(createJournal(u), required,
+            sharedEditsDirs.contains(u));
       }
     }
  
@@ -260,16 +293,17 @@ public class FSEditLog  {
     long segmentTxId = getLastWrittenTxId() + 1;
     // Safety check: we should never start a segment if there are
     // newer txids readable.
-    EditLogInputStream s = journalSet.getInputStream(segmentTxId, true);
-    try {
-      Preconditions.checkState(s == null,
-          "Cannot start writing at txid %s when there is a stream " +
-          "available for read: %s", segmentTxId, s);
-    } finally {
-      IOUtils.closeStream(s);
+    List<EditLogInputStream> streams = new ArrayList<EditLogInputStream>();
+    journalSet.selectInputStreams(streams, segmentTxId, true);
+    if (!streams.isEmpty()) {
+      String error = String.format("Cannot start writing at txid %s " +
+        "when there is a stream available for read: %s",
+        segmentTxId, streams.get(0));
+      IOUtils.cleanup(LOG, streams.toArray(new EditLogInputStream[0]));
+      throw new IllegalStateException(error);
     }
     
-    startLogSegment(segmentTxId, true);
+    startLogSegmentAndWriteHeaderTxn(segmentTxId);
     assert state == State.IN_SEGMENT : "Bad state: " + state;
   }
   
@@ -305,21 +339,56 @@ public class FSEditLog  {
       LOG.debug("Closing log when already closed");
       return;
     }
-    if (state == State.IN_SEGMENT) {
-      assert editLogStream != null;
-      waitForSyncToFinish();
-      endCurrentLogSegment(true);
+
+    try {
+      if (state == State.IN_SEGMENT) {
+        assert editLogStream != null;
+        waitForSyncToFinish();
+        endCurrentLogSegment(true);
+      }
+    } finally {
+      if (journalSet != null && !journalSet.isEmpty()) {
+        try {
+          journalSet.close();
+        } catch (IOException ioe) {
+          LOG.warn("Error closing journalSet", ioe);
+        }
+      }
+      state = State.CLOSED;
     }
+  }
+
+
+  /**
+   * Format all configured journals which are not file-based.
+   * 
+   * File-based journals are skipped, since they are formatted by the
+   * Storage format code.
+   */
+  synchronized void formatNonFileJournals(NamespaceInfo nsInfo) throws IOException {
+    Preconditions.checkState(state == State.BETWEEN_LOG_SEGMENTS,
+        "Bad state: %s", state);
     
-    if (!journalSet.isEmpty()) {
-      try {
-        journalSet.close();
-      } catch (IOException ioe) {
-        LOG.warn("Error closing journalSet", ioe);
+    for (JournalManager jm : journalSet.getJournalManagers()) {
+      if (!(jm instanceof FileJournalManager)) {
+        jm.format(nsInfo);
       }
     }
+  }
+  
+  synchronized List<FormatConfirmable> getFormatConfirmables() {
+    Preconditions.checkState(state == State.BETWEEN_LOG_SEGMENTS,
+        "Bad state: %s", state);
 
-    state = State.CLOSED;
+    List<FormatConfirmable> ret = Lists.newArrayList();
+    for (final JournalManager jm : journalSet.getJournalManagers()) {
+      // The FJMs are confirmed separately since they are also
+      // StorageDirectories
+      if (!(jm instanceof FileJournalManager)) {
+        ret.add(jm);
+      }
+    }
+    return ret;
   }
 
   /**
@@ -358,7 +427,6 @@ public class FSEditLog  {
 
   /**
    * Wait if an automatic sync is scheduled
-   * @throws InterruptedException
    */
   synchronized void waitIfAutoSyncScheduled() {
     try {
@@ -533,10 +601,13 @@ public class FSEditLog  {
             }
             editLogStream.setReadyToFlush();
           } catch (IOException e) {
-            LOG.fatal("Could not sync enough journals to persistent storage. "
-                + "Unsynced transactions: " + (txid - synctxid),
-                new Exception());
-            runtime.exit(1);
+            final String msg =
+                "Could not sync enough journals to persistent storage " +
+                "due to " + e.getMessage() + ". " +
+                "Unsynced transactions: " + (txid - synctxid);
+            LOG.fatal(msg, new Exception());
+            IOUtils.cleanup(LOG, journalSet);
+            terminate(1, msg);
           }
         } finally {
           // Prevent RuntimeException from blocking other log edit write 
@@ -555,9 +626,12 @@ public class FSEditLog  {
         }
       } catch (IOException ex) {
         synchronized (this) {
-          LOG.fatal("Could not sync enough journals to persistent storage. "
-              + "Unsynced transactions: " + (txid - synctxid), new Exception());
-          runtime.exit(1);
+          final String msg =
+              "Could not sync enough journals to persistent storage. "
+              + "Unsynced transactions: " + (txid - synctxid);
+          LOG.fatal(msg, new Exception());
+          IOUtils.cleanup(LOG, journalSet);
+          terminate(1, msg);
         }
       }
       long elapsed = now() - start;
@@ -592,7 +666,7 @@ public class FSEditLog  {
     buf.append(numTransactions);
     buf.append(" Total time for transactions(ms): ");
     buf.append(totalTimeTransactions);
-    buf.append("Number of transactions batched in Syncs: ");
+    buf.append(" Number of transactions batched in Syncs: ");
     buf.append(numTransactionsBatchedInSync);
     buf.append(" Number of syncs: ");
     buf.append(editLogStream.getNumSync());
@@ -601,23 +675,46 @@ public class FSEditLog  {
     LOG.info(buf);
   }
 
+  /** Record the RPC IDs if necessary */
+  private void logRpcIds(FSEditLogOp op, boolean toLogRpcIds) {
+    if (toLogRpcIds) {
+      op.setRpcClientId(Server.getClientId());
+      op.setRpcCallId(Server.getCallId());
+    }
+  }
+  
   /** 
    * Add open lease record to edit log. 
    * Records the block locations of the last block.
    */
-  public void logOpenFile(String path, INodeFileUnderConstruction newNode) {
+  public void logOpenFile(String path, INodeFile newNode, boolean toLogRpcIds) {
+    Preconditions.checkArgument(newNode.isUnderConstruction());
+    PermissionStatus permissions = newNode.getPermissionStatus();
     AddOp op = AddOp.getInstance(cache.get())
+      .setInodeId(newNode.getId())
       .setPath(path)
-      .setReplication(newNode.getReplication())
+      .setReplication(newNode.getFileReplication())
       .setModificationTime(newNode.getModificationTime())
       .setAccessTime(newNode.getAccessTime())
       .setBlockSize(newNode.getPreferredBlockSize())
       .setBlocks(newNode.getBlocks())
-      .setPermissionStatus(newNode.getPermissionStatus())
-      .setClientName(newNode.getClientName())
-      .setClientMachine(newNode.getClientMachine());
-    
-      logEdit(op);
+      .setPermissionStatus(permissions)
+      .setClientName(newNode.getFileUnderConstructionFeature().getClientName())
+      .setClientMachine(
+          newNode.getFileUnderConstructionFeature().getClientMachine());
+
+    AclFeature f = newNode.getAclFeature();
+    if (f != null) {
+      op.setAclEntries(AclStorage.readINodeLogicalAcl(newNode));
+    }
+
+    XAttrFeature x = newNode.getXAttrFeature();
+    if (x != null) {
+      op.setXAttrs(x.getXAttrs());
+    }
+
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
   }
 
   /** 
@@ -626,7 +723,7 @@ public class FSEditLog  {
   public void logCloseFile(String path, INodeFile newNode) {
     CloseOp op = CloseOp.getInstance(cache.get())
       .setPath(path)
-      .setReplication(newNode.getReplication())
+      .setReplication(newNode.getFileReplication())
       .setModificationTime(newNode.getModificationTime())
       .setAccessTime(newNode.getAccessTime())
       .setBlockSize(newNode.getPreferredBlockSize())
@@ -636,10 +733,23 @@ public class FSEditLog  {
     logEdit(op);
   }
   
-  public void logUpdateBlocks(String path, INodeFileUnderConstruction file) {
+  public void logAddBlock(String path, INodeFile file) {
+    Preconditions.checkArgument(file.isUnderConstruction());
+    BlockInfo[] blocks = file.getBlocks();
+    Preconditions.checkState(blocks != null && blocks.length > 0);
+    BlockInfo pBlock = blocks.length > 1 ? blocks[blocks.length - 2] : null;
+    BlockInfo lastBlock = blocks[blocks.length - 1];
+    AddBlockOp op = AddBlockOp.getInstance(cache.get()).setPath(path)
+        .setPenultimateBlock(pBlock).setLastBlock(lastBlock);
+    logEdit(op);
+  }
+  
+  public void logUpdateBlocks(String path, INodeFile file, boolean toLogRpcIds) {
+    Preconditions.checkArgument(file.isUnderConstruction());
     UpdateBlocksOp op = UpdateBlocksOp.getInstance(cache.get())
       .setPath(path)
       .setBlocks(file.getBlocks());
+    logRpcIds(op, toLogRpcIds);
     logEdit(op);
   }
   
@@ -647,10 +757,22 @@ public class FSEditLog  {
    * Add create directory record to edit log
    */
   public void logMkDir(String path, INode newNode) {
+    PermissionStatus permissions = newNode.getPermissionStatus();
     MkdirOp op = MkdirOp.getInstance(cache.get())
+      .setInodeId(newNode.getId())
       .setPath(path)
       .setTimestamp(newNode.getModificationTime())
-      .setPermissionStatus(newNode.getPermissionStatus());
+      .setPermissionStatus(permissions);
+
+    AclFeature f = newNode.getAclFeature();
+    if (f != null) {
+      op.setAclEntries(AclStorage.readINodeLogicalAcl(newNode));
+    }
+
+    XAttrFeature x = newNode.getXAttrFeature();
+    if (x != null) {
+      op.setXAttrs(x.getXAttrs());
+    }
     logEdit(op);
   }
   
@@ -658,23 +780,26 @@ public class FSEditLog  {
    * Add rename record to edit log
    * TODO: use String parameters until just before writing to disk
    */
-  void logRename(String src, String dst, long timestamp) {
+  void logRename(String src, String dst, long timestamp, boolean toLogRpcIds) {
     RenameOldOp op = RenameOldOp.getInstance(cache.get())
       .setSource(src)
       .setDestination(dst)
       .setTimestamp(timestamp);
+    logRpcIds(op, toLogRpcIds);
     logEdit(op);
   }
   
   /** 
    * Add rename record to edit log
    */
-  void logRename(String src, String dst, long timestamp, Options.Rename... options) {
+  void logRename(String src, String dst, long timestamp, boolean toLogRpcIds,
+      Options.Rename... options) {
     RenameOp op = RenameOp.getInstance(cache.get())
       .setSource(src)
       .setDestination(dst)
       .setTimestamp(timestamp)
       .setOptions(options);
+    logRpcIds(op, toLogRpcIds);
     logEdit(op);
   }
   
@@ -691,7 +816,8 @@ public class FSEditLog  {
   /** Add set namespace quota record to edit log
    * 
    * @param src the string representation of the path to a directory
-   * @param quota the directory size limit
+   * @param nsQuota namespace quota
+   * @param dsQuota diskspace quota
    */
   void logSetQuota(String src, long nsQuota, long dsQuota) {
     SetQuotaOp op = SetQuotaOp.getInstance(cache.get())
@@ -721,30 +847,50 @@ public class FSEditLog  {
   /**
    * concat(trg,src..) log
    */
-  void logConcat(String trg, String [] srcs, long timestamp) {
+  void logConcat(String trg, String[] srcs, long timestamp, boolean toLogRpcIds) {
     ConcatDeleteOp op = ConcatDeleteOp.getInstance(cache.get())
       .setTarget(trg)
       .setSources(srcs)
       .setTimestamp(timestamp);
+    logRpcIds(op, toLogRpcIds);
     logEdit(op);
   }
   
   /** 
    * Add delete file record to edit log
    */
-  void logDelete(String src, long timestamp) {
+  void logDelete(String src, long timestamp, boolean toLogRpcIds) {
     DeleteOp op = DeleteOp.getInstance(cache.get())
       .setPath(src)
       .setTimestamp(timestamp);
+    logRpcIds(op, toLogRpcIds);
     logEdit(op);
   }
 
-  /** 
+  /**
+   * Add legacy block generation stamp record to edit log
+   */
+  void logGenerationStampV1(long genstamp) {
+    SetGenstampV1Op op = SetGenstampV1Op.getInstance(cache.get())
+        .setGenerationStamp(genstamp);
+    logEdit(op);
+  }
+
+  /**
    * Add generation stamp record to edit log
    */
-  void logGenerationStamp(long genstamp) {
-    SetGenstampOp op = SetGenstampOp.getInstance(cache.get())
-      .setGenerationStamp(genstamp);
+  void logGenerationStampV2(long genstamp) {
+    SetGenstampV2Op op = SetGenstampV2Op.getInstance(cache.get())
+        .setGenerationStamp(genstamp);
+    logEdit(op);
+  }
+
+  /**
+   * Record a newly allocated block ID in the edit log
+   */
+  void logAllocateBlockId(long blockId) {
+    AllocateBlockIdOp op = AllocateBlockIdOp.getInstance(cache.get())
+      .setBlockId(blockId);
     logEdit(op);
   }
 
@@ -762,14 +908,16 @@ public class FSEditLog  {
   /** 
    * Add a create symlink record.
    */
-  void logSymlink(String path, String value, long mtime, 
-                  long atime, INodeSymlink node) {
+  void logSymlink(String path, String value, long mtime, long atime,
+      INodeSymlink node, boolean toLogRpcIds) {
     SymlinkOp op = SymlinkOp.getInstance(cache.get())
+      .setId(node.getId())
       .setPath(path)
       .setValue(value)
       .setModificationTime(mtime)
       .setAccessTime(atime)
       .setPermissionStatus(node.getPermissionStatus());
+    logRpcIds(op, toLogRpcIds);
     logEdit(op);
   }
   
@@ -814,6 +962,126 @@ public class FSEditLog  {
     logEdit(op);
   }
   
+  void logCreateSnapshot(String snapRoot, String snapName, boolean toLogRpcIds) {
+    CreateSnapshotOp op = CreateSnapshotOp.getInstance(cache.get())
+        .setSnapshotRoot(snapRoot).setSnapshotName(snapName);
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+  
+  void logDeleteSnapshot(String snapRoot, String snapName, boolean toLogRpcIds) {
+    DeleteSnapshotOp op = DeleteSnapshotOp.getInstance(cache.get())
+        .setSnapshotRoot(snapRoot).setSnapshotName(snapName);
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+  
+  void logRenameSnapshot(String path, String snapOldName, String snapNewName,
+      boolean toLogRpcIds) {
+    RenameSnapshotOp op = RenameSnapshotOp.getInstance(cache.get())
+        .setSnapshotRoot(path).setSnapshotOldName(snapOldName)
+        .setSnapshotNewName(snapNewName);
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+  
+  void logAllowSnapshot(String path) {
+    AllowSnapshotOp op = AllowSnapshotOp.getInstance(cache.get())
+        .setSnapshotRoot(path);
+    logEdit(op);
+  }
+
+  void logDisallowSnapshot(String path) {
+    DisallowSnapshotOp op = DisallowSnapshotOp.getInstance(cache.get())
+        .setSnapshotRoot(path);
+    logEdit(op);
+  }
+
+  /**
+   * Log a CacheDirectiveInfo returned from
+   * {@link CacheManager#addDirective(CacheDirectiveInfo, FSPermissionChecker)}
+   */
+  void logAddCacheDirectiveInfo(CacheDirectiveInfo directive,
+      boolean toLogRpcIds) {
+    AddCacheDirectiveInfoOp op =
+        AddCacheDirectiveInfoOp.getInstance(cache.get())
+            .setDirective(directive);
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+
+  void logModifyCacheDirectiveInfo(
+      CacheDirectiveInfo directive, boolean toLogRpcIds) {
+    ModifyCacheDirectiveInfoOp op =
+        ModifyCacheDirectiveInfoOp.getInstance(
+            cache.get()).setDirective(directive);
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+
+  void logRemoveCacheDirectiveInfo(Long id, boolean toLogRpcIds) {
+    RemoveCacheDirectiveInfoOp op =
+        RemoveCacheDirectiveInfoOp.getInstance(cache.get()).setId(id);
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+
+  void logAddCachePool(CachePoolInfo pool, boolean toLogRpcIds) {
+    AddCachePoolOp op =
+        AddCachePoolOp.getInstance(cache.get()).setPool(pool);
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+
+  void logModifyCachePool(CachePoolInfo info, boolean toLogRpcIds) {
+    ModifyCachePoolOp op =
+        ModifyCachePoolOp.getInstance(cache.get()).setInfo(info);
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+
+  void logRemoveCachePool(String poolName, boolean toLogRpcIds) {
+    RemoveCachePoolOp op =
+        RemoveCachePoolOp.getInstance(cache.get()).setPoolName(poolName);
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+
+  void logStartRollingUpgrade(long startTime) {
+    RollingUpgradeOp op = RollingUpgradeOp.getStartInstance(cache.get());
+    op.setTime(startTime);
+    logEdit(op);
+  }
+
+  void logFinalizeRollingUpgrade(long finalizeTime) {
+    RollingUpgradeOp op = RollingUpgradeOp.getFinalizeInstance(cache.get());
+    op.setTime(finalizeTime);
+    logEdit(op);
+  }
+
+  void logSetAcl(String src, List<AclEntry> entries) {
+    SetAclOp op = SetAclOp.getInstance();
+    op.src = src;
+    op.aclEntries = entries;
+    logEdit(op);
+  }
+  
+  void logSetXAttrs(String src, List<XAttr> xAttrs, boolean toLogRpcIds) {
+    final SetXAttrOp op = SetXAttrOp.getInstance();
+    op.src = src;
+    op.xAttrs = xAttrs;
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+  
+  void logRemoveXAttrs(String src, List<XAttr> xAttrs, boolean toLogRpcIds) {
+    final RemoveXAttrOp op = RemoveXAttrOp.getInstance();
+    op.src = src;
+    op.xAttrs = xAttrs;
+    logRpcIds(op, toLogRpcIds);
+    logEdit(op);
+  }
+
   /**
    * Get all the journals this edit log is currently operating on.
    */
@@ -829,15 +1097,11 @@ public class FSEditLog  {
     return journalSet;
   }
   
-  /**
-   * Used only by unit tests.
-   */
   @VisibleForTesting
-  synchronized void setRuntimeForTesting(Runtime runtime) {
-    this.runtime = runtime;
-    this.journalSet.setRuntimeForTesting(runtime);
+  synchronized void setJournalSetForTesting(JournalSet js) {
+    this.journalSet = js;
   }
-
+  
   /**
    * Used only by tests.
    */
@@ -860,22 +1124,52 @@ public class FSEditLog  {
    * in the new log.
    */
   synchronized long rollEditLog() throws IOException {
-    LOG.info("Rolling edit logs.");
+    LOG.info("Rolling edit logs");
     endCurrentLogSegment(true);
     
     long nextTxId = getLastWrittenTxId() + 1;
-    startLogSegment(nextTxId, true);
+    startLogSegmentAndWriteHeaderTxn(nextTxId);
     
     assert curSegmentTxId == nextTxId;
     return nextTxId;
+  }
+
+  /**
+   * Remote namenode just has started a log segment, start log segment locally.
+   */
+  public synchronized void startLogSegment(long txid, 
+      boolean abortCurrentLogSegment) throws IOException {
+    LOG.info("Started a new log segment at txid " + txid);
+    if (isSegmentOpen()) {
+      if (getLastWrittenTxId() == txid - 1) {
+        //In sync with the NN, so end and finalize the current segment`
+        endCurrentLogSegment(false);
+      } else {
+        //Missed some transactions: probably lost contact with NN temporarily.
+        final String mess = "Cannot start a new log segment at txid " + txid
+            + " since only up to txid " + getLastWrittenTxId()
+            + " have been written in the log segment starting at "
+            + getCurSegmentTxId() + ".";
+        if (abortCurrentLogSegment) {
+          //Mark the current segment as aborted.
+          LOG.warn(mess);
+          abortCurrentLogSegment();
+        } else {
+          throw new IOException(mess);
+        }
+      }
+    }
+    setNextTxId(txid);
+    startLogSegment(txid);
   }
   
   /**
    * Start writing to the log segment with the given txid.
    * Transitions from BETWEEN_LOG_SEGMENTS state to IN_LOG_SEGMENT state. 
    */
-  synchronized void startLogSegment(final long segmentTxId,
-      boolean writeHeaderTxn) throws IOException {
+  private void startLogSegment(final long segmentTxId) throws IOException {
+    assert Thread.holdsLock(this);
+
     LOG.info("Starting log segment at " + segmentTxId);
     Preconditions.checkArgument(segmentTxId > 0,
         "Bad txid: %s", segmentTxId);
@@ -895,7 +1189,8 @@ public class FSEditLog  {
     storage.attemptRestoreRemovedStorage();
     
     try {
-      editLogStream = journalSet.startLogSegment(segmentTxId);
+      editLogStream = journalSet.startLogSegment(segmentTxId,
+          NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
     } catch (IOException ex) {
       throw new IOException("Unable to start log segment " +
           segmentTxId + ": too few journals successfully started.", ex);
@@ -903,19 +1198,22 @@ public class FSEditLog  {
     
     curSegmentTxId = segmentTxId;
     state = State.IN_SEGMENT;
+  }
 
-    if (writeHeaderTxn) {
-      logEdit(LogSegmentOp.getInstance(cache.get(),
-          FSEditLogOpCodes.OP_START_LOG_SEGMENT));
-      logSync();
-    }
+  synchronized void startLogSegmentAndWriteHeaderTxn(final long segmentTxId
+      ) throws IOException {
+    startLogSegment(segmentTxId);
+
+    logEdit(LogSegmentOp.getInstance(cache.get(),
+        FSEditLogOpCodes.OP_START_LOG_SEGMENT));
+    logSync();
   }
 
   /**
    * Finalize the current log segment.
    * Transitions from IN_SEGMENT state to BETWEEN_LOG_SEGMENTS state.
    */
-  synchronized void endCurrentLogSegment(boolean writeEndTxn) {
+  public synchronized void endCurrentLogSegment(boolean writeEndTxn) {
     LOG.info("Ending log segment " + curSegmentTxId);
     Preconditions.checkState(isSegmentOpen(),
         "Bad state: %s", state);
@@ -958,13 +1256,26 @@ public class FSEditLog  {
 
   /**
    * Archive any log files that are older than the given txid.
+   * 
+   * If the edit log is not open for write, then this call returns with no
+   * effect.
    */
+  @Override
   public synchronized void purgeLogsOlderThan(final long minTxIdToKeep) {
+    // Should not purge logs unless they are open for write.
+    // This prevents the SBN from purging logs on shared storage, for example.
+    if (!isOpenForWrite()) {
+      return;
+    }
+    
     assert curSegmentTxId == HdfsConstants.INVALID_TXID || // on format this is no-op
       minTxIdToKeep <= curSegmentTxId :
       "cannot purge logs older than txid " + minTxIdToKeep +
       " when current segment starts at " + curSegmentTxId;
-
+    if (minTxIdToKeep == 0) {
+      return;
+    }
+    
     // This could be improved to not need synchronization. But currently,
     // journalSet is not threadsafe, so we need to synchronize this method.
     try {
@@ -1057,6 +1368,17 @@ public class FSEditLog  {
     return null;
   }
 
+  /** Write the batch of edits to edit log. */
+  public synchronized void journal(long firstTxId, int numTxns, byte[] data) {
+    final long expectedTxId = getLastWrittenTxId() + 1;
+    Preconditions.checkState(firstTxId == expectedTxId,
+        "received txid batch starting at %s but expected txid %s",
+        firstTxId, expectedTxId);
+    setNextTxId(firstTxId + numTxns - 1);
+    logEdit(data.length, data);
+    logSync();
+  }
+
   /**
    * Write an operation to the edit log. Do not sync to persistent
    * store yet.
@@ -1083,39 +1405,140 @@ public class FSEditLog  {
       journalSet.recoverUnfinalizedSegments();
     } catch (IOException ex) {
       // All journals have failed, it is handled in logSync.
+      // TODO: are we sure this is OK?
     }
   }
   
-  Collection<EditLogInputStream> selectInputStreams(long fromTxId,
-      long toAtLeastTxId) throws IOException {
-    return selectInputStreams(fromTxId, toAtLeastTxId, true);
+  public long getSharedLogCTime() throws IOException {
+    for (JournalAndStream jas : journalSet.getAllJournalStreams()) {
+      if (jas.isShared()) {
+        return jas.getManager().getJournalCTime();
+      }
+    }
+    throw new IOException("No shared log found.");
+  }
+  
+  public synchronized void doPreUpgradeOfSharedLog() throws IOException {
+    for (JournalAndStream jas : journalSet.getAllJournalStreams()) {
+      if (jas.isShared()) {
+        jas.getManager().doPreUpgrade();
+      }
+    }
+  }
+  
+  public synchronized void doUpgradeOfSharedLog() throws IOException {
+    for (JournalAndStream jas : journalSet.getAllJournalStreams()) {
+      if (jas.isShared()) {
+        jas.getManager().doUpgrade(storage);
+      }
+    }
+  }
+  
+  public synchronized void doFinalizeOfSharedLog() throws IOException {
+    for (JournalAndStream jas : journalSet.getAllJournalStreams()) {
+      if (jas.isShared()) {
+        jas.getManager().doFinalize();
+      }
+    }
+  }
+  
+  public synchronized boolean canRollBackSharedLog(StorageInfo prevStorage,
+      int targetLayoutVersion) throws IOException {
+    for (JournalAndStream jas : journalSet.getAllJournalStreams()) {
+      if (jas.isShared()) {
+        return jas.getManager().canRollBack(storage, prevStorage,
+            targetLayoutVersion);
+      }
+    }
+    throw new IOException("No shared log found.");
+  }
+  
+  public synchronized void doRollback() throws IOException {
+    for (JournalAndStream jas : journalSet.getAllJournalStreams()) {
+      if (jas.isShared()) {
+        jas.getManager().doRollback();
+      }
+    }
   }
 
+  public synchronized void discardSegments(long markerTxid)
+      throws IOException {
+    for (JournalAndStream jas : journalSet.getAllJournalStreams()) {
+      jas.getManager().discardSegments(markerTxid);
+    }
+  }
+
+  @Override
+  public void selectInputStreams(Collection<EditLogInputStream> streams,
+      long fromTxId, boolean inProgressOk) throws IOException {
+    journalSet.selectInputStreams(streams, fromTxId, inProgressOk);
+  }
+
+  public Collection<EditLogInputStream> selectInputStreams(
+      long fromTxId, long toAtLeastTxId) throws IOException {
+    return selectInputStreams(fromTxId, toAtLeastTxId, null, true);
+  }
+  
   /**
-   * Select a list of input streams to load.
+   * Select a list of input streams.
    * 
    * @param fromTxId first transaction in the selected streams
-   * @param toAtLeast the selected streams must contain this transaction
-   * @param inProgessOk set to true if in-progress streams are OK
+   * @param toAtLeastTxId the selected streams must contain this transaction
+   * @param recovery recovery context
+   * @param inProgressOk set to true if in-progress streams are OK
    */
-  public synchronized Collection<EditLogInputStream> selectInputStreams(long fromTxId,
-      long toAtLeastTxId, boolean inProgressOk) throws IOException {
+  public synchronized Collection<EditLogInputStream> selectInputStreams(
+      long fromTxId, long toAtLeastTxId, MetaRecoveryContext recovery,
+      boolean inProgressOk) throws IOException {
     List<EditLogInputStream> streams = new ArrayList<EditLogInputStream>();
-    EditLogInputStream stream = journalSet.getInputStream(fromTxId, inProgressOk);
-    while (stream != null) {
-      streams.add(stream);
-      // We're now looking for a higher range, so reset the fromTxId
-      fromTxId = stream.getLastTxId() + 1;
-      stream = journalSet.getInputStream(fromTxId, inProgressOk);
-    }
-    
-    if (fromTxId <= toAtLeastTxId) {
-      closeAllStreams(streams);
-      throw new IOException(String.format("Gap in transactions. Expected to "
-          + "be able to read up until at least txid %d but unable to find any "
-          + "edit logs containing txid %d", toAtLeastTxId, fromTxId));
+    selectInputStreams(streams, fromTxId, inProgressOk);
+
+    try {
+      checkForGaps(streams, fromTxId, toAtLeastTxId, inProgressOk);
+    } catch (IOException e) {
+      if (recovery != null) {
+        // If recovery mode is enabled, continue loading even if we know we
+        // can't load up to toAtLeastTxId.
+        LOG.error(e);
+      } else {
+        closeAllStreams(streams);
+        throw e;
+      }
     }
     return streams;
+  }
+  
+  /**
+   * Check for gaps in the edit log input stream list.
+   * Note: we're assuming that the list is sorted and that txid ranges don't
+   * overlap.  This could be done better and with more generality with an
+   * interval tree.
+   */
+  private void checkForGaps(List<EditLogInputStream> streams, long fromTxId,
+      long toAtLeastTxId, boolean inProgressOk) throws IOException {
+    Iterator<EditLogInputStream> iter = streams.iterator();
+    long txId = fromTxId;
+    while (true) {
+      if (txId > toAtLeastTxId) return;
+      if (!iter.hasNext()) break;
+      EditLogInputStream elis = iter.next();
+      if (elis.getFirstTxId() > txId) break;
+      long next = elis.getLastTxId();
+      if (next == HdfsConstants.INVALID_TXID) {
+        if (!inProgressOk) {
+          throw new RuntimeException("inProgressOk = false, but " +
+              "selectInputStreams returned an in-progress edit " +
+              "log input stream (" + elis + ")");
+        }
+        // We don't know where the in-progress stream ends.
+        // It could certainly go all the way up to toAtLeastTxId.
+        return;
+      }
+      txId = next + 1;
+    }
+    throw new IOException(String.format("Gap in transactions. Expected to "
+        + "be able to read up until at least txid %d but unable to find any "
+        + "edit logs containing txid %d", toAtLeastTxId, txId));
   }
 
   /** 
@@ -1169,11 +1592,13 @@ public class FSEditLog  {
 
     try {
       Constructor<? extends JournalManager> cons
-        = clazz.getConstructor(Configuration.class, URI.class);
-      return cons.newInstance(conf, uri);
+        = clazz.getConstructor(Configuration.class, URI.class,
+            NamespaceInfo.class);
+      return cons.newInstance(conf, uri, storage.getNamespaceInfo());
     } catch (Exception e) {
       throw new IllegalArgumentException("Unable to construct journal, "
                                          + uri, e);
     }
   }
+
 }

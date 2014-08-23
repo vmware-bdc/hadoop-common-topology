@@ -20,6 +20,9 @@
 
 package org.apache.hadoop.hdfs;
 
+import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType.DATA_NODE;
+import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType.NAME_NODE;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -28,25 +31,22 @@ import java.net.URI;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.zip.CRC32;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
-import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
+import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
-
-import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType.NAME_NODE;
-import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType.DATA_NODE;
-
 import org.apache.hadoop.hdfs.server.common.Storage;
-import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
+import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.BlockPoolSliceStorage;
+import org.apache.hadoop.hdfs.server.datanode.DataNodeLayoutVersion;
 import org.apache.hadoop.hdfs.server.datanode.DataStorage;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
@@ -67,10 +67,10 @@ import com.google.common.primitives.Bytes;
 public class UpgradeUtilities {
 
   // Root scratch directory on local filesystem 
-  private static File TEST_ROOT_DIR = 
+  private static final File TEST_ROOT_DIR =
                       new File(MiniDFSCluster.getBaseDirectory());
   // The singleton master storage directory for Namenode
-  private static File namenodeStorage = new File(TEST_ROOT_DIR, "namenodeMaster");
+  private static final File namenodeStorage = new File(TEST_ROOT_DIR, "namenodeMaster");
   // A checksum of the contents in namenodeStorage directory
   private static long namenodeStorageChecksum;
   // The namespaceId of the namenodeStorage directory
@@ -82,7 +82,7 @@ public class UpgradeUtilities {
   // The fsscTime of the namenodeStorage directory
   private static long namenodeStorageFsscTime;
   // The singleton master storage directory for Datanode
-  private static File datanodeStorage = new File(TEST_ROOT_DIR, "datanodeMaster");
+  private static final File datanodeStorage = new File(TEST_ROOT_DIR, "datanodeMaster");
   // A checksum of the contents in datanodeStorage directory
   private static long datanodeStorageChecksum;
   // A checksum of the contents in blockpool storage directory
@@ -109,6 +109,7 @@ public class UpgradeUtilities {
     config.set(DFSConfigKeys.DFS_NAMENODE_EDITS_DIR_KEY, namenodeStorage.toString());
     config.set(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY, datanodeStorage.toString());
     MiniDFSCluster cluster = null;
+    String bpid = null;
     try {
       // format data-node
       createEmptyDirs(new String[] {datanodeStorage.toString()});
@@ -142,13 +143,14 @@ public class UpgradeUtilities {
       writeFile(fs, new Path(baseDir, "file2"), buffer, bufferSize);
       
       // save image
-      namenode.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+      namenode.setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
       namenode.saveNamespace();
-      namenode.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+      namenode.setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
       
       // write more files
       writeFile(fs, new Path(baseDir, "file3"), buffer, bufferSize);
       writeFile(fs, new Path(baseDir, "file4"), buffer, bufferSize);
+      bpid = cluster.getNamesystem(0).getBlockPoolId();
     } finally {
       // shutdown
       if (cluster != null) cluster.shutdown();
@@ -156,22 +158,23 @@ public class UpgradeUtilities {
       FileUtil.fullyDelete(new File(datanodeStorage,"in_use.lock"));
     }
     namenodeStorageChecksum = checksumContents(NAME_NODE, 
-        new File(namenodeStorage, "current"));
+        new File(namenodeStorage, "current"), false);
     File dnCurDir = new File(datanodeStorage, "current");
-    datanodeStorageChecksum = checksumContents(DATA_NODE, dnCurDir);
+    datanodeStorageChecksum = checksumContents(DATA_NODE, dnCurDir, false);
     
-    String bpid = cluster.getNamesystem(0).getBlockPoolId();
     File bpCurDir = new File(BlockPoolSliceStorage.getBpRoot(bpid, dnCurDir),
         "current");
-    blockPoolStorageChecksum = checksumContents(DATA_NODE, bpCurDir);
+    blockPoolStorageChecksum = checksumContents(DATA_NODE, bpCurDir, false);
     
     File bpCurFinalizeDir = new File(BlockPoolSliceStorage.getBpRoot(bpid, dnCurDir),
         "current/"+DataStorage.STORAGE_DIR_FINALIZED);
-    blockPoolFinalizedStorageChecksum = checksumContents(DATA_NODE, bpCurFinalizeDir);
+    blockPoolFinalizedStorageChecksum = checksumContents(DATA_NODE,
+        bpCurFinalizeDir, true);
     
     File bpCurRbwDir = new File(BlockPoolSliceStorage.getBpRoot(bpid, dnCurDir),
         "current/"+DataStorage.STORAGE_DIR_RBW);
-    blockPoolRbwStorageChecksum = checksumContents(DATA_NODE, bpCurRbwDir);
+    blockPoolRbwStorageChecksum = checksumContents(DATA_NODE, bpCurRbwDir,
+        false);
   }
   
   // Private helper method that writes a file to the given file system.
@@ -265,34 +268,49 @@ public class UpgradeUtilities {
   
   /**
    * Compute the checksum of all the files in the specified directory.
-   * The contents of subdirectories are not included. This method provides
-   * an easy way to ensure equality between the contents of two directories.
+   * This method provides an easy way to ensure equality between the contents
+   * of two directories.
    *
    * @param nodeType if DATA_NODE then any file named "VERSION" is ignored.
    *    This is because this file file is changed every time
    *    the Datanode is started.
-   * @param dir must be a directory. Subdirectories are ignored.
+   * @param dir must be a directory
+   * @param recursive whether or not to consider subdirectories
    *
    * @throws IllegalArgumentException if specified directory is not a directory
    * @throws IOException if an IOException occurs while reading the files
    * @return the computed checksum value
    */
-  public static long checksumContents(NodeType nodeType, File dir) throws IOException {
+  public static long checksumContents(NodeType nodeType, File dir,
+      boolean recursive) throws IOException {
+    CRC32 checksum = new CRC32();
+    checksumContentsHelper(nodeType, dir, checksum, recursive);
+    return checksum.getValue();
+  }
+
+  public static void checksumContentsHelper(NodeType nodeType, File dir,
+      CRC32 checksum, boolean recursive) throws IOException {
     if (!dir.isDirectory()) {
       throw new IllegalArgumentException(
-                                         "Given argument is not a directory:" + dir);
+          "Given argument is not a directory:" + dir);
     }
     File[] list = dir.listFiles();
     Arrays.sort(list);
-    CRC32 checksum = new CRC32();
     for (int i = 0; i < list.length; i++) {
       if (!list[i].isFile()) {
+        if (recursive) {
+          checksumContentsHelper(nodeType, list[i], checksum, recursive);
+        }
         continue;
       }
-      // skip VERSION file for DataNodes
-      if (nodeType == DATA_NODE && list[i].getName().equals("VERSION")) {
-        continue; 
+
+      // skip VERSION and dfsUsed file for DataNodes
+      if (nodeType == DATA_NODE &&
+          (list[i].getName().equals("VERSION") ||
+              list[i].getName().equals("dfsUsed"))) {
+        continue;
       }
+
       FileInputStream fis = null;
       try {
         fis = new FileInputStream(list[i]);
@@ -307,7 +325,6 @@ public class UpgradeUtilities {
         }
       }
     }
-    return checksum.getValue();
   }
   
   /**
@@ -452,12 +469,14 @@ public class UpgradeUtilities {
    */
   public static void createDataNodeVersionFile(File[] parent,
       StorageInfo version, String bpid, String bpidToWrite) throws IOException {
-    DataStorage storage = new DataStorage(version, "doNotCare");
+    DataStorage storage = new DataStorage(version);
+    storage.setDatanodeUuid("FixedDatanodeUuid");
 
     File[] versionFiles = new File[parent.length];
     for (int i = 0; i < parent.length; i++) {
       File versionFile = new File(parent[i], "VERSION");
       StorageDirectory sd = new StorageDirectory(parent[i].getParentFile());
+      storage.createStorageID(sd);
       storage.writeProperties(versionFile, sd);
       versionFiles[i] = versionFile;
       File bpDir = BlockPoolSliceStorage.getBpRoot(bpid, parent[i]);
@@ -468,7 +487,8 @@ public class UpgradeUtilities {
   public static void createBlockPoolVersionFile(File bpDir,
       StorageInfo version, String bpid) throws IOException {
     // Create block pool version files
-    if (LayoutVersion.supports(Feature.FEDERATION, version.layoutVersion)) {
+    if (DataNodeLayoutVersion.supports(
+        LayoutVersion.Feature.FEDERATION, version.layoutVersion)) {
       File bpCurDir = new File(bpDir, Storage.STORAGE_DIR_CURRENT);
       BlockPoolSliceStorage bpStorage = new BlockPoolSliceStorage(version,
           bpid);
@@ -511,8 +531,8 @@ public class UpgradeUtilities {
    * Return the layout version inherent in the current version
    * of the Namenode, whether it is running or not.
    */
-  public static int getCurrentLayoutVersion() {
-    return HdfsConstants.LAYOUT_VERSION;
+  public static int getCurrentNameNodeLayoutVersion() {
+    return HdfsConstants.NAMENODE_LAYOUT_VERSION;
   }
   
   /**

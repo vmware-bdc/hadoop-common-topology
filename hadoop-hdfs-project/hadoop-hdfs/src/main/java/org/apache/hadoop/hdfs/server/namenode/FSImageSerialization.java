@@ -17,7 +17,8 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import java.io.DataInputStream;
+import java.io.DataInput;
+import java.io.DataOutput;
 import java.io.DataOutputStream;
 import java.io.IOException;
 
@@ -29,14 +30,26 @@ import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DeprecatedUTF8;
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
+import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
+import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
-import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
+import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotFSImageFormat;
+import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotFSImageFormat.ReferenceMap;
+import org.apache.hadoop.hdfs.util.XMLUtils;
+import org.apache.hadoop.hdfs.util.XMLUtils.InvalidXmlException;
+import org.apache.hadoop.hdfs.util.XMLUtils.Stanza;
+import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.ShortWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.WritableUtils;
+import org.xml.sax.ContentHandler;
+import org.xml.sax.SAXException;
+
+import com.google.common.base.Preconditions;
 
 /**
  * Static utility functions for serializing various pieces of data in the correct
@@ -72,19 +85,44 @@ public class FSImageSerialization {
   static private final class TLData {
     final DeprecatedUTF8 U_STR = new DeprecatedUTF8();
     final ShortWritable U_SHORT = new ShortWritable();
+    final IntWritable U_INT = new IntWritable();
     final LongWritable U_LONG = new LongWritable();
     final FsPermission FILE_PERM = new FsPermission((short) 0);
+  }
+
+  private static void writePermissionStatus(INodeAttributes inode,
+      DataOutput out) throws IOException {
+    final FsPermission p = TL_DATA.get().FILE_PERM;
+    p.fromShort(inode.getFsPermissionShort());
+    PermissionStatus.write(out, inode.getUserName(), inode.getGroupName(), p);
+  }
+
+  private static void writeBlocks(final Block[] blocks,
+      final DataOutput out) throws IOException {
+    if (blocks == null) {
+      out.writeInt(0);
+    } else {
+      out.writeInt(blocks.length);
+      for (Block blk : blocks) {
+        blk.write(out);
+      }
+    }
   }
 
   // Helper function that reads in an INodeUnderConstruction
   // from the input stream
   //
-  static INodeFileUnderConstruction readINodeUnderConstruction(
-                            DataInputStream in) throws IOException {
+  static INodeFile readINodeUnderConstruction(
+      DataInput in, FSNamesystem fsNamesys, int imgVersion)
+      throws IOException {
     byte[] name = readBytes(in);
+    long inodeId = NameNodeLayoutVersion.supports(
+        LayoutVersion.Feature.ADD_INODE_ID, imgVersion) ? in.readLong()
+        : fsNamesys.allocateNewInodeId();
     short blockReplication = in.readShort();
     long modificationTime = in.readLong();
     long preferredBlockSize = in.readLong();
+  
     int numBlocks = in.readInt();
     BlockInfo[] blocks = new BlockInfo[numBlocks];
     Block blk = new Block();
@@ -108,86 +146,186 @@ public class FSImageSerialization {
     int numLocs = in.readInt();
     assert numLocs == 0 : "Unexpected block locations";
 
-    return new INodeFileUnderConstruction(name, 
-                                          blockReplication, 
-                                          modificationTime,
-                                          preferredBlockSize,
-                                          blocks,
-                                          perm,
-                                          clientName,
-                                          clientMachine,
-                                          null);
+    INodeFile file = new INodeFile(inodeId, name, perm, modificationTime,
+        modificationTime, blocks, blockReplication, preferredBlockSize);
+    file.toUnderConstruction(clientName, clientMachine);
+    return file;
   }
 
   // Helper function that writes an INodeUnderConstruction
   // into the input stream
   //
-  static void writeINodeUnderConstruction(DataOutputStream out,
-                                           INodeFileUnderConstruction cons,
-                                           String path) 
-                                           throws IOException {
+  static void writeINodeUnderConstruction(DataOutputStream out, INodeFile cons,
+      String path) throws IOException {
     writeString(path, out);
-    out.writeShort(cons.getReplication());
+    out.writeLong(cons.getId());
+    out.writeShort(cons.getFileReplication());
     out.writeLong(cons.getModificationTime());
     out.writeLong(cons.getPreferredBlockSize());
-    int nrBlocks = cons.getBlocks().length;
-    out.writeInt(nrBlocks);
-    for (int i = 0; i < nrBlocks; i++) {
-      cons.getBlocks()[i].write(out);
-    }
+
+    writeBlocks(cons.getBlocks(), out);
     cons.getPermissionStatus().write(out);
-    writeString(cons.getClientName(), out);
-    writeString(cons.getClientMachine(), out);
+
+    FileUnderConstructionFeature uc = cons.getFileUnderConstructionFeature();
+    writeString(uc.getClientName(), out);
+    writeString(uc.getClientMachine(), out);
 
     out.writeInt(0); //  do not store locations of last block
   }
 
-  /*
+  /**
+   * Serialize a {@link INodeFile} node
+   * @param node The node to write
+   * @param out The {@link DataOutputStream} where the fields are written
+   * @param writeBlock Whether to write block information
+   */
+  public static void writeINodeFile(INodeFile file, DataOutput out,
+      boolean writeUnderConstruction) throws IOException {
+    writeLocalName(file, out);
+    out.writeLong(file.getId());
+    out.writeShort(file.getFileReplication());
+    out.writeLong(file.getModificationTime());
+    out.writeLong(file.getAccessTime());
+    out.writeLong(file.getPreferredBlockSize());
+
+    writeBlocks(file.getBlocks(), out);
+    SnapshotFSImageFormat.saveFileDiffList(file, out);
+
+    if (writeUnderConstruction) {
+      if (file.isUnderConstruction()) {
+        out.writeBoolean(true);
+        final FileUnderConstructionFeature uc = file.getFileUnderConstructionFeature();
+        writeString(uc.getClientName(), out);
+        writeString(uc.getClientMachine(), out);
+      } else {
+        out.writeBoolean(false);
+      }
+    }
+
+    writePermissionStatus(file, out);
+  }
+
+  /** Serialize an {@link INodeFileAttributes}. */
+  public static void writeINodeFileAttributes(INodeFileAttributes file,
+      DataOutput out) throws IOException {
+    writeLocalName(file, out);
+    writePermissionStatus(file, out);
+    out.writeLong(file.getModificationTime());
+    out.writeLong(file.getAccessTime());
+
+    out.writeShort(file.getFileReplication());
+    out.writeLong(file.getPreferredBlockSize());
+  }
+
+  private static void writeQuota(Quota.Counts quota, DataOutput out)
+      throws IOException {
+    out.writeLong(quota.get(Quota.NAMESPACE));
+    out.writeLong(quota.get(Quota.DISKSPACE));
+  }
+
+  /**
+   * Serialize a {@link INodeDirectory}
+   * @param node The node to write
+   * @param out The {@link DataOutput} where the fields are written
+   */
+  public static void writeINodeDirectory(INodeDirectory node, DataOutput out)
+      throws IOException {
+    writeLocalName(node, out);
+    out.writeLong(node.getId());
+    out.writeShort(0);  // replication
+    out.writeLong(node.getModificationTime());
+    out.writeLong(0);   // access time
+    out.writeLong(0);   // preferred block size
+    out.writeInt(-1);   // # of blocks
+
+    writeQuota(node.getQuotaCounts(), out);
+
+    if (node.isSnapshottable()) {
+      out.writeBoolean(true);
+    } else {
+      out.writeBoolean(false);
+      out.writeBoolean(node.isWithSnapshot());
+    }
+
+    writePermissionStatus(node, out);
+  }
+
+  /**
+   * Serialize a {@link INodeDirectory}
+   * @param a The node to write
+   * @param out The {@link DataOutput} where the fields are written
+   */
+  public static void writeINodeDirectoryAttributes(
+      INodeDirectoryAttributes a, DataOutput out) throws IOException {
+    writeLocalName(a, out);
+    writePermissionStatus(a, out);
+    out.writeLong(a.getModificationTime());
+    writeQuota(a.getQuotaCounts(), out);
+  }
+
+  /**
+   * Serialize a {@link INodeSymlink} node
+   * @param node The node to write
+   * @param out The {@link DataOutput} where the fields are written
+   */
+  private static void writeINodeSymlink(INodeSymlink node, DataOutput out)
+      throws IOException {
+    writeLocalName(node, out);
+    out.writeLong(node.getId());
+    out.writeShort(0);  // replication
+    out.writeLong(0);   // modification time
+    out.writeLong(0);   // access time
+    out.writeLong(0);   // preferred block size
+    out.writeInt(-2);   // # of blocks
+
+    Text.writeString(out, node.getSymlinkString());
+    writePermissionStatus(node, out);
+  }
+
+  /** Serialize a {@link INodeReference} node */
+  private static void writeINodeReference(INodeReference ref, DataOutput out,
+      boolean writeUnderConstruction, ReferenceMap referenceMap
+      ) throws IOException {
+    writeLocalName(ref, out);
+    out.writeLong(ref.getId());
+    out.writeShort(0);  // replication
+    out.writeLong(0);   // modification time
+    out.writeLong(0);   // access time
+    out.writeLong(0);   // preferred block size
+    out.writeInt(-3);   // # of blocks
+
+    final boolean isWithName = ref instanceof INodeReference.WithName;
+    out.writeBoolean(isWithName);
+
+    if (!isWithName) {
+      Preconditions.checkState(ref instanceof INodeReference.DstReference);
+      // dst snapshot id
+      out.writeInt(((INodeReference.DstReference) ref).getDstSnapshotId());
+    } else {
+      out.writeInt(((INodeReference.WithName) ref).getLastSnapshotId());
+    }
+
+    final INodeReference.WithCount withCount
+        = (INodeReference.WithCount)ref.getReferredINode();
+    referenceMap.writeINodeReferenceWithCount(withCount, out,
+        writeUnderConstruction);
+  }
+
+  /**
    * Save one inode's attributes to the image.
    */
-  static void saveINode2Image(INode node,
-                              DataOutputStream out) throws IOException {
-    byte[] name = node.getLocalNameBytes();
-    out.writeShort(name.length);
-    out.write(name);
-    FsPermission filePerm = TL_DATA.get().FILE_PERM;
-    if (node.isDirectory()) {
-      out.writeShort(0);  // replication
-      out.writeLong(node.getModificationTime());
-      out.writeLong(0);   // access time
-      out.writeLong(0);   // preferred block size
-      out.writeInt(-1);   // # of blocks
-      out.writeLong(node.getNsQuota());
-      out.writeLong(node.getDsQuota());
-      filePerm.fromShort(node.getFsPermissionShort());
-      PermissionStatus.write(out, node.getUserName(),
-                             node.getGroupName(),
-                             filePerm);
-    } else if (node.isLink()) {
-      out.writeShort(0);  // replication
-      out.writeLong(0);   // modification time
-      out.writeLong(0);   // access time
-      out.writeLong(0);   // preferred block size
-      out.writeInt(-2);   // # of blocks
-      Text.writeString(out, ((INodeSymlink)node).getLinkValue());
-      filePerm.fromShort(node.getFsPermissionShort());
-      PermissionStatus.write(out, node.getUserName(),
-                             node.getGroupName(),
-                             filePerm);      
-    } else {
-      INodeFile fileINode = (INodeFile)node;
-      out.writeShort(fileINode.getReplication());
-      out.writeLong(fileINode.getModificationTime());
-      out.writeLong(fileINode.getAccessTime());
-      out.writeLong(fileINode.getPreferredBlockSize());
-      Block[] blocks = fileINode.getBlocks();
-      out.writeInt(blocks.length);
-      for (Block blk : blocks)
-        blk.write(out);
-      filePerm.fromShort(fileINode.getFsPermissionShort());
-      PermissionStatus.write(out, fileINode.getUserName(),
-                             fileINode.getGroupName(),
-                             filePerm);
+  public static void saveINode2Image(INode node, DataOutput out,
+      boolean writeUnderConstruction, ReferenceMap referenceMap)
+      throws IOException {
+    if (node.isReference()) {
+      writeINodeReference(node.asReference(), out, writeUnderConstruction,
+          referenceMap);
+    } else if (node.isDirectory()) {
+      writeINodeDirectory(node.asDirectory(), out);
+    } else if (node.isSymlink()) {
+      writeINodeSymlink(node.asSymlink(), out);
+    } else if (node.isFile()) {
+      writeINodeFile(node.asFile(), out, writeUnderConstruction);
     }
   }
 
@@ -195,19 +333,19 @@ public class FSImageSerialization {
   // code is moved into this package. This method should not be called
   // by other code.
   @SuppressWarnings("deprecation")
-  public static String readString(DataInputStream in) throws IOException {
+  public static String readString(DataInput in) throws IOException {
     DeprecatedUTF8 ustr = TL_DATA.get().U_STR;
     ustr.readFields(in);
-    return ustr.toString();
+    return ustr.toStringChecked();
   }
 
-  static String readString_EmptyAsNull(DataInputStream in) throws IOException {
+  static String readString_EmptyAsNull(DataInput in) throws IOException {
     final String s = readString(in);
     return s.isEmpty()? null: s;
   }
 
   @SuppressWarnings("deprecation")
-  static void writeString(String str, DataOutputStream out) throws IOException {
+  public static void writeString(String str, DataOutput out) throws IOException {
     DeprecatedUTF8 ustr = TL_DATA.get().U_STR;
     ustr.set(str);
     ustr.write(out);
@@ -215,10 +353,10 @@ public class FSImageSerialization {
 
   
   /** read the long value */
-  static long readLong(DataInputStream in) throws IOException {
-    LongWritable ustr = TL_DATA.get().U_LONG;
-    ustr.readFields(in);
-    return ustr.get();
+  static long readLong(DataInput in) throws IOException {
+    LongWritable uLong = TL_DATA.get().U_LONG;
+    uLong.readFields(in);
+    return uLong.get();
   }
 
   /** write the long value */
@@ -227,9 +365,23 @@ public class FSImageSerialization {
     uLong.set(value);
     uLong.write(out);
   }
+  
+  /** read the int value */
+  static int readInt(DataInput in) throws IOException {
+    IntWritable uInt = TL_DATA.get().U_INT;
+    uInt.readFields(in);
+    return uInt.get();
+  }
+  
+  /** write the int value */
+  static void writeInt(int value, DataOutputStream out) throws IOException {
+    IntWritable uInt = TL_DATA.get().U_INT;
+    uInt.set(value);
+    uInt.write(out);
+  }
 
   /** read short value */
-  static short readShort(DataInputStream in) throws IOException {
+  static short readShort(DataInput in) throws IOException {
     ShortWritable uShort = TL_DATA.get().U_SHORT;
     uShort.readFields(in);
     return uShort.get();
@@ -244,7 +396,7 @@ public class FSImageSerialization {
   
   // Same comments apply for this method as for readString()
   @SuppressWarnings("deprecation")
-  public static byte[] readBytes(DataInputStream in) throws IOException {
+  public static byte[] readBytes(DataInput in) throws IOException {
     DeprecatedUTF8 ustr = TL_DATA.get().U_STR;
     ustr.readFields(in);
     int len = ustr.getLength();
@@ -256,13 +408,13 @@ public class FSImageSerialization {
   /**
    * Reading the path from the image and converting it to byte[][] directly
    * this saves us an array copy and conversions to and from String
-   * @param in
+   * @param in input to read from
    * @return the array each element of which is a byte[] representation 
    *            of a path component
    * @throws IOException
    */
   @SuppressWarnings("deprecation")
-  public static byte[][] readPathComponents(DataInputStream in)
+  public static byte[][] readPathComponents(DataInput in)
       throws IOException {
     DeprecatedUTF8 ustr = TL_DATA.get().U_STR;
     
@@ -270,7 +422,24 @@ public class FSImageSerialization {
     return DFSUtil.bytes2byteArray(ustr.getBytes(),
       ustr.getLength(), (byte) Path.SEPARATOR_CHAR);
   }
+  
+  public static byte[] readLocalName(DataInput in) throws IOException {
+    byte[] createdNodeName = new byte[in.readShort()];
+    in.readFully(createdNodeName);
+    return createdNodeName;
+  }
 
+  private static void writeLocalName(INodeAttributes inode, DataOutput out)
+      throws IOException {
+    final byte[] name = inode.getLocalNameBytes();
+    writeBytes(name, out);
+  }
+  
+  public static void writeBytes(byte[] data, DataOutput out)
+      throws IOException {
+    out.writeShort(data.length);
+    out.write(data);
+  }
 
   /**
    * Write an array of blocks as compactly as possible. This uses
@@ -295,7 +464,7 @@ public class FSImageSerialization {
   }
   
   public static Block[] readCompactBlockArray(
-      DataInputStream in, int logVersion) throws IOException {
+      DataInput in, int logVersion) throws IOException {
     int num = WritableUtils.readVInt(in);
     if (num < 0) {
       throw new IOException("Invalid block array length: " + num);
@@ -313,4 +482,221 @@ public class FSImageSerialization {
     }
     return ret;
   }
+
+  public static void writeCacheDirectiveInfo(DataOutputStream out,
+      CacheDirectiveInfo directive) throws IOException {
+    writeLong(directive.getId(), out);
+    int flags =
+        ((directive.getPath() != null) ? 0x1 : 0) |
+        ((directive.getReplication() != null) ? 0x2 : 0) |
+        ((directive.getPool() != null) ? 0x4 : 0) |
+        ((directive.getExpiration() != null) ? 0x8 : 0);
+    out.writeInt(flags);
+    if (directive.getPath() != null) {
+      writeString(directive.getPath().toUri().getPath(), out);
+    }
+    if (directive.getReplication() != null) {
+      writeShort(directive.getReplication(), out);
+    }
+    if (directive.getPool() != null) {
+      writeString(directive.getPool(), out);
+    }
+    if (directive.getExpiration() != null) {
+      writeLong(directive.getExpiration().getMillis(), out);
+    }
+  }
+
+  public static CacheDirectiveInfo readCacheDirectiveInfo(DataInput in)
+      throws IOException {
+    CacheDirectiveInfo.Builder builder =
+        new CacheDirectiveInfo.Builder();
+    builder.setId(readLong(in));
+    int flags = in.readInt();
+    if ((flags & 0x1) != 0) {
+      builder.setPath(new Path(readString(in)));
+    }
+    if ((flags & 0x2) != 0) {
+      builder.setReplication(readShort(in));
+    }
+    if ((flags & 0x4) != 0) {
+      builder.setPool(readString(in));
+    }
+    if ((flags & 0x8) != 0) {
+      builder.setExpiration(
+          CacheDirectiveInfo.Expiration.newAbsolute(readLong(in)));
+    }
+    if ((flags & ~0xF) != 0) {
+      throw new IOException("unknown flags set in " +
+          "ModifyCacheDirectiveInfoOp: " + flags);
+    }
+    return builder.build();
+  }
+
+  public static CacheDirectiveInfo readCacheDirectiveInfo(Stanza st)
+      throws InvalidXmlException {
+    CacheDirectiveInfo.Builder builder =
+        new CacheDirectiveInfo.Builder();
+    builder.setId(Long.parseLong(st.getValue("ID")));
+    String path = st.getValueOrNull("PATH");
+    if (path != null) {
+      builder.setPath(new Path(path));
+    }
+    String replicationString = st.getValueOrNull("REPLICATION");
+    if (replicationString != null) {
+      builder.setReplication(Short.parseShort(replicationString));
+    }
+    String pool = st.getValueOrNull("POOL");
+    if (pool != null) {
+      builder.setPool(pool);
+    }
+    String expiryTime = st.getValueOrNull("EXPIRATION");
+    if (expiryTime != null) {
+      builder.setExpiration(CacheDirectiveInfo.Expiration.newAbsolute(
+          Long.parseLong(expiryTime)));
+    }
+    return builder.build();
+  }
+
+  public static void writeCacheDirectiveInfo(ContentHandler contentHandler,
+      CacheDirectiveInfo directive) throws SAXException {
+    XMLUtils.addSaxString(contentHandler, "ID",
+        Long.toString(directive.getId()));
+    if (directive.getPath() != null) {
+      XMLUtils.addSaxString(contentHandler, "PATH",
+          directive.getPath().toUri().getPath());
+    }
+    if (directive.getReplication() != null) {
+      XMLUtils.addSaxString(contentHandler, "REPLICATION",
+          Short.toString(directive.getReplication()));
+    }
+    if (directive.getPool() != null) {
+      XMLUtils.addSaxString(contentHandler, "POOL", directive.getPool());
+    }
+    if (directive.getExpiration() != null) {
+      XMLUtils.addSaxString(contentHandler, "EXPIRATION",
+          "" + directive.getExpiration().getMillis());
+    }
+  }
+
+  public static void writeCachePoolInfo(DataOutputStream out, CachePoolInfo info)
+      throws IOException {
+    writeString(info.getPoolName(), out);
+
+    final String ownerName = info.getOwnerName();
+    final String groupName = info.getGroupName();
+    final Long limit = info.getLimit();
+    final FsPermission mode = info.getMode();
+    final Long maxRelativeExpiry = info.getMaxRelativeExpiryMs();
+
+    boolean hasOwner, hasGroup, hasMode, hasLimit, hasMaxRelativeExpiry;
+    hasOwner = ownerName != null;
+    hasGroup = groupName != null;
+    hasMode = mode != null;
+    hasLimit = limit != null;
+    hasMaxRelativeExpiry = maxRelativeExpiry != null;
+
+    int flags =
+        (hasOwner ? 0x1 : 0) |
+        (hasGroup ? 0x2 : 0) |
+        (hasMode  ? 0x4 : 0) |
+        (hasLimit ? 0x8 : 0) |
+        (hasMaxRelativeExpiry ? 0x10 : 0);
+
+    writeInt(flags, out);
+
+    if (hasOwner) {
+      writeString(ownerName, out);
+    }
+    if (hasGroup) {
+      writeString(groupName, out);
+    }
+    if (hasMode) {
+      mode.write(out);
+    }
+    if (hasLimit) {
+      writeLong(limit, out);
+    }
+    if (hasMaxRelativeExpiry) {
+      writeLong(maxRelativeExpiry, out);
+    }
+  }
+
+  public static CachePoolInfo readCachePoolInfo(DataInput in)
+      throws IOException {
+    String poolName = readString(in);
+    CachePoolInfo info = new CachePoolInfo(poolName);
+    int flags = readInt(in);
+    if ((flags & 0x1) != 0) {
+      info.setOwnerName(readString(in));
+    }
+    if ((flags & 0x2) != 0)  {
+      info.setGroupName(readString(in));
+    }
+    if ((flags & 0x4) != 0) {
+      info.setMode(FsPermission.read(in));
+    }
+    if ((flags & 0x8) != 0) {
+      info.setLimit(readLong(in));
+    }
+    if ((flags & 0x10) != 0) {
+      info.setMaxRelativeExpiryMs(readLong(in));
+    }
+    if ((flags & ~0x1F) != 0) {
+      throw new IOException("Unknown flag in CachePoolInfo: " + flags);
+    }
+    return info;
+  }
+
+  public static void writeCachePoolInfo(ContentHandler contentHandler,
+      CachePoolInfo info) throws SAXException {
+    XMLUtils.addSaxString(contentHandler, "POOLNAME", info.getPoolName());
+
+    final String ownerName = info.getOwnerName();
+    final String groupName = info.getGroupName();
+    final Long limit = info.getLimit();
+    final FsPermission mode = info.getMode();
+    final Long maxRelativeExpiry = info.getMaxRelativeExpiryMs();
+
+    if (ownerName != null) {
+      XMLUtils.addSaxString(contentHandler, "OWNERNAME", ownerName);
+    }
+    if (groupName != null) {
+      XMLUtils.addSaxString(contentHandler, "GROUPNAME", groupName);
+    }
+    if (mode != null) {
+      FSEditLogOp.fsPermissionToXml(contentHandler, mode);
+    }
+    if (limit != null) {
+      XMLUtils.addSaxString(contentHandler, "LIMIT",
+          Long.toString(limit));
+    }
+    if (maxRelativeExpiry != null) {
+      XMLUtils.addSaxString(contentHandler, "MAXRELATIVEEXPIRY",
+          Long.toString(maxRelativeExpiry));
+    }
+  }
+
+  public static CachePoolInfo readCachePoolInfo(Stanza st)
+      throws InvalidXmlException {
+    String poolName = st.getValue("POOLNAME");
+    CachePoolInfo info = new CachePoolInfo(poolName);
+    if (st.hasChildren("OWNERNAME")) {
+      info.setOwnerName(st.getValue("OWNERNAME"));
+    }
+    if (st.hasChildren("GROUPNAME")) {
+      info.setGroupName(st.getValue("GROUPNAME"));
+    }
+    if (st.hasChildren("MODE")) {
+      info.setMode(FSEditLogOp.fsPermissionFromXml(st));
+    }
+    if (st.hasChildren("LIMIT")) {
+      info.setLimit(Long.parseLong(st.getValue("LIMIT")));
+    }
+    if (st.hasChildren("MAXRELATIVEEXPIRY")) {
+      info.setMaxRelativeExpiryMs(
+          Long.parseLong(st.getValue("MAXRELATIVEEXPIRY")));
+    }
+    return info;
+  }
+
 }

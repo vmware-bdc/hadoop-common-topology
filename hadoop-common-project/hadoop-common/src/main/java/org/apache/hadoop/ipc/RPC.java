@@ -21,7 +21,6 @@ package org.apache.hadoop.ipc;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
-import java.lang.reflect.Method;
 
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
@@ -41,16 +40,21 @@ import org.apache.commons.logging.*;
 
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.io.*;
+import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.ipc.Client.ConnectionId;
-import org.apache.hadoop.ipc.RpcPayloadHeader.RpcKind;
 import org.apache.hadoop.ipc.protobuf.ProtocolInfoProtos.ProtocolInfoService;
+import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.RpcResponseHeaderProto.RpcErrorCodeProto;
+import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.RpcResponseHeaderProto.RpcStatusProto;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.SaslRpcServer;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.SecretManager;
 import org.apache.hadoop.security.token.TokenIdentifier;
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.*;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.Time;
 
 import com.google.protobuf.BlockingService;
 
@@ -72,7 +76,21 @@ import com.google.protobuf.BlockingService;
  * All methods in the protocol should throw only IOException.  No field data of
  * the protocol instance is transmitted.
  */
+@InterfaceAudience.LimitedPrivate(value = { "Common", "HDFS", "MapReduce", "Yarn" })
+@InterfaceStability.Evolving
 public class RPC {
+  final static int RPC_SERVICE_CLASS_DEFAULT = 0;
+  public enum RpcKind {
+    RPC_BUILTIN ((short) 1),         // Used for built in calls by tests
+    RPC_WRITABLE ((short) 2),        // Use WritableRpcEngine 
+    RPC_PROTOCOL_BUFFER ((short) 3); // Use ProtobufRpcEngine
+    final static short MAX_INDEX = RPC_PROTOCOL_BUFFER.value; // used for array size
+    public final short value; //TODO make it private
+
+    RpcKind(short val) {
+      this.value = val;
+    } 
+  }
   
   interface RpcInvoker {   
     /**
@@ -197,7 +215,7 @@ public class RPC {
   /**
    * A version mismatch for the RPC protocol.
    */
-  public static class VersionMismatch extends IOException {
+  public static class VersionMismatch extends RpcServerException {
     private static final long serialVersionUID = 0;
 
     private String interfaceName;
@@ -240,6 +258,19 @@ public class RPC {
      */
     public long getServerVersion() {
       return serverVersion;
+    }
+    /**
+     * get the rpc status corresponding to this exception
+     */
+    public RpcStatusProto getRpcStatusProto() {
+      return RpcStatusProto.ERROR;
+    }
+
+    /**
+     * get the detailed rpc status corresponding to this exception
+     */
+    public RpcErrorCodeProto getRpcErrorCodeProto() {
+      return RpcErrorCodeProto.ERROR_RPC_VERSION_MISMATCH;
     }
   }
 
@@ -315,7 +346,7 @@ public class RPC {
                              long clientVersion,
                              InetSocketAddress addr, Configuration conf,
                              long connTimeout) throws IOException { 
-    return waitForProtocolProxy(protocol, clientVersion, addr, conf, 0, connTimeout);
+    return waitForProtocolProxy(protocol, clientVersion, addr, conf, 0, null, connTimeout);
   }
   
   /**
@@ -336,7 +367,7 @@ public class RPC {
                              int rpcTimeout,
                              long timeout) throws IOException {
     return waitForProtocolProxy(protocol, clientVersion, addr,
-        conf, rpcTimeout, timeout).getProxy();
+        conf, rpcTimeout, null, timeout).getProxy();
   }
 
   /**
@@ -356,14 +387,15 @@ public class RPC {
                                long clientVersion,
                                InetSocketAddress addr, Configuration conf,
                                int rpcTimeout,
+                               RetryPolicy connectionRetryPolicy,
                                long timeout) throws IOException { 
-    long startTime = System.currentTimeMillis();
+    long startTime = Time.now();
     IOException ioe;
     while (true) {
       try {
         return getProtocolProxy(protocol, clientVersion, addr, 
             UserGroupInformation.getCurrentUser(), conf, NetUtils
-            .getDefaultSocketFactory(conf), rpcTimeout);
+            .getDefaultSocketFactory(conf), rpcTimeout, connectionRetryPolicy);
       } catch(ConnectException se) {  // namenode has not been started
         LOG.info("Server at " + addr + " not available yet, Zzzzz...");
         ioe = se;
@@ -375,7 +407,7 @@ public class RPC {
         ioe = nrthe;
       }
       // check if timed out
-      if (System.currentTimeMillis()-timeout >= startTime) {
+      if (Time.now()-timeout >= startTime) {
         throw ioe;
       }
 
@@ -452,7 +484,7 @@ public class RPC {
                                 Configuration conf,
                                 SocketFactory factory) throws IOException {
     return getProtocolProxy(
-        protocol, clientVersion, addr, ticket, conf, factory, 0);
+        protocol, clientVersion, addr, ticket, conf, factory, 0, null);
   }
   
   /**
@@ -478,7 +510,7 @@ public class RPC {
                                 SocketFactory factory,
                                 int rpcTimeout) throws IOException {
     return getProtocolProxy(protocol, clientVersion, addr, ticket,
-             conf, factory, rpcTimeout).getProxy();
+             conf, factory, rpcTimeout, null).getProxy();
   }
   
   /**
@@ -501,12 +533,13 @@ public class RPC {
                                 UserGroupInformation ticket,
                                 Configuration conf,
                                 SocketFactory factory,
-                                int rpcTimeout) throws IOException {    
+                                int rpcTimeout,
+                                RetryPolicy connectionRetryPolicy) throws IOException {    
     if (UserGroupInformation.isSecurityEnabled()) {
       SaslRpcServer.init(conf);
     }
-    return getProtocolEngine(protocol,conf).getProxy(protocol,
-        clientVersion, addr, ticket, conf, factory, rpcTimeout);
+    return getProtocolEngine(protocol,conf).getProxy(protocol, clientVersion,
+        addr, ticket, conf, factory, rpcTimeout, connectionRetryPolicy);
   }
 
    /**
@@ -601,7 +634,7 @@ public class RPC {
     } catch (IOException e) {
       LOG.error("Closing proxy or invocation handler caused exception", e);
     } catch (IllegalArgumentException e) {
-      LOG.error("RPC.stopProxy called on non proxy.", e);
+      LOG.error("RPC.stopProxy called on non proxy: class=" + proxy.getClass().getName(), e);
     }
     
     // If you see this error on a mock object in a unit test you're
@@ -613,100 +646,110 @@ public class RPC {
             + proxy.getClass());
   }
 
-  /** 
-   * Expert: Make multiple, parallel calls to a set of servers.
-   * @deprecated Use {@link #call(Method, Object[][], InetSocketAddress[], UserGroupInformation, Configuration)} instead 
+  /**
+   * Class to construct instances of RPC server with specific options.
    */
-  @Deprecated
-  public static Object[] call(Method method, Object[][] params,
-                              InetSocketAddress[] addrs, Configuration conf)
-    throws IOException, InterruptedException {
-    return call(method, params, addrs, null, conf);
+  public static class Builder {
+    private Class<?> protocol = null;
+    private Object instance = null;
+    private String bindAddress = "0.0.0.0";
+    private int port = 0;
+    private int numHandlers = 1;
+    private int numReaders = -1;
+    private int queueSizePerHandler = -1;
+    private boolean verbose = false;
+    private final Configuration conf;    
+    private SecretManager<? extends TokenIdentifier> secretManager = null;
+    private String portRangeConfig = null;
+    
+    public Builder(Configuration conf) {
+      this.conf = conf;
+    }
+
+    /** Mandatory field */
+    public Builder setProtocol(Class<?> protocol) {
+      this.protocol = protocol;
+      return this;
+    }
+    
+    /** Mandatory field */
+    public Builder setInstance(Object instance) {
+      this.instance = instance;
+      return this;
+    }
+    
+    /** Default: 0.0.0.0 */
+    public Builder setBindAddress(String bindAddress) {
+      this.bindAddress = bindAddress;
+      return this;
+    }
+    
+    /** Default: 0 */
+    public Builder setPort(int port) {
+      this.port = port;
+      return this;
+    }
+    
+    /** Default: 1 */
+    public Builder setNumHandlers(int numHandlers) {
+      this.numHandlers = numHandlers;
+      return this;
+    }
+    
+    /** Default: -1 */
+    public Builder setnumReaders(int numReaders) {
+      this.numReaders = numReaders;
+      return this;
+    }
+    
+    /** Default: -1 */
+    public Builder setQueueSizePerHandler(int queueSizePerHandler) {
+      this.queueSizePerHandler = queueSizePerHandler;
+      return this;
+    }
+    
+    /** Default: false */
+    public Builder setVerbose(boolean verbose) {
+      this.verbose = verbose;
+      return this;
+    }
+    
+    /** Default: null */
+    public Builder setSecretManager(
+        SecretManager<? extends TokenIdentifier> secretManager) {
+      this.secretManager = secretManager;
+      return this;
+    }
+    
+    /** Default: null */
+    public Builder setPortRangeConfig(String portRangeConfig) {
+      this.portRangeConfig = portRangeConfig;
+      return this;
+    }
+    
+    /**
+     * Build the RPC Server. 
+     * @throws IOException on error
+     * @throws HadoopIllegalArgumentException when mandatory fields are not set
+     */
+    public Server build() throws IOException, HadoopIllegalArgumentException {
+      if (this.conf == null) {
+        throw new HadoopIllegalArgumentException("conf is not set");
+      }
+      if (this.protocol == null) {
+        throw new HadoopIllegalArgumentException("protocol is not set");
+      }
+      if (this.instance == null) {
+        throw new HadoopIllegalArgumentException("instance is not set");
+      }
+      
+      return getProtocolEngine(this.protocol, this.conf).getServer(
+          this.protocol, this.instance, this.bindAddress, this.port,
+          this.numHandlers, this.numReaders, this.queueSizePerHandler,
+          this.verbose, this.conf, this.secretManager, this.portRangeConfig);
+    }
   }
   
-  /** Expert: Make multiple, parallel calls to a set of servers. */
-  public static Object[] call(Method method, Object[][] params,
-                              InetSocketAddress[] addrs, 
-                              UserGroupInformation ticket, Configuration conf)
-    throws IOException, InterruptedException {
-
-    return getProtocolEngine(method.getDeclaringClass(), conf)
-      .call(method, params, addrs, ticket, conf);
-  }
-
-  /** Construct a server for a protocol implementation instance listening on a
-   * port and address.
-   * @deprecated protocol interface should be passed.
-   */
-  @Deprecated
-  public static Server getServer(final Object instance, final String bindAddress, final int port, Configuration conf) 
-    throws IOException {
-    return getServer(instance, bindAddress, port, 1, false, conf);
-  }
-
-  /** Construct a server for a protocol implementation instance listening on a
-   * port and address.
-   * @deprecated protocol interface should be passed.
-   */
-  @Deprecated
-  public static Server getServer(final Object instance, final String bindAddress, final int port,
-                                 final int numHandlers,
-                                 final boolean verbose, Configuration conf) 
-    throws IOException {
-    return getServer(instance.getClass(),         // use impl class for protocol
-                     instance, bindAddress, port, numHandlers, false, conf, null);
-  }
-
-  /** Construct a server for a protocol implementation instance. */
-  public static Server getServer(Class<?> protocol,
-                                 Object instance, String bindAddress,
-                                 int port, Configuration conf) 
-    throws IOException {
-    return getServer(protocol, instance, bindAddress, port, 1, false, conf, null);
-  }
-
-  /** Construct a server for a protocol implementation instance.
-   * @deprecated secretManager should be passed.
-   */
-  @Deprecated
-  public static Server getServer(Class<?> protocol,
-                                 Object instance, String bindAddress, int port,
-                                 int numHandlers,
-                                 boolean verbose, Configuration conf) 
-    throws IOException {
-    
-    return getServer(protocol, instance, bindAddress, port, numHandlers, verbose,
-                 conf, null);
-  }
-  
-  /** Construct a server for a protocol implementation instance. */
-  public static Server getServer(Class<?> protocol,
-                                 Object instance, String bindAddress, int port,
-                                 int numHandlers,
-                                 boolean verbose, Configuration conf,
-                                 SecretManager<? extends TokenIdentifier> secretManager) 
-    throws IOException {
-    
-    return getProtocolEngine(protocol, conf)
-      .getServer(protocol, instance, bindAddress, port, numHandlers, -1, -1,
-                 verbose, conf, secretManager);
-  }
-
-  /** Construct a server for a protocol implementation instance. */
-
-  public static <PROTO extends VersionedProtocol, IMPL extends PROTO> 
-        Server getServer(Class<PROTO> protocol,
-                                 IMPL instance, String bindAddress, int port,
-                                 int numHandlers, int numReaders, int queueSizePerHandler,
-                                 boolean verbose, Configuration conf,
-                                 SecretManager<? extends TokenIdentifier> secretManager) 
-    throws IOException {
-    
-    return getProtocolEngine(protocol, conf)
-      .getServer(protocol, instance, bindAddress, port, numHandlers,
-                 numReaders, queueSizePerHandler, verbose, conf, secretManager);
-  }
-
   /** An RPC Server. */
   public abstract static class Server extends org.apache.hadoop.ipc.Server {
    boolean verbose;
@@ -764,7 +807,7 @@ public class RPC {
    ArrayList<Map<ProtoNameVer, ProtoClassProtoImpl>> protocolImplMapArray = 
        new ArrayList<Map<ProtoNameVer, ProtoClassProtoImpl>>(RpcKind.MAX_INDEX);
    
-   Map<ProtoNameVer, ProtoClassProtoImpl> getProtocolImplMap(RpcKind rpcKind) {
+   Map<ProtoNameVer, ProtoClassProtoImpl> getProtocolImplMap(RPC.RpcKind rpcKind) {
      if (protocolImplMapArray.size() == 0) {// initialize for all rpc kinds
        for (int i=0; i <= RpcKind.MAX_INDEX; ++i) {
          protocolImplMapArray.add(
@@ -776,7 +819,7 @@ public class RPC {
    
    // Register  protocol and its impl for rpc calls
    void registerProtocolAndImpl(RpcKind rpcKind, Class<?> protocolClass, 
-       Object protocolImpl) throws IOException {
+       Object protocolImpl) {
      String protocolName = RPC.getProtocolName(protocolClass);
      long version;
      
@@ -806,9 +849,7 @@ public class RPC {
      }
    }
    
-   
-   @SuppressWarnings("unused") // will be useful later.
-   VerProtocolImpl[] getSupportedProtocolVersions(RpcKind rpcKind,
+   VerProtocolImpl[] getSupportedProtocolVersions(RPC.RpcKind rpcKind,
        String protocolName) {
      VerProtocolImpl[] resultk = 
          new  VerProtocolImpl[getProtocolImplMap(rpcKind).size()];
@@ -855,14 +896,14 @@ public class RPC {
                      Class<? extends Writable> paramClass, int handlerCount,
                      int numReaders, int queueSizePerHandler,
                      Configuration conf, String serverName, 
-                     SecretManager<? extends TokenIdentifier> secretManager) throws IOException {
+                     SecretManager<? extends TokenIdentifier> secretManager,
+                     String portRangeConfig) throws IOException {
       super(bindAddress, port, paramClass, handlerCount, numReaders, queueSizePerHandler,
-            conf, serverName, secretManager);
+            conf, serverName, secretManager, portRangeConfig);
       initProtocolMetaInfo(conf);
     }
     
-    private void initProtocolMetaInfo(Configuration conf)
-        throws IOException {
+    private void initProtocolMetaInfo(Configuration conf) {
       RPC.setProtocolEngine(conf, ProtocolMetaInfoPB.class,
           ProtobufRpcEngine.class);
       ProtocolMetaInfoServerSideTranslatorPB xlator = 
@@ -880,13 +921,13 @@ public class RPC {
      * @return the server (for convenience)
      */
     public Server addProtocol(RpcKind rpcKind, Class<?> protocolClass,
-        Object protocolImpl) throws IOException {
+        Object protocolImpl) {
       registerProtocolAndImpl(rpcKind, protocolClass, protocolImpl);
       return this;
     }
     
     @Override
-    public Writable call(RpcKind rpcKind, String protocol,
+    public Writable call(RPC.RpcKind rpcKind, String protocol,
         Writable rpcRequest, long receiveTime) throws Exception {
       return getRpcInvoker(rpcKind).call(this, protocol, rpcRequest,
           receiveTime);

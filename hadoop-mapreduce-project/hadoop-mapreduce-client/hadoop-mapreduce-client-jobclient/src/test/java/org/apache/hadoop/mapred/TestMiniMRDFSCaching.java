@@ -38,7 +38,7 @@ public class TestMiniMRDFSCaching extends TestCase {
     FileSystem fileSys = null;
     try {
       JobConf conf = new JobConf();
-      dfs = new MiniDFSCluster(conf, 1, true, null);
+      dfs = new MiniDFSCluster.Builder(conf).build();
       fileSys = dfs.getFileSystem();
       mr = new MiniMRCluster(2, fileSys.getUri().toString(), 4);
       MRCaching.setupCache("/cachedir", fileSys);
@@ -48,7 +48,7 @@ public class TestMiniMRDFSCaching extends TestCase {
                                             "/cachedir",
                                             mr.createJobConf(),
                                             "The quick brown fox\nhas many silly\n"
-                                            + "red fox sox\n", false);
+                                            + "red fox sox\n");
       assertTrue("Archives not matching", ret.isOutputOk);
       // launch MR cache with symlinks
       ret = MRCaching.launchMRCache("/testing/wc/input",
@@ -56,7 +56,7 @@ public class TestMiniMRDFSCaching extends TestCase {
                                     "/cachedir",
                                     mr.createJobConf(),
                                     "The quick brown fox\nhas many silly\n"
-                                    + "red fox sox\n", true);
+                                    + "red fox sox\n");
       assertTrue("Archives not matching", ret.isOutputOk);
     } finally {
       if (fileSys != null) {

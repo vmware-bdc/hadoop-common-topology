@@ -18,6 +18,8 @@
 
 package org.apache.hadoop.mapreduce.v2.app;
 
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -27,9 +29,11 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.JobACLsManager;
 import org.apache.hadoop.mapred.ShuffleHandler;
+import org.apache.hadoop.mapred.TaskCompletionEvent;
 import org.apache.hadoop.mapreduce.Counters;
 import org.apache.hadoop.mapreduce.FileSystemCounter;
 import org.apache.hadoop.mapreduce.JobACL;
@@ -61,7 +65,7 @@ import org.apache.hadoop.yarn.MockApps;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.util.BuilderUtils;
+import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.util.Records;
 
 import com.google.common.collect.Iterators;
@@ -129,6 +133,17 @@ public class MockJobs extends MockApps {
     }
     return map;
   }
+  
+  public static Map<JobId, Job> newJobs(ApplicationId appID, int numJobsPerApp,
+      int numTasksPerJob, int numAttemptsPerTask, boolean hasFailedTasks) {
+    Map<JobId, Job> map = Maps.newHashMap();
+    for (int j = 0; j < numJobsPerApp; ++j) {
+      Job job = newJob(appID, j, numTasksPerJob, numAttemptsPerTask, null,
+          hasFailedTasks);
+      map.put(job.getID(), job);
+    }
+    return map;
+  }
 
   public static JobId newJobID(ApplicationId appID, int i) {
     JobId id = Records.newRecord(JobId.class);
@@ -140,6 +155,7 @@ public class MockJobs extends MockApps {
   public static JobReport newJobReport(JobId id) {
     JobReport report = Records.newRecord(JobReport.class);
     report.setJobId(id);
+    report.setSubmitTime(System.currentTimeMillis()-DT);
     report
         .setStartTime(System.currentTimeMillis() - (int) (Math.random() * DT));
     report.setFinishTime(System.currentTimeMillis()
@@ -158,22 +174,37 @@ public class MockJobs extends MockApps {
     report.setFinishTime(System.currentTimeMillis()
         + (int) (Math.random() * DT) + 1);
     report.setProgress((float) Math.random());
+    report.setStatus("Moving average: " + Math.random());
     report.setCounters(TypeConverter.toYarn(newCounters()));
     report.setTaskState(TASK_STATES.next());
     return report;
   }
 
   public static TaskAttemptReport newTaskAttemptReport(TaskAttemptId id) {
+    ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(
+        id.getTaskId().getJobId().getAppId(), 0);
+    ContainerId containerId = ContainerId.newInstance(appAttemptId, 0);
     TaskAttemptReport report = Records.newRecord(TaskAttemptReport.class);
     report.setTaskAttemptId(id);
     report
         .setStartTime(System.currentTimeMillis() - (int) (Math.random() * DT));
     report.setFinishTime(System.currentTimeMillis()
         + (int) (Math.random() * DT) + 1);
+
+    if (id.getTaskId().getTaskType() == TaskType.REDUCE) {
+      report.setShuffleFinishTime(
+          (report.getFinishTime() + report.getStartTime()) / 2);
+      report.setSortFinishTime(
+          (report.getFinishTime() + report.getShuffleFinishTime()) / 2);
+    }
+
     report.setPhase(PHASES.next());
     report.setTaskAttemptState(TASK_ATTEMPT_STATES.next());
     report.setProgress((float) Math.random());
     report.setCounters(TypeConverter.toYarn(newCounters()));
+    report.setContainerId(containerId);
+    report.setDiagnosticInfo(DIAGS.next());
+    report.setStateString("Moving average " + Math.random());
     return report;
   }
 
@@ -214,9 +245,12 @@ public class MockJobs extends MockApps {
     taid.setTaskId(tid);
     taid.setId(i);
     final TaskAttemptReport report = newTaskAttemptReport(taid);
-    final List<String> diags = Lists.newArrayList();
-    diags.add(DIAGS.next());
     return new TaskAttempt() {
+      @Override
+      public NodeId getNodeId() throws UnsupportedOperationException{
+        throw new UnsupportedOperationException();
+      }
+      
       @Override
       public TaskAttemptId getID() {
         return taid;
@@ -229,12 +263,12 @@ public class MockJobs extends MockApps {
 
       @Override
       public long getLaunchTime() {
-        return 0;
+        return report.getStartTime();
       }
 
       @Override
       public long getFinishTime() {
-        return 0;
+        return report.getFinishTime();
       }
 
       @Override
@@ -256,6 +290,11 @@ public class MockJobs extends MockApps {
       }
 
       @Override
+      public Phase getPhase() {
+        return report.getPhase();
+      }
+
+      @Override
       public TaskAttemptState getState() {
         return report.getTaskAttemptState();
       }
@@ -273,12 +312,10 @@ public class MockJobs extends MockApps {
 
       @Override
       public ContainerId getAssignedContainerID() {
-        ContainerId id = Records.newRecord(ContainerId.class);
-        ApplicationAttemptId appAttemptId = Records
-            .newRecord(ApplicationAttemptId.class);
-        appAttemptId.setApplicationId(taid.getTaskId().getJobId().getAppId());
-        appAttemptId.setAttemptId(0);
-        id.setApplicationAttemptId(appAttemptId);
+        ApplicationAttemptId appAttemptId =
+            ApplicationAttemptId.newInstance(taid.getTaskId().getJobId()
+              .getAppId(), 0);
+        ContainerId id = ContainerId.newInstance(appAttemptId, 0);
         return id;
       }
 
@@ -289,7 +326,7 @@ public class MockJobs extends MockApps {
 
       @Override
       public List<String> getDiagnostics() {
-        return diags;
+        return Lists.newArrayList(report.getDiagnosticInfo());
       }
 
       @Override
@@ -299,12 +336,12 @@ public class MockJobs extends MockApps {
 
       @Override
       public long getShuffleFinishTime() {
-        return 0;
+        return report.getShuffleFinishTime();
       }
 
       @Override
       public long getSortFinishTime() {
-        return 0;
+        return report.getSortFinishTime();
       }
 
       @Override
@@ -314,16 +351,16 @@ public class MockJobs extends MockApps {
     };
   }
 
-  public static Map<TaskId, Task> newTasks(JobId jid, int n, int m) {
+  public static Map<TaskId, Task> newTasks(JobId jid, int n, int m, boolean hasFailedTasks) {
     Map<TaskId, Task> map = Maps.newHashMap();
     for (int i = 0; i < n; ++i) {
-      Task task = newTask(jid, i, m);
+      Task task = newTask(jid, i, m, hasFailedTasks);
       map.put(task.getID(), task);
     }
     return map;
   }
 
-  public static Task newTask(JobId jid, int i, int m) {
+  public static Task newTask(JobId jid, int i, int m, final boolean hasFailedTasks) {
     final TaskId tid = Records.newRecord(TaskId.class);
     tid.setJobId(jid);
     tid.setId(i);
@@ -343,6 +380,9 @@ public class MockJobs extends MockApps {
 
       @Override
       public Counters getCounters() {
+        if (hasFailedTasks) {
+          return null;
+        }
         return new Counters(
           TypeConverter.fromYarn(report.getCounters()));
       }
@@ -392,8 +432,14 @@ public class MockJobs extends MockApps {
 
   public static Counters getCounters(
       Collection<Task> tasks) {
+    List<Task> completedTasks = new ArrayList<Task>();
+    for (Task task : tasks) {
+      if (task.getCounters() != null) {
+        completedTasks.add(task);
+      }
+    }
     Counters counters = new Counters();
-    return JobImpl.incrTaskCounters(counters, tasks);
+    return JobImpl.incrTaskCounters(counters, completedTasks);
   }
 
   static class TaskCount {
@@ -432,17 +478,22 @@ public class MockJobs extends MockApps {
   }
 
   public static Job newJob(ApplicationId appID, int i, int n, int m, Path confFile) {
+    return newJob(appID, i, n, m, confFile, false);
+  }
+  
+  public static Job newJob(ApplicationId appID, int i, int n, int m,
+      Path confFile, boolean hasFailedTasks) {
     final JobId id = newJobID(appID, i);
     final String name = newJobName();
     final JobReport report = newJobReport(id);
-    final Map<TaskId, Task> tasks = newTasks(id, n, m);
+    final Map<TaskId, Task> tasks = newTasks(id, n, m, hasFailedTasks);
     final TaskCount taskCount = getTaskCount(tasks.values());
     final Counters counters = getCounters(tasks
       .values());
     final Path configFile = confFile;
 
     Map<JobACL, AccessControlList> tmpJobACLs = new HashMap<JobACL, AccessControlList>();
-    Configuration conf = new Configuration();
+    final Configuration conf = new Configuration();
     conf.set(JobACL.VIEW_JOB.getAclName(), "testuser");
     conf.setBoolean(MRConfig.MR_ACLS_ENABLED, true);
 
@@ -522,6 +573,12 @@ public class MockJobs extends MockApps {
       }
 
       @Override
+      public TaskCompletionEvent[] getMapAttemptCompletionEvents(
+          int startIndex, int maxEvents) {
+        return null;
+      }
+
+      @Override
       public Map<TaskId, Task> getTasks(TaskType taskType) {
         throw new UnsupportedOperationException("Not supported yet.");
       }
@@ -564,13 +621,26 @@ public class MockJobs extends MockApps {
         amInfoList.add(createAMInfo(2));
         return amInfoList;
       }
+
+      @Override
+      public Configuration loadConfFile() throws IOException {
+        FileContext fc = FileContext.getFileContext(configFile.toUri(), conf);
+        Configuration jobConf = new Configuration(false);
+        jobConf.addResource(fc.open(configFile), configFile.toString());
+        return jobConf;
+      }
+
+      @Override
+      public void setQueueName(String queueName) {
+        // do nothing
+      }
     };
   }
 
   private static AMInfo createAMInfo(int attempt) {
-    ApplicationAttemptId appAttemptId = BuilderUtils.newApplicationAttemptId(
-        BuilderUtils.newApplicationId(100, 1), attempt);
-    ContainerId containerId = BuilderUtils.newContainerId(appAttemptId, 1);
+    ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(
+        ApplicationId.newInstance(100, 1), attempt);
+    ContainerId containerId = ContainerId.newInstance(appAttemptId, 1);
     return MRBuilderUtils.newAMInfo(appAttemptId, System.currentTimeMillis(),
         containerId, NM_HOST, NM_PORT, NM_HTTP_PORT);
   }

@@ -21,15 +21,20 @@ import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.EOFException;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+
+import com.google.common.annotations.VisibleForTesting;
 
 
 
@@ -49,10 +54,11 @@ public class BlockMetadataHeader {
    * Version is two bytes. Following it is the DataChecksum
    * that occupies 5 bytes. 
    */
-  private short version;
+  private final short version;
   private DataChecksum checksum = null;
     
-  BlockMetadataHeader(short version, DataChecksum checksum) {
+  @VisibleForTesting
+  public BlockMetadataHeader(short version, DataChecksum checksum) {
     this.checksum = checksum;
     this.version = version;
   }
@@ -67,10 +73,31 @@ public class BlockMetadataHeader {
     return checksum;
   }
 
- 
+  /**
+   * Read the header without changing the position of the FileChannel.
+   *
+   * @param fc The FileChannel to read.
+   * @return the Metadata Header.
+   * @throws IOException on error.
+   */
+  public static BlockMetadataHeader preadHeader(FileChannel fc)
+      throws IOException {
+    byte arr[] = new byte[2 + DataChecksum.HEADER_LEN];
+    ByteBuffer buf = ByteBuffer.wrap(arr);
+
+    while (buf.hasRemaining()) {
+      if (fc.read(buf, 0) <= 0) {
+        throw new EOFException("unexpected EOF while reading " +
+            "metadata file header");
+      }
+    }
+    short version = (short)((arr[0] << 8) | (arr[1] & 0xff));
+    DataChecksum dataChecksum = DataChecksum.newDataChecksum(arr, 2);
+    return new BlockMetadataHeader(version, dataChecksum);
+  }
+
   /**
    * This reads all the fields till the beginning of checksum.
-   * @param in 
    * @return Metadata Header
    * @throws IOException
    */
@@ -81,9 +108,7 @@ public class BlockMetadataHeader {
   /**
    * Reads header at the top of metadata file and returns the header.
    * 
-   * @param dataset
-   * @param block
-   * @return
+   * @return metadata header for the block
    * @throws IOException
    */
   public static BlockMetadataHeader readHeader(File file) throws IOException {
@@ -119,11 +144,10 @@ public class BlockMetadataHeader {
   /**
    * This writes all the fields till the beginning of checksum.
    * @param out DataOutputStream
-   * @param header 
-   * @return 
    * @throws IOException
    */
-  private static void writeHeader(DataOutputStream out, 
+  @VisibleForTesting
+  public static void writeHeader(DataOutputStream out, 
                                   BlockMetadataHeader header) 
                                   throws IOException {
     out.writeShort(header.getVersion());
@@ -132,9 +156,7 @@ public class BlockMetadataHeader {
   
   /**
    * Writes all the fields till the beginning of checksum.
-   * @param out
-   * @param checksum
-   * @throws IOException
+   * @throws IOException on error
    */
   static void writeHeader(DataOutputStream out, DataChecksum checksum)
                          throws IOException {

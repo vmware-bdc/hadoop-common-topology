@@ -16,6 +16,15 @@
  * limitations under the License.
  */
 package org.apache.hadoop.hdfs;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.impl.Log4JLogger;
@@ -32,17 +41,17 @@ import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
-
-import java.io.IOException;
-import java.util.*;
-import java.util.concurrent.atomic.*;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Ignore;
+import org.junit.Test;
 
 
 /**
  * This class tests the cases of a concurrent reads/writes to a file;
  * ie, one writer and one or more readers can see unfinsihed blocks
  */
-public class TestFileConcurrentReader extends junit.framework.TestCase {
+public class TestFileConcurrentReader {
 
   private enum SyncType {
     SYNC,
@@ -68,18 +77,16 @@ public class TestFileConcurrentReader extends junit.framework.TestCase {
   private FileSystem fileSystem;
 
 
-  @Override
-  protected void setUp() throws IOException {
+  @Before
+  public void setUp() throws IOException {
     conf = new Configuration();
     init(conf);
   }
 
-  @Override
-  protected void tearDown() throws Exception {
+  @After
+  public void tearDown() throws Exception {
     cluster.shutdown();
     cluster = null;
-    
-    super.tearDown();
   }
 
   private void init(Configuration conf) throws IOException {
@@ -144,6 +151,7 @@ public class TestFileConcurrentReader extends junit.framework.TestCase {
   /**
    * Test that that writes to an incomplete block are available to a reader
    */
+  @Test (timeout = 30000)
   public void testUnfinishedBlockRead()
     throws IOException {
     // create a new file in the root, write data, do no close
@@ -166,6 +174,7 @@ public class TestFileConcurrentReader extends junit.framework.TestCase {
    * would result in too small a buffer to do the buffer-copy needed
    * for partial chunks.
    */
+  @Test (timeout = 30000)
   public void testUnfinishedBlockPacketBufferOverrun() throws IOException {
     // check that / exists
     Path path = new Path("/");
@@ -191,6 +200,7 @@ public class TestFileConcurrentReader extends junit.framework.TestCase {
   // use a small block size and a large write so that DN is busy creating
   // new blocks.  This makes it almost 100% sure we can reproduce
   // case of client getting a DN that hasn't yet created the blocks
+  @Test (timeout = 30000)
   public void testImmediateReadOfNewFile()
     throws IOException {
     final int blockSize = 64 * 1024;
@@ -267,31 +277,37 @@ public class TestFileConcurrentReader extends junit.framework.TestCase {
 
   // for some reason, using tranferTo evokes the race condition more often
   // so test separately
+  @Test (timeout = 30000)
   public void testUnfinishedBlockCRCErrorTransferTo() throws IOException {
     runTestUnfinishedBlockCRCError(true, SyncType.SYNC, DEFAULT_WRITE_SIZE);
   }
 
+  @Test (timeout = 30000)
   public void testUnfinishedBlockCRCErrorTransferToVerySmallWrite()
     throws IOException {
     runTestUnfinishedBlockCRCError(true, SyncType.SYNC, SMALL_WRITE_SIZE);
   }
 
   // fails due to issue w/append, disable 
+  @Ignore
   public void _testUnfinishedBlockCRCErrorTransferToAppend()
     throws IOException {
     runTestUnfinishedBlockCRCError(true, SyncType.APPEND, DEFAULT_WRITE_SIZE);
   }
 
+  @Test (timeout = 30000)
   public void testUnfinishedBlockCRCErrorNormalTransfer() throws IOException {
     runTestUnfinishedBlockCRCError(false, SyncType.SYNC, DEFAULT_WRITE_SIZE);
   }
 
+  @Test (timeout = 30000)
   public void testUnfinishedBlockCRCErrorNormalTransferVerySmallWrite()
     throws IOException {
     runTestUnfinishedBlockCRCError(false, SyncType.SYNC, SMALL_WRITE_SIZE);
   }
 
   // fails due to issue w/append, disable 
+  @Ignore
   public void _testUnfinishedBlockCRCErrorNormalTransferAppend()
     throws IOException {
     runTestUnfinishedBlockCRCError(false, SyncType.APPEND, DEFAULT_WRITE_SIZE);
@@ -320,33 +336,33 @@ public class TestFileConcurrentReader extends junit.framework.TestCase {
     final AtomicBoolean writerDone = new AtomicBoolean(false);
     final AtomicBoolean writerStarted = new AtomicBoolean(false);
     final AtomicBoolean error = new AtomicBoolean(false);
-    final FSDataOutputStream initialOutputStream = fileSystem.create(file);
-    final Thread writer = new Thread(new Runnable() {
-      private FSDataOutputStream outputStream = initialOutputStream;
 
+    final Thread writer = new Thread(new Runnable() {
       @Override
       public void run() {
         try {
-          for (int i = 0; !error.get() && i < numWrites; i++) {
-            try {
+          FSDataOutputStream outputStream = fileSystem.create(file);
+          if (syncType == SyncType.APPEND) {
+            outputStream.close();
+            outputStream = fileSystem.append(file);
+          }
+          try {
+            for (int i = 0; !error.get() && i < numWrites; i++) {
               final byte[] writeBuf =
-                DFSTestUtil.generateSequentialBytes(i * writeSize, writeSize);
+                  DFSTestUtil.generateSequentialBytes(i * writeSize, writeSize);
               outputStream.write(writeBuf);
               if (syncType == SyncType.SYNC) {
                 outputStream.hflush();
-              } else { // append
-                outputStream.close();
-                outputStream = fileSystem.append(file);
               }
               writerStarted.set(true);
-            } catch (IOException e) {
-              error.set(true);
-              LOG.error("error writing to file", e);
             }
+          } catch (IOException e) {
+            error.set(true);
+            LOG.error("error writing to file", e);
+          } finally {
+            outputStream.close();
           }
-
           writerDone.set(true);
-          outputStream.close();
         } catch (Exception e) {
           LOG.error("error in writer", e);
 
@@ -397,7 +413,6 @@ public class TestFileConcurrentReader extends junit.framework.TestCase {
 
       Thread.currentThread().interrupt();
     }
-    initialOutputStream.close();
   }
 
   private boolean validateSequentialBytes(byte[] buf, int startPos, int len) {

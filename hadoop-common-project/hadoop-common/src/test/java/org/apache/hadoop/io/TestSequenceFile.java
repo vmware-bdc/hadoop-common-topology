@@ -29,6 +29,7 @@ import org.apache.hadoop.io.SequenceFile.CompressionType;
 import org.apache.hadoop.io.SequenceFile.Metadata;
 import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.io.compress.DefaultCodec;
+import org.apache.hadoop.io.serializer.avro.AvroReflectSerialization;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.conf.*;
 import org.mockito.Mockito;
@@ -38,8 +39,10 @@ import org.mockito.Mockito;
 public class TestSequenceFile extends TestCase {
   private static final Log LOG = LogFactory.getLog(TestSequenceFile.class);
 
-  private static Configuration conf = new Configuration();
+  private Configuration conf = new Configuration();
   
+  public TestSequenceFile() { }
+
   public TestSequenceFile(String name) { super(name); }
 
   /** Unit tests for SequenceFile. */
@@ -125,7 +128,7 @@ public class TestSequenceFile extends TestCase {
     }
   }
 
-  private static void writeTest(FileSystem fs, int count, int seed, Path file, 
+  private void writeTest(FileSystem fs, int count, int seed, Path file, 
                                 CompressionType compressionType, CompressionCodec codec)
     throws IOException {
     fs.delete(file, true);
@@ -145,7 +148,7 @@ public class TestSequenceFile extends TestCase {
     writer.close();
   }
 
-  private static void readTest(FileSystem fs, int count, int seed, Path file)
+  private void readTest(FileSystem fs, int count, int seed, Path file)
     throws IOException {
     LOG.debug("reading " + count + " records");
     SequenceFile.Reader reader = new SequenceFile.Reader(fs, file, conf);
@@ -201,7 +204,7 @@ public class TestSequenceFile extends TestCase {
   }
 
 
-  private static void sortTest(FileSystem fs, int count, int megabytes, 
+  private void sortTest(FileSystem fs, int count, int megabytes, 
                                int factor, boolean fast, Path file)
     throws IOException {
     fs.delete(new Path(file+".sorted"), true);
@@ -211,7 +214,7 @@ public class TestSequenceFile extends TestCase {
     LOG.info("done sorting " + count + " debug");
   }
 
-  private static void checkSort(FileSystem fs, int count, int seed, Path file)
+  private void checkSort(FileSystem fs, int count, int seed, Path file)
     throws IOException {
     LOG.info("sorting " + count + " records in memory for debug");
     RandomDatum.Generator generator = new RandomDatum.Generator(seed);
@@ -248,7 +251,7 @@ public class TestSequenceFile extends TestCase {
     LOG.debug("sucessfully checked " + count + " records");
   }
 
-  private static void mergeTest(FileSystem fs, int count, int seed, Path file, 
+  private void mergeTest(FileSystem fs, int count, int seed, Path file, 
                                 CompressionType compressionType,
                                 boolean fast, int factor, int megabytes)
     throws IOException {
@@ -292,7 +295,7 @@ public class TestSequenceFile extends TestCase {
       .merge(sortedNames, file.suffix(".sorted"));
   }
 
-  private static SequenceFile.Sorter newSorter(FileSystem fs, 
+  private SequenceFile.Sorter newSorter(FileSystem fs, 
                                                boolean fast,
                                                int megabytes, int factor) {
     SequenceFile.Sorter sorter = 
@@ -369,7 +372,7 @@ public class TestSequenceFile extends TestCase {
   }
   
   
-  private static SequenceFile.Metadata readMetadata(FileSystem fs, Path file)
+  private SequenceFile.Metadata readMetadata(FileSystem fs, Path file)
     throws IOException {
     LOG.info("reading file: " + file.toString());
     SequenceFile.Reader reader = new SequenceFile.Reader(fs, file, conf);
@@ -378,7 +381,7 @@ public class TestSequenceFile extends TestCase {
     return meta;
   }
 
-  private static void writeMetadataTest(FileSystem fs, int count, int seed, Path file, 
+  private void writeMetadataTest(FileSystem fs, int count, int seed, Path file, 
                                         CompressionType compressionType, CompressionCodec codec, SequenceFile.Metadata metadata)
     throws IOException {
     fs.delete(file, true);
@@ -398,7 +401,7 @@ public class TestSequenceFile extends TestCase {
     writer.close();
   }
 
-  private static void sortMetadataTest(FileSystem fs, Path unsortedFile, Path sortedFile, SequenceFile.Metadata metadata)
+  private void sortMetadataTest(FileSystem fs, Path unsortedFile, Path sortedFile, SequenceFile.Metadata metadata)
     throws IOException {
     fs.delete(sortedFile, true);
     LOG.info("sorting: " + unsortedFile + " to: " + sortedFile);
@@ -470,7 +473,7 @@ public class TestSequenceFile extends TestCase {
     SequenceFile.Writer writer = SequenceFile.createWriter(
         spyFs, conf, p, NullWritable.class, NullWritable.class);
     writer.close();
-    Mockito.verify(spyFs).getDefaultReplication();
+    Mockito.verify(spyFs).getDefaultReplication(p);
   }
 
   private static class TestFSDataInputStream extends FSDataInputStream {
@@ -480,6 +483,7 @@ public class TestSequenceFile extends TestCase {
       super(in);
     }
 
+    @Override
     public void close() throws IOException {
       closed = true;
       super.close();
@@ -504,6 +508,7 @@ public class TestSequenceFile extends TestCase {
     try {
       new SequenceFile.Reader(fs, path, conf) {
         // this method is called by the SequenceFile.Reader constructor, overwritten, so we can access the opened file
+        @Override
         protected FSDataInputStream openFile(FileSystem fs, Path file, int bufferSize, long length) throws IOException {
           final InputStream in = super.openFile(fs, file, bufferSize, length);
           openedFile[0] = new TestFSDataInputStream(in);
@@ -535,7 +540,6 @@ public class TestSequenceFile extends TestCase {
   }
 
   public void testRecursiveSeqFileCreate() throws IOException {
-    Configuration conf = new Configuration();
     FileSystem fs = FileSystem.getLocal(conf);
     Path name = new Path(new Path(System.getProperty("test.build.data","."),
         "recursiveCreateDir") , "file");
@@ -555,6 +559,60 @@ public class TestSequenceFile extends TestCase {
         RandomDatum.class, 512, (short) 1, 4096, createParent,
         CompressionType.NONE, null, new Metadata());
     // should succeed, fails if exception thrown
+  }
+
+  public void testSerializationAvailability() throws IOException {
+    Configuration conf = new Configuration();
+    Path path = new Path(System.getProperty("test.build.data", "."),
+        "serializationAvailability");
+    // Check if any serializers aren't found.
+    try {
+      SequenceFile.createWriter(
+          conf,
+          SequenceFile.Writer.file(path),
+          SequenceFile.Writer.keyClass(String.class),
+          SequenceFile.Writer.valueClass(NullWritable.class));
+      // Note: This may also fail someday if JavaSerialization
+      // is activated by default.
+      fail("Must throw IOException for missing serializer for the Key class");
+    } catch (IOException e) {
+      assertTrue(e.getMessage().startsWith(
+        "Could not find a serializer for the Key class: '" +
+            String.class.getName() + "'."));
+    }
+    try {
+      SequenceFile.createWriter(
+          conf,
+          SequenceFile.Writer.file(path),
+          SequenceFile.Writer.keyClass(NullWritable.class),
+          SequenceFile.Writer.valueClass(String.class));
+      // Note: This may also fail someday if JavaSerialization
+      // is activated by default.
+      fail("Must throw IOException for missing serializer for the Value class");
+    } catch (IOException e) {
+      assertTrue(e.getMessage().startsWith(
+        "Could not find a serializer for the Value class: '" +
+            String.class.getName() + "'."));
+    }
+
+    // Write a simple file to test deserialization failures with
+    writeTest(FileSystem.get(conf), 1, 1, path, CompressionType.NONE, null);
+
+    // Remove Writable serializations, to enforce error.
+    conf.setStrings(CommonConfigurationKeys.IO_SERIALIZATIONS_KEY,
+        AvroReflectSerialization.class.getName());
+
+    // Now check if any deserializers aren't found.
+    try {
+      new SequenceFile.Reader(
+          conf,
+          SequenceFile.Reader.file(path));
+      fail("Must throw IOException for missing deserializer for the Key class");
+    } catch (IOException e) {
+      assertTrue(e.getMessage().startsWith(
+        "Could not find a deserializer for the Key class: '" +
+            RandomDatum.class.getName() + "'."));
+    }
   }
 
   /** For debugging and testing. */
@@ -616,7 +674,9 @@ public class TestSequenceFile extends TestCase {
         }
       }
         
-      fs = file.getFileSystem(conf);
+      TestSequenceFile test = new TestSequenceFile();
+      
+      fs = file.getFileSystem(test.conf);
 
       LOG.info("count = " + count);
       LOG.info("megabytes = " + megabytes);
@@ -639,25 +699,25 @@ public class TestSequenceFile extends TestCase {
       CompressionType compressionType = 
         CompressionType.valueOf(compressType);
       CompressionCodec codec = (CompressionCodec)ReflectionUtils.newInstance(
-                                                                             conf.getClassByName(compressionCodec), 
-                                                                             conf);
+                                                                             test.conf.getClassByName(compressionCodec), 
+                                                                             test.conf);
 
       if (rwonly || (create && !merge)) {
-        writeTest(fs, count, seed, file, compressionType, codec);
-        readTest(fs, count, seed, file);
+        test.writeTest(fs, count, seed, file, compressionType, codec);
+        test.readTest(fs, count, seed, file);
       }
 
       if (!rwonly) {
         if (merge) {
-          mergeTest(fs, count, seed, file, compressionType, 
+          test.mergeTest(fs, count, seed, file, compressionType, 
                     fast, factor, megabytes);
         } else {
-          sortTest(fs, count, megabytes, factor, fast, file);
+          test.sortTest(fs, count, megabytes, factor, fast, file);
         }
       }
     
       if (check) {
-        checkSort(fs, count, seed, file);
+        test.checkSort(fs, count, seed, file);
       }
     } finally {
       fs.close();

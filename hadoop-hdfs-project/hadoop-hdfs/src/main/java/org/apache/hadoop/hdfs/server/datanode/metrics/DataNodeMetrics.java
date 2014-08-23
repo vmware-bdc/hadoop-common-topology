@@ -29,6 +29,7 @@ import org.apache.hadoop.metrics2.annotation.Metrics;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.lib.MetricsRegistry;
 import org.apache.hadoop.metrics2.lib.MutableCounterLong;
+import org.apache.hadoop.metrics2.lib.MutableQuantiles;
 import org.apache.hadoop.metrics2.lib.MutableRate;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
 
@@ -56,11 +57,15 @@ public class DataNodeMetrics {
   @Metric MutableCounterLong blocksRemoved;
   @Metric MutableCounterLong blocksVerified;
   @Metric MutableCounterLong blockVerificationFailures;
+  @Metric MutableCounterLong blocksCached;
+  @Metric MutableCounterLong blocksUncached;
   @Metric MutableCounterLong readsFromLocalClient;
   @Metric MutableCounterLong readsFromRemoteClient;
   @Metric MutableCounterLong writesFromLocalClient;
   @Metric MutableCounterLong writesFromRemoteClient;
   @Metric MutableCounterLong blocksGetLocalPathInfo;
+
+  @Metric MutableCounterLong fsyncCount;
   
   @Metric MutableCounterLong volumeFailures;
 
@@ -71,32 +76,92 @@ public class DataNodeMetrics {
   @Metric MutableRate replaceBlockOp;
   @Metric MutableRate heartbeats;
   @Metric MutableRate blockReports;
+  @Metric MutableRate cacheReports;
+  @Metric MutableRate packetAckRoundTripTimeNanos;
+  final MutableQuantiles[] packetAckRoundTripTimeNanosQuantiles;
+  
+  @Metric MutableRate flushNanos;
+  final MutableQuantiles[] flushNanosQuantiles;
+  
+  @Metric MutableRate fsyncNanos;
+  final MutableQuantiles[] fsyncNanosQuantiles;
+  
+  @Metric MutableRate sendDataPacketBlockedOnNetworkNanos;
+  final MutableQuantiles[] sendDataPacketBlockedOnNetworkNanosQuantiles;
+  @Metric MutableRate sendDataPacketTransferNanos;
+  final MutableQuantiles[] sendDataPacketTransferNanosQuantiles;
 
   final MetricsRegistry registry = new MetricsRegistry("datanode");
   final String name;
-
-  public DataNodeMetrics(String name, String sessionId) {
+  JvmMetrics jvmMetrics = null;
+  
+  public DataNodeMetrics(String name, String sessionId, int[] intervals,
+      final JvmMetrics jvmMetrics) {
     this.name = name;
+    this.jvmMetrics = jvmMetrics;    
     registry.tag(SessionId, sessionId);
+    
+    final int len = intervals.length;
+    packetAckRoundTripTimeNanosQuantiles = new MutableQuantiles[len];
+    flushNanosQuantiles = new MutableQuantiles[len];
+    fsyncNanosQuantiles = new MutableQuantiles[len];
+    sendDataPacketBlockedOnNetworkNanosQuantiles = new MutableQuantiles[len];
+    sendDataPacketTransferNanosQuantiles = new MutableQuantiles[len];
+    
+    for (int i = 0; i < len; i++) {
+      int interval = intervals[i];
+      packetAckRoundTripTimeNanosQuantiles[i] = registry.newQuantiles(
+          "packetAckRoundTripTimeNanos" + interval + "s",
+          "Packet Ack RTT in ns", "ops", "latency", interval);
+      flushNanosQuantiles[i] = registry.newQuantiles(
+          "flushNanos" + interval + "s", 
+          "Disk flush latency in ns", "ops", "latency", interval);
+      fsyncNanosQuantiles[i] = registry.newQuantiles(
+          "fsyncNanos" + interval + "s", "Disk fsync latency in ns", 
+          "ops", "latency", interval);
+      sendDataPacketBlockedOnNetworkNanosQuantiles[i] = registry.newQuantiles(
+          "sendDataPacketBlockedOnNetworkNanos" + interval + "s", 
+          "Time blocked on network while sending a packet in ns",
+          "ops", "latency", interval);
+      sendDataPacketTransferNanosQuantiles[i] = registry.newQuantiles(
+          "sendDataPacketTransferNanos" + interval + "s", 
+          "Time reading from disk and writing to network while sending " +
+          "a packet in ns", "ops", "latency", interval);
+    }
   }
 
   public static DataNodeMetrics create(Configuration conf, String dnName) {
     String sessionId = conf.get(DFSConfigKeys.DFS_METRICS_SESSION_ID_KEY);
     MetricsSystem ms = DefaultMetricsSystem.instance();
-    JvmMetrics.create("DataNode", sessionId, ms);
+    JvmMetrics jm = JvmMetrics.create("DataNode", sessionId, ms);
     String name = "DataNodeActivity-"+ (dnName.isEmpty()
-        ? "UndefinedDataNodeName"+ DFSUtil.getRandom().nextInt() : dnName.replace(':', '-'));
-    return ms.register(name, null, new DataNodeMetrics(name, sessionId));
+        ? "UndefinedDataNodeName"+ DFSUtil.getRandom().nextInt() 
+            : dnName.replace(':', '-'));
+
+    // Percentile measurement is off by default, by watching no intervals
+    int[] intervals = 
+        conf.getInts(DFSConfigKeys.DFS_METRICS_PERCENTILES_INTERVALS_KEY);
+    
+    return ms.register(name, null, new DataNodeMetrics(name, sessionId,
+        intervals, jm));
   }
 
   public String name() { return name; }
 
+  public JvmMetrics getJvmMetrics() {
+    return jvmMetrics;
+  }
+  
   public void addHeartbeat(long latency) {
     heartbeats.add(latency);
   }
 
   public void addBlockReport(long latency) {
     blockReports.add(latency);
+  }
+
+  public void addCacheReport(long latency) {
+    cacheReports.add(latency);
   }
 
   public void incrBlocksReplicated(int delta) {
@@ -121,6 +186,15 @@ public class DataNodeMetrics {
 
   public void incrBlocksVerified() {
     blocksVerified.incr();
+  }
+
+
+  public void incrBlocksCached(int delta) {
+    blocksCached.incr(delta);
+  }
+
+  public void incrBlocksUncached(int delta) {
+    blocksUncached.incr(delta);
   }
 
   public void addReadBlockOp(long latency) {
@@ -151,6 +225,31 @@ public class DataNodeMetrics {
     blocksRead.incr();
   }
 
+  public void incrFsyncCount() {
+    fsyncCount.incr();
+  }
+
+  public void addPacketAckRoundTripTimeNanos(long latencyNanos) {
+    packetAckRoundTripTimeNanos.add(latencyNanos);
+    for (MutableQuantiles q : packetAckRoundTripTimeNanosQuantiles) {
+      q.add(latencyNanos);
+    }
+  }
+
+  public void addFlushNanos(long latencyNanos) {
+    flushNanos.add(latencyNanos);
+    for (MutableQuantiles q : flushNanosQuantiles) {
+      q.add(latencyNanos);
+    }
+  }
+
+  public void addFsyncNanos(long latencyNanos) {
+    fsyncNanos.add(latencyNanos);
+    for (MutableQuantiles q : fsyncNanosQuantiles) {
+      q.add(latencyNanos);
+    }
+  }
+
   public void shutdown() {
     DefaultMetricsSystem.shutdown();
   }
@@ -170,5 +269,19 @@ public class DataNodeMetrics {
   /** Increment for getBlockLocalPathInfo calls */
   public void incrBlocksGetLocalPathInfo() {
     blocksGetLocalPathInfo.incr();
+  }
+
+  public void addSendDataPacketBlockedOnNetworkNanos(long latencyNanos) {
+    sendDataPacketBlockedOnNetworkNanos.add(latencyNanos);
+    for (MutableQuantiles q : sendDataPacketBlockedOnNetworkNanosQuantiles) {
+      q.add(latencyNanos);
+    }
+  }
+
+  public void addSendDataPacketTransferNanos(long latencyNanos) {
+    sendDataPacketTransferNanos.add(latencyNanos);
+    for (MutableQuantiles q : sendDataPacketTransferNanosQuantiles) {
+      q.add(latencyNanos);
+    }
   }
 }

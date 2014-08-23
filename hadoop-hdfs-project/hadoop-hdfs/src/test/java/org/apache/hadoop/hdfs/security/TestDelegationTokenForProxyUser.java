@@ -23,20 +23,14 @@ package org.apache.hadoop.hdfs.security;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
-import java.net.URL;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Enumeration;
-import java.util.Map;
-
-import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
@@ -44,41 +38,37 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
-import org.apache.hadoop.hdfs.server.namenode.web.resources.NamenodeWebHdfsMethods;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.hdfs.web.WebHdfsTestUtil;
-import org.apache.hadoop.hdfs.web.resources.DoAsParam;
-import org.apache.hadoop.hdfs.web.resources.ExceptionHandler;
-import org.apache.hadoop.hdfs.web.resources.GetOpParam;
-import org.apache.hadoop.hdfs.web.resources.PostOpParam;
-import org.apache.hadoop.hdfs.web.resources.PutOpParam;
 import org.apache.hadoop.security.TestDoAsEffectiveUser;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authorize.DefaultImpersonationProvider;
 import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.apache.hadoop.security.token.Token;
-import org.apache.log4j.Level;
-import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Assert;
-import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
+import org.mockito.internal.util.reflection.Whitebox;
 
 public class TestDelegationTokenForProxyUser {
-  private MiniDFSCluster cluster;
-  Configuration config;
+  private static MiniDFSCluster cluster;
+  private static Configuration config;
   final private static String GROUP1_NAME = "group1";
   final private static String GROUP2_NAME = "group2";
   final private static String[] GROUP_NAMES = new String[] { GROUP1_NAME,
       GROUP2_NAME };
   final private static String REAL_USER = "RealUser";
   final private static String PROXY_USER = "ProxyUser";
+  private static UserGroupInformation ugi;
+  private static UserGroupInformation proxyUgi;
   
   private static final Log LOG = LogFactory.getLog(TestDoAsEffectiveUser.class);
   
-  private void configureSuperUserIPAddresses(Configuration conf,
+  private static void configureSuperUserIPAddresses(Configuration conf,
       String superUserShortName) throws IOException {
     ArrayList<String> ipList = new ArrayList<String>();
     Enumeration<NetworkInterface> netInterfaceList = NetworkInterface
@@ -99,19 +89,21 @@ public class TestDelegationTokenForProxyUser {
     builder.append("127.0.1.1,");
     builder.append(InetAddress.getLocalHost().getCanonicalHostName());
     LOG.info("Local Ip addresses: " + builder.toString());
-    conf.setStrings(ProxyUsers.getProxySuperuserIpConfKey(superUserShortName),
+    conf.setStrings(DefaultImpersonationProvider.getTestProvider().
+            getProxySuperuserIpConfKey(superUserShortName),
         builder.toString());
   }
   
-  @Before
-  public void setUp() throws Exception {
+  @BeforeClass
+  public static void setUp() throws Exception {
     config = new HdfsConfiguration();
     config.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
     config.setLong(
         DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_MAX_LIFETIME_KEY, 10000);
     config.setLong(
         DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_RENEW_INTERVAL_KEY, 5000);
-    config.setStrings(ProxyUsers.getProxySuperuserGroupConfKey(REAL_USER),
+    config.setStrings(DefaultImpersonationProvider.getTestProvider().
+            getProxySuperuserGroupConfKey(REAL_USER),
         "group1");
     config.setBoolean(
         DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_ALWAYS_USE_KEY, true);
@@ -120,32 +112,30 @@ public class TestDelegationTokenForProxyUser {
     cluster = new MiniDFSCluster.Builder(config).build();
     cluster.waitActive();
     ProxyUsers.refreshSuperUserGroupsConfiguration(config);
+    ugi = UserGroupInformation.createRemoteUser(REAL_USER);
+    proxyUgi = UserGroupInformation.createProxyUserForTesting(PROXY_USER, ugi,
+        GROUP_NAMES);
   }
 
-  @After
-  public void tearDown() throws Exception {
+  @AfterClass
+  public static void tearDown() throws Exception {
     if(cluster!=null) {
       cluster.shutdown();
     }
   }
  
-  @Test
+  @Test(timeout=20000)
   public void testDelegationTokenWithRealUser() throws IOException {
-    UserGroupInformation ugi = UserGroupInformation
-        .createRemoteUser(REAL_USER);
-    final UserGroupInformation proxyUgi = UserGroupInformation
-        .createProxyUserForTesting(PROXY_USER, ugi, GROUP_NAMES);
     try {
-      Token<DelegationTokenIdentifier> token = proxyUgi
-          .doAs(new PrivilegedExceptionAction<Token<DelegationTokenIdentifier>>() {
-            public Token<DelegationTokenIdentifier> run() throws IOException {
-              DistributedFileSystem dfs = (DistributedFileSystem) cluster
-                  .getFileSystem();
-              return dfs.getDelegationToken("RenewerUser");
+      Token<?>[] tokens = proxyUgi
+          .doAs(new PrivilegedExceptionAction<Token<?>[]>() {
+            @Override
+            public Token<?>[] run() throws IOException {
+              return cluster.getFileSystem().addDelegationTokens("RenewerUser", null);
             }
           });
       DelegationTokenIdentifier identifier = new DelegationTokenIdentifier();
-      byte[] tokenId = token.getIdentifier();
+      byte[] tokenId = tokens[0].getIdentifier();
       identifier.readFields(new DataInputStream(new ByteArrayInputStream(
           tokenId)));
       Assert.assertEquals(identifier.getUser().getUserName(), PROXY_USER);
@@ -156,57 +146,26 @@ public class TestDelegationTokenForProxyUser {
     }
   }
   
-  @Test
+  @Test(timeout=5000)
   public void testWebHdfsDoAs() throws Exception {
     WebHdfsTestUtil.LOG.info("START: testWebHdfsDoAs()");
-    ((Log4JLogger)NamenodeWebHdfsMethods.LOG).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)ExceptionHandler.LOG).getLogger().setLevel(Level.ALL);
-    final UserGroupInformation ugi = UserGroupInformation.createRemoteUser(REAL_USER);
     WebHdfsTestUtil.LOG.info("ugi.getShortUserName()=" + ugi.getShortUserName());
-    final WebHdfsFileSystem webhdfs = WebHdfsTestUtil.getWebHdfsFileSystemAs(ugi, config);
+    final WebHdfsFileSystem webhdfs = WebHdfsTestUtil.getWebHdfsFileSystemAs(ugi, config, WebHdfsFileSystem.SCHEME);
     
     final Path root = new Path("/");
     cluster.getFileSystem().setPermission(root, new FsPermission((short)0777));
 
-    {
-      //test GETHOMEDIRECTORY with doAs
-      final URL url = WebHdfsTestUtil.toUrl(webhdfs,
-          GetOpParam.Op.GETHOMEDIRECTORY,  root, new DoAsParam(PROXY_USER));
-      final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-      final Map<?, ?> m = WebHdfsTestUtil.connectAndGetJson(conn, HttpServletResponse.SC_OK);
-      conn.disconnect();
-  
-      final Object responsePath = m.get(Path.class.getSimpleName());
-      WebHdfsTestUtil.LOG.info("responsePath=" + responsePath);
-      Assert.assertEquals("/user/" + PROXY_USER, responsePath);
-    }
+    Whitebox.setInternalState(webhdfs, "ugi", proxyUgi);
 
     {
-      //test GETHOMEDIRECTORY with DOas
-      final URL url = WebHdfsTestUtil.toUrl(webhdfs,
-          GetOpParam.Op.GETHOMEDIRECTORY,  root, new DoAsParam(PROXY_USER) {
-            @Override
-            public String getName() {
-              return "DOas";
-            }
-      });
-      final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-      final Map<?, ?> m = WebHdfsTestUtil.connectAndGetJson(conn, HttpServletResponse.SC_OK);
-      conn.disconnect();
-  
-      final Object responsePath = m.get(Path.class.getSimpleName());
+      Path responsePath = webhdfs.getHomeDirectory();
       WebHdfsTestUtil.LOG.info("responsePath=" + responsePath);
-      Assert.assertEquals("/user/" + PROXY_USER, responsePath);
+      Assert.assertEquals(webhdfs.getUri() + "/user/" + PROXY_USER, responsePath.toString());
     }
 
     final Path f = new Path("/testWebHdfsDoAs/a.txt");
     {
-      //test create file with doAs
-      final PutOpParam.Op op = PutOpParam.Op.CREATE;
-      final URL url = WebHdfsTestUtil.toUrl(webhdfs, op,  f, new DoAsParam(PROXY_USER));
-      HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-      conn = WebHdfsTestUtil.twoStepWrite(conn, op);
-      final FSDataOutputStream out = WebHdfsTestUtil.write(webhdfs, op, conn, 4096);
+      FSDataOutputStream out = webhdfs.create(f);
       out.write("Hello, webhdfs user!".getBytes());
       out.close();
   
@@ -216,12 +175,7 @@ public class TestDelegationTokenForProxyUser {
     }
 
     {
-      //test append file with doAs
-      final PostOpParam.Op op = PostOpParam.Op.APPEND;
-      final URL url = WebHdfsTestUtil.toUrl(webhdfs, op,  f, new DoAsParam(PROXY_USER));
-      HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-      conn = WebHdfsTestUtil.twoStepWrite(conn, op);
-      final FSDataOutputStream out = WebHdfsTestUtil.write(webhdfs, op, conn, 4096);
+      final FSDataOutputStream out = webhdfs.append(f);
       out.write("\nHello again!".getBytes());
       out.close();
   

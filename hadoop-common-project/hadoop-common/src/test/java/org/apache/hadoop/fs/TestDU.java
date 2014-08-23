@@ -24,16 +24,21 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.util.Random;
 
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
+
 /** This test makes sure that "DU" does not get to run on each call to getUsed */ 
 public class TestDU extends TestCase {
   final static private File DU_DIR = new File(
       System.getProperty("test.build.data","/tmp"), "dutmp");
 
+  @Override
   public void setUp() {
       FileUtil.fullyDelete(DU_DIR);
       assertTrue(DU_DIR.mkdirs());
   }
 
+  @Override
   public void tearDown() throws IOException {
       FileUtil.fullyDelete(DU_DIR);
   }
@@ -100,5 +105,30 @@ public class TestDU extends TestCase {
     assertTrue("Invalid on-disk size",
         duSize >= writtenSize &&
         writtenSize <= (duSize + slack));
+  }
+  public void testDUGetUsedWillNotReturnNegative() throws IOException {
+    File file = new File(DU_DIR, "data");
+    assertTrue(file.createNewFile());
+    Configuration conf = new Configuration();
+    conf.setLong(CommonConfigurationKeys.FS_DU_INTERVAL_KEY, 10000L);
+    DU du = new DU(file, conf);
+    du.decDfsUsed(Long.MAX_VALUE);
+    long duSize = du.getUsed();
+    assertTrue(String.valueOf(duSize), duSize >= 0L);
+  }
+
+  public void testDUSetInitialValue() throws IOException {
+    File file = new File(DU_DIR, "dataX");
+    createFile(file, 8192);
+    DU du = new DU(file, 3000, 1024);
+    du.start();
+    assertTrue("Initial usage setting not honored", du.getUsed() == 1024);
+
+    // wait until the first du runs.
+    try {
+      Thread.sleep(5000);
+    } catch (InterruptedException ie) {}
+
+    assertTrue("Usage didn't get updated", du.getUsed() == 8192);
   }
 }

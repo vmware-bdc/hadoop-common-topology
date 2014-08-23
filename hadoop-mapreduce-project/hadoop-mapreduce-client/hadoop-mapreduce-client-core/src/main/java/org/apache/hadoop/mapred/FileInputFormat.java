@@ -36,14 +36,19 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
+import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.mapreduce.security.TokenCache;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.Node;
 import org.apache.hadoop.net.NodeBase;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
+
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.Iterables;
 
 /** 
  * A base class for file-based {@link InputFormat}.
@@ -61,9 +66,18 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
 
   public static final Log LOG =
     LogFactory.getLog(FileInputFormat.class);
+  
+  @Deprecated
+  public static enum Counter { 
+    BYTES_READ
+  }
 
   public static final String NUM_INPUT_FILES =
     org.apache.hadoop.mapreduce.lib.input.FileInputFormat.NUM_INPUT_FILES;
+  
+  public static final String INPUT_DIR_RECURSIVE = 
+    org.apache.hadoop.mapreduce.lib.input.FileInputFormat.INPUT_DIR_RECURSIVE;
+
 
   private static final double SPLIT_SLOP = 1.1;   // 10% slop
 
@@ -160,13 +174,17 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
   protected void addInputPathRecursively(List<FileStatus> result,
       FileSystem fs, Path path, PathFilter inputFilter) 
       throws IOException {
-    for(FileStatus stat: fs.listStatus(path, inputFilter)) {
-      if (stat.isDirectory()) {
-        addInputPathRecursively(result, fs, stat.getPath(), inputFilter);
-      } else {
-        result.add(stat);
+    RemoteIterator<LocatedFileStatus> iter = fs.listLocatedStatus(path);
+    while (iter.hasNext()) {
+      LocatedFileStatus stat = iter.next();
+      if (inputFilter.accept(stat.getPath())) {
+        if (stat.isDirectory()) {
+          addInputPathRecursively(result, fs, stat.getPath(), inputFilter);
+        } else {
+          result.add(stat);
+        }
       }
-    }          
+    }
   }
   
   /** List input directories.
@@ -187,11 +205,8 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
     TokenCache.obtainTokensForNamenodes(job.getCredentials(), dirs, job);
     
     // Whether we need to recursive look into the directory structure
-    boolean recursive = job.getBoolean("mapred.input.dir.recursive", false);
-    
-    List<FileStatus> result = new ArrayList<FileStatus>();
-    List<IOException> errors = new ArrayList<IOException>();
-    
+    boolean recursive = job.getBoolean(INPUT_DIR_RECURSIVE, false);
+
     // creates a MultiPathFilter with the hiddenFileFilter and the
     // user provided one (if any).
     List<PathFilter> filters = new ArrayList<PathFilter>();
@@ -202,6 +217,41 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
     }
     PathFilter inputFilter = new MultiPathFilter(filters);
 
+    FileStatus[] result;
+    int numThreads = job
+        .getInt(
+            org.apache.hadoop.mapreduce.lib.input.FileInputFormat.LIST_STATUS_NUM_THREADS,
+            org.apache.hadoop.mapreduce.lib.input.FileInputFormat.DEFAULT_LIST_STATUS_NUM_THREADS);
+    
+    Stopwatch sw = new Stopwatch().start();
+    if (numThreads == 1) {
+      List<FileStatus> locatedFiles = singleThreadedListStatus(job, dirs, inputFilter, recursive); 
+      result = locatedFiles.toArray(new FileStatus[locatedFiles.size()]);
+    } else {
+      Iterable<FileStatus> locatedFiles = null;
+      try {
+        
+        LocatedFileStatusFetcher locatedFileStatusFetcher = new LocatedFileStatusFetcher(
+            job, dirs, recursive, inputFilter, false);
+        locatedFiles = locatedFileStatusFetcher.getFileStatuses();
+      } catch (InterruptedException e) {
+        throw new IOException("Interrupted while getting file statuses");
+      }
+      result = Iterables.toArray(locatedFiles, FileStatus.class);
+    }
+
+    sw.stop();
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Time taken to get FileStatuses: " + sw.elapsedMillis());
+    }
+    LOG.info("Total input paths to process : " + result.length);
+    return result;
+  }
+  
+  private List<FileStatus> singleThreadedListStatus(JobConf job, Path[] dirs,
+      PathFilter inputFilter, boolean recursive) throws IOException {
+    List<FileStatus> result = new ArrayList<FileStatus>();
+    List<IOException> errors = new ArrayList<IOException>();
     for (Path p: dirs) {
       FileSystem fs = p.getFileSystem(job); 
       FileStatus[] matches = fs.globStatus(p, inputFilter);
@@ -212,26 +262,29 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
       } else {
         for (FileStatus globStat: matches) {
           if (globStat.isDirectory()) {
-            for(FileStatus stat: fs.listStatus(globStat.getPath(),
-                inputFilter)) {
-              if (recursive && stat.isDirectory()) {
-                addInputPathRecursively(result, fs, stat.getPath(), inputFilter);
-              } else {
-                result.add(stat);
+            RemoteIterator<LocatedFileStatus> iter =
+                fs.listLocatedStatus(globStat.getPath());
+            while (iter.hasNext()) {
+              LocatedFileStatus stat = iter.next();
+              if (inputFilter.accept(stat.getPath())) {
+                if (recursive && stat.isDirectory()) {
+                  addInputPathRecursively(result, fs, stat.getPath(),
+                      inputFilter);
+                } else {
+                  result.add(stat);
+                }
               }
-            }          
+            }
           } else {
             result.add(globStat);
           }
         }
       }
     }
-
     if (!errors.isEmpty()) {
       throw new InvalidInputException(errors);
     }
-    LOG.info("Total input paths to process : " + result.size()); 
-    return result.toArray(new FileStatus[result.size()]);
+    return result;
   }
 
   /**
@@ -242,12 +295,21 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
                                 String[] hosts) {
     return new FileSplit(file, start, length, hosts);
   }
+  
+  /**
+   * A factory that makes the split for this class. It can be overridden
+   * by sub-classes to make sub-types
+   */
+  protected FileSplit makeSplit(Path file, long start, long length, 
+                                String[] hosts, String[] inMemoryHosts) {
+    return new FileSplit(file, start, length, hosts, inMemoryHosts);
+  }
 
   /** Splits files returned by {@link #listStatus(JobConf)} when
    * they're too big.*/ 
-  @SuppressWarnings("deprecation")
   public InputSplit[] getSplits(JobConf job, int numSplits)
     throws IOException {
+    Stopwatch sw = new Stopwatch().start();
     FileStatus[] files = listStatus(job);
     
     // Save the number of input files for metrics/loadgen
@@ -269,37 +331,48 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
     NetworkTopology clusterMap = new NetworkTopology();
     for (FileStatus file: files) {
       Path path = file.getPath();
-      FileSystem fs = path.getFileSystem(job);
       long length = file.getLen();
-      BlockLocation[] blkLocations = fs.getFileBlockLocations(file, 0, length);
-      if ((length != 0) && isSplitable(fs, path)) { 
-        long blockSize = file.getBlockSize();
-        long splitSize = computeSplitSize(goalSize, minSize, blockSize);
+      if (length != 0) {
+        FileSystem fs = path.getFileSystem(job);
+        BlockLocation[] blkLocations;
+        if (file instanceof LocatedFileStatus) {
+          blkLocations = ((LocatedFileStatus) file).getBlockLocations();
+        } else {
+          blkLocations = fs.getFileBlockLocations(file, 0, length);
+        }
+        if (isSplitable(fs, path)) {
+          long blockSize = file.getBlockSize();
+          long splitSize = computeSplitSize(goalSize, minSize, blockSize);
 
-        long bytesRemaining = length;
-        while (((double) bytesRemaining)/splitSize > SPLIT_SLOP) {
-          String[] splitHosts = getSplitHosts(blkLocations, 
-              length-bytesRemaining, splitSize, clusterMap);
-          splits.add(makeSplit(path, length-bytesRemaining, splitSize, 
-                               splitHosts));
-          bytesRemaining -= splitSize;
+          long bytesRemaining = length;
+          while (((double) bytesRemaining)/splitSize > SPLIT_SLOP) {
+            String[][] splitHosts = getSplitHostsAndCachedHosts(blkLocations,
+                length-bytesRemaining, splitSize, clusterMap);
+            splits.add(makeSplit(path, length-bytesRemaining, splitSize,
+                splitHosts[0], splitHosts[1]));
+            bytesRemaining -= splitSize;
+          }
+
+          if (bytesRemaining != 0) {
+            String[][] splitHosts = getSplitHostsAndCachedHosts(blkLocations, length
+                - bytesRemaining, bytesRemaining, clusterMap);
+            splits.add(makeSplit(path, length - bytesRemaining, bytesRemaining,
+                splitHosts[0], splitHosts[1]));
+          }
+        } else {
+          String[][] splitHosts = getSplitHostsAndCachedHosts(blkLocations,0,length,clusterMap);
+          splits.add(makeSplit(path, 0, length, splitHosts[0], splitHosts[1]));
         }
-        
-        if (bytesRemaining != 0) {
-          String[] splitHosts = getSplitHosts(blkLocations, length
-              - bytesRemaining, bytesRemaining, clusterMap);
-          splits.add(makeSplit(path, length - bytesRemaining, bytesRemaining,
-              splitHosts));
-        }
-      } else if (length != 0) {
-        String[] splitHosts = getSplitHosts(blkLocations,0,length,clusterMap);
-        splits.add(makeSplit(path, 0, length, splitHosts));
       } else { 
         //Create empty hosts array for zero length files
         splits.add(makeSplit(path, 0, length, new String[0]));
       }
     }
-    LOG.debug("Total # of splits: " + splits.size());
+    sw.stop();
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Total # of splits generated by getSplits: " + splits.size()
+          + ", TimeTaken: " + sw.elapsedMillis());
+    }
     return splits.toArray(new FileSplit[splits.size()]);
   }
 
@@ -420,6 +493,8 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
           }
           break;
         }
+        default:
+          continue; // nothing special to do for this character
       }
     }
     pathStrings.add(commaSeparatedPaths.substring(pathStart, length));
@@ -472,10 +547,30 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
    * @param blkLocations The list of block locations
    * @param offset 
    * @param splitSize 
-   * @return array of hosts that contribute most to this split
+   * @return an array of hosts that contribute most to this split
    * @throws IOException
    */
   protected String[] getSplitHosts(BlockLocation[] blkLocations, 
+      long offset, long splitSize, NetworkTopology clusterMap) throws IOException {
+    return getSplitHostsAndCachedHosts(blkLocations, offset, splitSize,
+        clusterMap)[0];
+  }
+  
+  /** 
+   * This function identifies and returns the hosts that contribute 
+   * most for a given split. For calculating the contribution, rack
+   * locality is treated on par with host locality, so hosts from racks
+   * that contribute the most are preferred over hosts on racks that 
+   * contribute less
+   * @param blkLocations The list of block locations
+   * @param offset 
+   * @param splitSize 
+   * @return two arrays - one of hosts that contribute most to this split, and
+   *    one of hosts that contribute most to this split that have the data
+   *    cached on them
+   * @throws IOException
+   */
+  private String[][] getSplitHostsAndCachedHosts(BlockLocation[] blkLocations, 
       long offset, long splitSize, NetworkTopology clusterMap)
   throws IOException {
 
@@ -486,7 +581,8 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
 
     //If this is the only block, just return
     if (bytesInThisBlock >= splitSize) {
-      return blkLocations[startIndex].getHosts();
+      return new String[][] { blkLocations[startIndex].getHosts(),
+          blkLocations[startIndex].getCachedHosts() };
     }
 
     long bytesInFirstBlock = bytesInThisBlock;
@@ -573,7 +669,9 @@ public abstract class FileInputFormat<K, V> implements InputFormat<K, V> {
     
     } // for all indices
 
-    return identifyHosts(allTopos.length, racksMap);
+    // We don't yet support cached hosts when bytesInThisBlock > splitSize
+    return new String[][] { identifyHosts(allTopos.length, racksMap),
+        new String[0]};
   }
   
   private String[] identifyHosts(int replicationFactor, 

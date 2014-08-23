@@ -19,11 +19,10 @@ package org.apache.hadoop.io.retry;
 
 import java.io.IOException;
 
-import org.apache.hadoop.io.retry.UnreliableInterface.UnreliableException;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.ipc.StandbyException;
 
-public class UnreliableImplementation implements UnreliableInterface {
+class UnreliableImplementation implements UnreliableInterface {
 
   private int failsOnceInvocationCount,
     failsOnceWithValueInvocationCount,
@@ -60,24 +59,29 @@ public class UnreliableImplementation implements UnreliableInterface {
     this.exceptionToFailWith = exceptionToFailWith;
   }
   
+  @Override
   public void alwaysSucceeds() {
     // do nothing
   }
   
+  @Override
   public void alwaysFailsWithFatalException() throws FatalException {
     throw new FatalException();
   }
   
+  @Override
   public void alwaysFailsWithRemoteFatalException() throws RemoteException {
     throw new RemoteException(FatalException.class.getName(), "Oops");
   }
 
+  @Override
   public void failsOnceThenSucceeds() throws UnreliableException {
     if (failsOnceInvocationCount++ == 0) {
       throw new UnreliableException();
     }
   }
 
+  @Override
   public boolean failsOnceThenSucceedsWithReturnValue() throws UnreliableException {
     if (failsOnceWithValueInvocationCount++ == 0) {
       throw new UnreliableException();
@@ -85,6 +89,7 @@ public class UnreliableImplementation implements UnreliableInterface {
     return true;
   }
 
+  @Override
   public void failsTenTimesThenSucceeds() throws UnreliableException {
     if (failsTenTimesInvocationCount++ < 10) {
       throw new UnreliableException();
@@ -147,6 +152,11 @@ public class UnreliableImplementation implements UnreliableInterface {
           identifier + "'";
       throwAppropriateException(exceptionToFailWith, message);
     }
+  }
+
+  @Override
+  public String toString() {
+    return getClass().getSimpleName() + "[" + identifier + "]";
   }
 
   private static void throwAppropriateException(TypeOfExceptionToFailWith eType,

@@ -19,6 +19,7 @@
 package org.apache.hadoop.ha;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.List;
 
 import org.apache.zookeeper.AsyncCallback;
@@ -38,8 +39,11 @@ import org.junit.Assert;
 import org.mockito.Mockito;
 
 import org.apache.hadoop.HadoopIllegalArgumentException;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.ha.ActiveStandbyElector.ActiveStandbyElectorCallback;
 import org.apache.hadoop.ha.ActiveStandbyElector.ActiveNotFoundException;
+import org.apache.hadoop.util.ZKUtil.ZKAuthInfo;
+import org.apache.hadoop.test.GenericTestUtils;
 
 public class TestActiveStandbyElector {
 
@@ -51,15 +55,28 @@ public class TestActiveStandbyElector {
   private ActiveStandbyElectorTester elector;
 
   class ActiveStandbyElectorTester extends ActiveStandbyElector {
+    private int sleptFor = 0;
+    
     ActiveStandbyElectorTester(String hostPort, int timeout, String parent,
-        List<ACL> acl, ActiveStandbyElectorCallback app) throws IOException {
-      super(hostPort, timeout, parent, acl, app);
+        List<ACL> acl, ActiveStandbyElectorCallback app) throws IOException,
+        KeeperException {
+      super(hostPort, timeout, parent, acl, Collections
+          .<ZKAuthInfo> emptyList(), app,
+          CommonConfigurationKeys.HA_FC_ELECTOR_ZK_OP_RETRIES_DEFAULT);
     }
 
     @Override
     public ZooKeeper getNewZooKeeper() {
       ++count;
       return mockZK;
+    }
+    
+    @Override
+    protected void sleepFor(int ms) {
+      // don't sleep in unit tests! Instead, just record the amount of
+      // time slept
+      LOG.info("Would have slept for " + ms + "ms");
+      sleptFor += ms;
     }
   }
 
@@ -70,7 +87,7 @@ public class TestActiveStandbyElector {
       ActiveStandbyElector.BREADCRUMB_FILENAME;
 
   @Before
-  public void init() throws IOException {
+  public void init() throws IOException, KeeperException {
     count = 0;
     mockZK = Mockito.mock(ZooKeeper.class);
     mockApp = Mockito.mock(ActiveStandbyElectorCallback.class);
@@ -145,6 +162,68 @@ public class TestActiveStandbyElector {
     // no new monitor called
     verifyExistCall(1);
   }
+  
+  /**
+   * Verify that, when the callback fails to enter active state,
+   * the elector rejoins the election after sleeping for a short period.
+   */
+  @Test
+  public void testFailToBecomeActive() throws Exception {
+    mockNoPriorActive();
+    elector.joinElection(data);
+    Assert.assertEquals(0, elector.sleptFor);
+    
+    Mockito.doThrow(new ServiceFailedException("failed to become active"))
+        .when(mockApp).becomeActive();
+    elector.processResult(Code.OK.intValue(), ZK_LOCK_NAME, mockZK,
+        ZK_LOCK_NAME);
+    // Should have tried to become active
+    Mockito.verify(mockApp).becomeActive();
+    
+    // should re-join
+    Mockito.verify(mockZK, Mockito.times(2)).create(ZK_LOCK_NAME, data,
+        Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL, elector, mockZK);
+    Assert.assertEquals(2, count);
+    Assert.assertTrue(elector.sleptFor > 0);
+  }
+  
+  /**
+   * Verify that, when the callback fails to enter active state, after
+   * a ZK disconnect (i.e from the StatCallback), that the elector rejoins
+   * the election after sleeping for a short period.
+   */
+  @Test
+  public void testFailToBecomeActiveAfterZKDisconnect() throws Exception {
+    mockNoPriorActive();
+    elector.joinElection(data);
+    Assert.assertEquals(0, elector.sleptFor);
+
+    elector.processResult(Code.CONNECTIONLOSS.intValue(), ZK_LOCK_NAME, mockZK,
+        ZK_LOCK_NAME);
+    Mockito.verify(mockZK, Mockito.times(2)).create(ZK_LOCK_NAME, data,
+        Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL, elector, mockZK);
+
+    elector.processResult(Code.NODEEXISTS.intValue(), ZK_LOCK_NAME, mockZK,
+        ZK_LOCK_NAME);
+    verifyExistCall(1);
+
+    Stat stat = new Stat();
+    stat.setEphemeralOwner(1L);
+    Mockito.when(mockZK.getSessionId()).thenReturn(1L);
+
+    // Fake failure to become active from within the stat callback
+    Mockito.doThrow(new ServiceFailedException("fail to become active"))
+        .when(mockApp).becomeActive();
+    elector.processResult(Code.OK.intValue(), ZK_LOCK_NAME, mockZK, stat);
+    Mockito.verify(mockApp, Mockito.times(1)).becomeActive();
+    
+    // should re-join
+    Mockito.verify(mockZK, Mockito.times(3)).create(ZK_LOCK_NAME, data,
+        Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL, elector, mockZK);
+    Assert.assertEquals(2, count);
+    Assert.assertTrue(elector.sleptFor > 0);
+  }
+
   
   /**
    * Verify that, if there is a record of a prior active node, the
@@ -314,6 +393,7 @@ public class TestActiveStandbyElector {
    */
   @Test
   public void testStatNodeRetry() {
+    elector.joinElection(data);
     elector.processResult(Code.CONNECTIONLOSS.intValue(), ZK_LOCK_NAME, mockZK,
         (Stat) null);
     elector.processResult(Code.CONNECTIONLOSS.intValue(), ZK_LOCK_NAME, mockZK,
@@ -334,6 +414,7 @@ public class TestActiveStandbyElector {
    */
   @Test
   public void testStatNodeError() {
+    elector.joinElection(data);
     elector.processResult(Code.RUNTIMEINCONSISTENCY.intValue(), ZK_LOCK_NAME,
         mockZK, (Stat) null);
     Mockito.verify(mockApp, Mockito.times(0)).enterNeutralMode();
@@ -517,6 +598,8 @@ public class TestActiveStandbyElector {
    */
   @Test
   public void testQuitElection() throws Exception {
+    elector.joinElection(data);
+    Mockito.verify(mockZK, Mockito.times(0)).close();
     elector.quitElection(true);
     Mockito.verify(mockZK, Mockito.times(1)).close();
     // no watches added
@@ -625,5 +708,38 @@ public class TestActiveStandbyElector {
     Mockito.verify(mockZK, Mockito.times(3)).create(
         Mockito.eq(ZK_PARENT_NAME), Mockito.<byte[]>any(),
         Mockito.eq(Ids.OPEN_ACL_UNSAFE), Mockito.eq(CreateMode.PERSISTENT));
+  }
+
+  /**
+   * verify the zookeeper connection establishment
+   */
+  @Test
+  public void testWithoutZKServer() throws Exception {
+    try {
+      new ActiveStandbyElector("127.0.0.1", 2000, ZK_PARENT_NAME,
+          Ids.OPEN_ACL_UNSAFE, Collections.<ZKAuthInfo> emptyList(), mockApp,
+          CommonConfigurationKeys.HA_FC_ELECTOR_ZK_OP_RETRIES_DEFAULT);
+      Assert.fail("Did not throw zookeeper connection loss exceptions!");
+    } catch (KeeperException ke) {
+      GenericTestUtils.assertExceptionContains( "ConnectionLoss", ke);
+    }
+  }
+
+  /**
+   * joinElection(..) should happen only after SERVICE_HEALTHY.
+   */
+  @Test
+  public void testBecomeActiveBeforeServiceHealthy() throws Exception {
+    mockNoPriorActive();
+    WatchedEvent mockEvent = Mockito.mock(WatchedEvent.class);
+    Mockito.when(mockEvent.getType()).thenReturn(Event.EventType.None);
+    // session expired should enter safe mode
+    // But for first time, before the SERVICE_HEALTY i.e. appData is set,
+    // should not enter the election.
+    Mockito.when(mockEvent.getState()).thenReturn(Event.KeeperState.Expired);
+    elector.processWatchEvent(mockZK, mockEvent);
+    // joinElection should not be called.
+    Mockito.verify(mockZK, Mockito.times(0)).create(ZK_LOCK_NAME, null,
+        Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL, elector, mockZK);
   }
 }

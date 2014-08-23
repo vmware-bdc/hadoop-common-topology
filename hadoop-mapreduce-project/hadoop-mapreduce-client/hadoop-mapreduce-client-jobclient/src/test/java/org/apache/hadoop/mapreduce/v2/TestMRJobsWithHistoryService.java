@@ -20,9 +20,10 @@ package org.apache.hadoop.mapreduce.v2;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.EnumSet;
 import java.util.List;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.avro.AvroRemoteException;
 import org.apache.commons.logging.Log;
@@ -47,16 +48,18 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
-import org.apache.hadoop.yarn.util.BuilderUtils;
 import org.apache.hadoop.yarn.util.Records;
-import org.junit.Before;
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 public class TestMRJobsWithHistoryService {
 
   private static final Log LOG =
     LogFactory.getLog(TestMRJobsWithHistoryService.class);
+
+  private static final EnumSet<RMAppState> TERMINAL_RM_APP_STATES =
+    EnumSet.of(RMAppState.FINISHED, RMAppState.FAILED, RMAppState.KILLED);
 
   private static MiniMRYarnCluster mrCluster;
 
@@ -108,7 +111,7 @@ public class TestMRJobsWithHistoryService {
     }
   }
 
-  @Test
+  @Test (timeout = 90000)
   public void testJobHistoryData() throws IOException, InterruptedException,
       AvroRemoteException, ClassNotFoundException {
     if (!(new File(MiniMRYarnCluster.APPJAR)).exists()) {
@@ -129,12 +132,24 @@ public class TestMRJobsWithHistoryService {
     Counters counterMR = job.getCounters();
     JobId jobId = TypeConverter.toYarn(job.getJobID());
     ApplicationId appID = jobId.getAppId();
+    int pollElapsed = 0;
     while (true) {
       Thread.sleep(1000);
-      if (mrCluster.getResourceManager().getRMContext().getRMApps()
-          .get(appID).getState().equals(RMAppState.FINISHED))
+      pollElapsed += 1000;
+
+      if (TERMINAL_RM_APP_STATES.contains(
+          mrCluster.getResourceManager().getRMContext().getRMApps().get(appID)
+          .getState())) {
         break;
+      }
+
+      if (pollElapsed >= 60000) {
+        LOG.warn("application did not reach terminal state within 60 seconds");
+        break;
+      }
     }
+    Assert.assertEquals(RMAppState.FINISHED, mrCluster.getResourceManager()
+      .getRMContext().getRMApps().get(appID).getState());
     Counters counterHS = job.getCounters();
     //TODO the Assert below worked. need to check
     //Should we compare each field or convert to V2 counter and compare
@@ -153,8 +168,8 @@ public class TestMRJobsWithHistoryService {
     List<AMInfo> amInfos = jobReport.getAMInfos();
     Assert.assertEquals(1, amInfos.size());
     AMInfo amInfo = amInfos.get(0);
-    ApplicationAttemptId appAttemptId = BuilderUtils.newApplicationAttemptId(jobId.getAppId(), 1);
-    ContainerId amContainerId = BuilderUtils.newContainerId(appAttemptId, 1);  
+    ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(jobId.getAppId(), 1);
+    ContainerId amContainerId = ContainerId.newInstance(appAttemptId, 1);
     Assert.assertEquals(appAttemptId, amInfo.getAppAttemptId());
     Assert.assertEquals(amContainerId, amInfo.getContainerId());
     Assert.assertTrue(jobReport.getSubmitTime() > 0);

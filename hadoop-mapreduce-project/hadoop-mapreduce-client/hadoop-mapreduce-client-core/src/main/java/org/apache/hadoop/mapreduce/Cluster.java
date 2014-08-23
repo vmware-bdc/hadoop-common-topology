@@ -18,6 +18,7 @@
 
 package org.apache.hadoop.mapreduce;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.security.PrivilegedExceptionAction;
@@ -33,16 +34,12 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
-import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.mapred.JobConf;
-import org.apache.hadoop.mapred.Master;
 import org.apache.hadoop.mapreduce.protocol.ClientProtocol;
 import org.apache.hadoop.mapreduce.protocol.ClientProtocolProvider;
 import org.apache.hadoop.mapreduce.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.mapreduce.util.ConfigUtil;
 import org.apache.hadoop.mapreduce.v2.LogParams;
-import org.apache.hadoop.net.NetUtils;
-import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 import org.apache.hadoop.security.token.Token;
@@ -185,7 +182,18 @@ public class Cluster {
   public Job getJob(JobID jobId) throws IOException, InterruptedException {
     JobStatus status = client.getJobStatus(jobId);
     if (status != null) {
-      return Job.getInstance(this, status, new JobConf(status.getJobFile()));
+      JobConf conf;
+      try {
+        conf = new JobConf(status.getJobFile());
+      } catch (RuntimeException ex) {
+        // If job file doesn't exist it means we can't find the job
+        if (ex.getCause() instanceof FileNotFoundException) {
+          return null;
+        } else {
+          throw ex;
+        }
+      }
+      return Job.getInstance(this, status, conf);
     }
     return null;
   }
@@ -388,21 +396,8 @@ public class Cluster {
    */
   public Token<DelegationTokenIdentifier> 
       getDelegationToken(Text renewer) throws IOException, InterruptedException{
-    Token<DelegationTokenIdentifier> result =
-      client.getDelegationToken(renewer);
-
-    if (result == null) {
-      return result;
-    }
-
-    InetSocketAddress addr = Master.getMasterAddress(conf);
-    StringBuilder service = new StringBuilder();
-    service.append(NetUtils.normalizeHostName(addr.getAddress().
-                                              getHostAddress()));
-    service.append(':');
-    service.append(addr.getPort());
-    result.setService(new Text(service.toString()));
-    return result;
+    // client has already set the service
+    return client.getDelegationToken(renewer);
   }
 
   /**
@@ -416,12 +411,7 @@ public class Cluster {
   public long renewDelegationToken(Token<DelegationTokenIdentifier> token
                                    ) throws InvalidToken, IOException,
                                             InterruptedException {
-    try {
-      return client.renewDelegationToken(token);
-    } catch (RemoteException re) {
-      throw re.unwrapRemoteException(InvalidToken.class, 
-                                     AccessControlException.class);
-    }
+    return token.renew(getConf());
   }
 
   /**
@@ -433,12 +423,7 @@ public class Cluster {
   public void cancelDelegationToken(Token<DelegationTokenIdentifier> token
                                     ) throws IOException,
                                              InterruptedException {
-    try {
-      client.cancelDelegationToken(token);
-    } catch (RemoteException re) {
-      throw re.unwrapRemoteException(InvalidToken.class,
-                                     AccessControlException.class);
-    }
+    token.cancel(getConf());
   }
 
 }

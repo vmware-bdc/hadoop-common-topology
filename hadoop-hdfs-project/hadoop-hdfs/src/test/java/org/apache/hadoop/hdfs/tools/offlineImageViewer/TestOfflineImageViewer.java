@@ -17,379 +17,330 @@
  */
 package org.apache.hadoop.hdfs.tools.offlineImageViewer;
 
-import java.io.BufferedReader;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.EOFException;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.FileReader;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.io.RandomAccessFile;
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
-import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-import junit.framework.TestCase;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.parsers.SAXParser;
+import javax.xml.parsers.SAXParserFactory;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil;
-import org.apache.hadoop.hdfs.HdfsConfiguration;
+import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.security.token.Token;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import org.xml.sax.InputSource;
+import org.xml.sax.SAXException;
+import org.xml.sax.helpers.DefaultHandler;
 
-/**
- * Test function of OfflineImageViewer by:
- *   * confirming it can correctly process a valid fsimage file and that
- *     the processing generates a correct representation of the namespace
- *   * confirming it correctly fails to process an fsimage file with a layout
- *     version it shouldn't be able to handle
- *   * confirm it correctly bails on malformed image files, in particular, a
- *     file that ends suddenly.
- */
-public class TestOfflineImageViewer extends TestCase {
+import com.google.common.collect.Maps;
+
+public class TestOfflineImageViewer {
+  private static final Log LOG = LogFactory.getLog(OfflineImageViewerPB.class);
   private static final int NUM_DIRS = 3;
   private static final int FILES_PER_DIR = 4;
+  private static final String TEST_RENEWER = "JobTracker";
+  private static File originalFsimage = null;
 
-  // Elements of lines of ls-file output to be compared to FileStatus instance
-  private class LsElements {
-    public String perms;
-    public int replication;
-    public String username;
-    public String groupname;
-    public long filesize;
-    public char dir; // d if dir, - otherwise
-  }
-  
   // namespace as written to dfs, to be compared with viewer's output
-  final HashMap<String, FileStatus> writtenFiles 
-                                           = new HashMap<String, FileStatus>();
-  
-  
-  private static String ROOT = System.getProperty("test.build.data",
-                                                  "build/test/data");
-  
-  // Main entry point into testing.  Necessary since we only want to generate
-  // the fsimage file once and use it for multiple tests. 
-  public void testOIV() throws Exception {
-    File originalFsimage = null;
-    try {
-    originalFsimage = initFsimage();
-    assertNotNull("originalFsImage shouldn't be null", originalFsimage);
-    
-    // Tests:
-    outputOfLSVisitor(originalFsimage);
-    outputOfFileDistributionVisitor(originalFsimage);
-    
-    unsupportedFSLayoutVersion(originalFsimage);
-    
-    truncatedFSImage(originalFsimage);
-    
-    } finally {
-      if(originalFsimage != null && originalFsimage.exists())
-        originalFsimage.delete();
-    }
-  }
+  final static HashMap<String, FileStatus> writtenFiles = Maps.newHashMap();
 
-  // Create a populated namespace for later testing.  Save its contents to a
+  @Rule
+  public TemporaryFolder folder = new TemporaryFolder();
+
+  // Create a populated namespace for later testing. Save its contents to a
   // data structure and store its fsimage location.
-  private File initFsimage() throws IOException {
+  // We only want to generate the fsimage file once and use it for
+  // multiple tests.
+  @BeforeClass
+  public static void createOriginalFSImage() throws IOException {
     MiniDFSCluster cluster = null;
-    File orig = null;
     try {
-      Configuration conf = new HdfsConfiguration();
-      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(4).build();
-      FileSystem hdfs = cluster.getFileSystem();
-      
-      int filesize = 256;
-      
-      // Create a reasonable namespace 
-      for(int i = 0; i < NUM_DIRS; i++)  {
+      Configuration conf = new Configuration();
+      conf.setLong(
+          DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_MAX_LIFETIME_KEY, 10000);
+      conf.setLong(
+          DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_RENEW_INTERVAL_KEY, 5000);
+      conf.setBoolean(
+          DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_ALWAYS_USE_KEY, true);
+      conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTH_TO_LOCAL,
+          "RULE:[2:$1@$0](JobTracker@.*FOO.COM)s/@.*//" + "DEFAULT");
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
+      cluster.waitActive();
+      DistributedFileSystem hdfs = cluster.getFileSystem();
+
+      // Create a reasonable namespace
+      for (int i = 0; i < NUM_DIRS; i++) {
         Path dir = new Path("/dir" + i);
         hdfs.mkdirs(dir);
         writtenFiles.put(dir.toString(), pathToFileEntry(hdfs, dir.toString()));
-        for(int j = 0; j < FILES_PER_DIR; j++) {
+        for (int j = 0; j < FILES_PER_DIR; j++) {
           Path file = new Path(dir, "file" + j);
           FSDataOutputStream o = hdfs.create(file);
-          o.write(new byte[ filesize++ ]);
+          o.write(23);
           o.close();
-          
-          writtenFiles.put(file.toString(), pathToFileEntry(hdfs, file.toString()));
+
+          writtenFiles.put(file.toString(),
+              pathToFileEntry(hdfs, file.toString()));
         }
       }
 
-      // Write results to the fsimage file
-      cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_ENTER);
-      cluster.getNameNodeRpc().saveNamespace();
-      
-      // Determine location of fsimage file
-      orig = FSImageTestUtil.findLatestImageFile(
-          FSImageTestUtil.getFSImage(
-          cluster.getNameNode()).getStorage().getStorageDir(0));
-      if (orig == null) {
-        fail("Didn't generate or can't find fsimage");
+      // Create an empty directory
+      Path emptydir = new Path("/emptydir");
+      hdfs.mkdirs(emptydir);
+      writtenFiles.put(emptydir.toString(), hdfs.getFileStatus(emptydir));
+
+      // Get delegation tokens so we log the delegation token op
+      Token<?>[] delegationTokens = hdfs
+          .addDelegationTokens(TEST_RENEWER, null);
+      for (Token<?> t : delegationTokens) {
+        LOG.debug("got token " + t);
       }
+
+      final Path snapshot = new Path("/snapshot");
+      hdfs.mkdirs(snapshot);
+      hdfs.allowSnapshot(snapshot);
+      hdfs.mkdirs(new Path("/snapshot/1"));
+      hdfs.delete(snapshot, true);
+
+      // Set XAttrs so the fsimage contains XAttr ops
+      final Path xattr = new Path("/xattr");
+      hdfs.mkdirs(xattr);
+      hdfs.setXAttr(xattr, "user.a1", new byte[]{ 0x31, 0x32, 0x33 });
+      hdfs.setXAttr(xattr, "user.a2", new byte[]{ 0x37, 0x38, 0x39 });
+      // OIV should be able to handle empty value XAttrs
+      hdfs.setXAttr(xattr, "user.a3", null);
+      writtenFiles.put(xattr.toString(), hdfs.getFileStatus(xattr));
+
+      // Write results to the fsimage file
+      hdfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
+      hdfs.saveNamespace();
+
+      // Determine location of fsimage file
+      originalFsimage = FSImageTestUtil.findLatestImageFile(FSImageTestUtil
+          .getFSImage(cluster.getNameNode()).getStorage().getStorageDir(0));
+      if (originalFsimage == null) {
+        throw new RuntimeException("Didn't generate or can't find fsimage");
+      }
+      LOG.debug("original FS image file is " + originalFsimage);
     } finally {
-      if(cluster != null)
+      if (cluster != null)
         cluster.shutdown();
     }
-    return orig;
   }
-  
-  // Convenience method to generate a file status from file system for 
+
+  @AfterClass
+  public static void deleteOriginalFSImage() throws IOException {
+    if (originalFsimage != null && originalFsimage.exists()) {
+      originalFsimage.delete();
+    }
+  }
+
+  // Convenience method to generate a file status from file system for
   // later comparison
-  private FileStatus pathToFileEntry(FileSystem hdfs, String file) 
-        throws IOException {
+  private static FileStatus pathToFileEntry(FileSystem hdfs, String file)
+      throws IOException {
     return hdfs.getFileStatus(new Path(file));
   }
 
-  // Verify that we can correctly generate an ls-style output for a valid 
-  // fsimage
-  private void outputOfLSVisitor(File originalFsimage) throws IOException {
-    File testFile = new File(ROOT, "/basicCheck");
-    File outputFile = new File(ROOT, "/basicCheckOutput");
-    
-    try {
-      copyFile(originalFsimage, testFile);
-      
-      ImageVisitor v = new LsImageVisitor(outputFile.getPath(), true);
-      OfflineImageViewer oiv = new OfflineImageViewer(testFile.getPath(), v, false);
-
-      oiv.go();
-      
-      HashMap<String, LsElements> fileOutput = readLsfile(outputFile);
-      
-      compareNamespaces(writtenFiles, fileOutput);
-    } finally {
-      if(testFile.exists()) testFile.delete();
-      if(outputFile.exists()) outputFile.delete();
-    }
-    System.out.println("Correctly generated ls-style output.");
-  }
-  
-  // Confirm that attempting to read an fsimage file with an unsupported
-  // layout results in an error
-  public void unsupportedFSLayoutVersion(File originalFsimage) throws IOException {
-    File testFile = new File(ROOT, "/invalidLayoutVersion");
-    File outputFile = new File(ROOT, "invalidLayoutVersionOutput");
-    
-    try {
-      int badVersionNum = -432;
-      changeLayoutVersion(originalFsimage, testFile, badVersionNum);
-      ImageVisitor v = new LsImageVisitor(outputFile.getPath(), true);
-      OfflineImageViewer oiv = new OfflineImageViewer(testFile.getPath(), v, false);
-      
-      try {
-        oiv.go();
-        fail("Shouldn't be able to read invalid laytout version");
-      } catch(IOException e) {
-        if(!e.getMessage().contains(Integer.toString(badVersionNum)))
-          throw e; // wasn't error we were expecting
-        System.out.println("Correctly failed at reading bad image version.");
-      }
-    } finally {
-      if(testFile.exists()) testFile.delete();
-      if(outputFile.exists()) outputFile.delete();
-    }
-  }
-  
-  // Verify that image viewer will bail on a file that ends unexpectedly
-  private void truncatedFSImage(File originalFsimage) throws IOException {
-    File testFile = new File(ROOT, "/truncatedFSImage");
-    File outputFile = new File(ROOT, "/trucnatedFSImageOutput");
-    try {
-      copyPartOfFile(originalFsimage, testFile);
-      assertTrue("Created truncated fsimage", testFile.exists());
-      
-      ImageVisitor v = new LsImageVisitor(outputFile.getPath(), true);
-      OfflineImageViewer oiv = new OfflineImageViewer(testFile.getPath(), v, false);
-
-      try {
-        oiv.go();
-        fail("Managed to process a truncated fsimage file");
-      } catch (EOFException e) {
-        System.out.println("Correctly handled EOF");
-      }
-
-    } finally {
-      if(testFile.exists()) testFile.delete();
-      if(outputFile.exists()) outputFile.delete();
-    }
-  }
-  
-  // Test that our ls file has all the same compenents of the original namespace
-  private void compareNamespaces(HashMap<String, FileStatus> written,
-      HashMap<String, LsElements> fileOutput) {
-    assertEquals( "Should be the same number of files in both, plus one for root"
-            + " in fileoutput", fileOutput.keySet().size(), 
-                                written.keySet().size() + 1);
-    Set<String> inFile = fileOutput.keySet();
-
-    // For each line in the output file, verify that the namespace had a
-    // filestatus counterpart 
-    for (String path : inFile) {
-      if (path.equals("/")) // root's not included in output from system call
-        continue;
-
-      assertTrue("Path in file (" + path + ") was written to fs", written
-          .containsKey(path));
-      
-      compareFiles(written.get(path), fileOutput.get(path));
-      
-      written.remove(path);
-    }
-
-    assertEquals("No more files were written to fs", 0, written.size());
-  }
-  
-  // Compare two files as listed in the original namespace FileStatus and
-  // the output of the ls file from the image processor
-  private void compareFiles(FileStatus fs, LsElements elements) {
-    assertEquals("directory listed as such",  
-                 fs.isDirectory() ? 'd' : '-', elements.dir);
-    assertEquals("perms string equal", 
-                                fs.getPermission().toString(), elements.perms);
-    assertEquals("replication equal", fs.getReplication(), elements.replication);
-    assertEquals("owner equal", fs.getOwner(), elements.username);
-    assertEquals("group equal", fs.getGroup(), elements.groupname);
-    assertEquals("lengths equal", fs.getLen(), elements.filesize);
+  @Test(expected = IOException.class)
+  public void testTruncatedFSImage() throws IOException {
+    File truncatedFile = folder.newFile();
+    StringWriter output = new StringWriter();
+    copyPartOfFile(originalFsimage, truncatedFile);
+    new FileDistributionCalculator(new Configuration(), 0, 0, new PrintWriter(
+        output)).visit(new RandomAccessFile(truncatedFile, "r"));
   }
 
-  // Read the contents of the file created by the Ls processor
-  private HashMap<String, LsElements> readLsfile(File lsFile) throws IOException {
-    BufferedReader br = new BufferedReader(new FileReader(lsFile));
-    String line = null;
-    HashMap<String, LsElements> fileContents = new HashMap<String, LsElements>();
-    
-    while((line = br.readLine()) != null) 
-      readLsLine(line, fileContents);
-    
-    return fileContents;
-  }
-  
-  // Parse a line from the ls output.  Store permissions, replication, 
-  // username, groupname and filesize in hashmap keyed to the path name
-  private void readLsLine(String line, HashMap<String, LsElements> fileContents) {
-    String elements [] = line.split("\\s+");
-    
-    assertEquals("Not enough elements in ls output", 8, elements.length);
-    
-    LsElements lsLine = new LsElements();
-    
-    lsLine.dir = elements[0].charAt(0);
-    lsLine.perms = elements[0].substring(1);
-    lsLine.replication = elements[1].equals("-") 
-                                             ? 0 : Integer.valueOf(elements[1]);
-    lsLine.username = elements[2];
-    lsLine.groupname = elements[3];
-    lsLine.filesize = Long.valueOf(elements[4]);
-    // skipping date and time 
-    
-    String path = elements[7];
-    
-    // Check that each file in the ls output was listed once
-    assertFalse("LS file had duplicate file entries", 
-        fileContents.containsKey(path));
-    
-    fileContents.put(path, lsLine);
-  }
-  
-  // Copy one fsimage to another, changing the layout version in the process
-  private void changeLayoutVersion(File src, File dest, int newVersion) 
-         throws IOException {
-    DataInputStream in = null; 
-    DataOutputStream out = null; 
-    
-    try {
-      in = new DataInputStream(new FileInputStream(src));
-      out = new DataOutputStream(new FileOutputStream(dest));
-      
-      in.readInt();
-      out.writeInt(newVersion);
-      
-      byte [] b = new byte[1024];
-      while( in.read(b)  > 0 ) {
-        out.write(b);
-      }
-    } finally {
-      if(in != null) in.close();
-      if(out != null) out.close();
-    }
-  }
-  
-  // Only copy part of file into the other.  Used for testing truncated fsimage
   private void copyPartOfFile(File src, File dest) throws IOException {
-    InputStream in = null;
-    OutputStream out = null;
-    
-    byte [] b = new byte[256];
-    int bytesWritten = 0;
-    int count;
-    int maxBytes = 700;
-    
+    FileInputStream in = null;
+    FileOutputStream out = null;
+    final int MAX_BYTES = 700;
     try {
       in = new FileInputStream(src);
       out = new FileOutputStream(dest);
-      
-      while( (count = in.read(b))  > 0 && bytesWritten < maxBytes ) {
-        out.write(b);
-        bytesWritten += count;
-      } 
+      in.getChannel().transferTo(0, MAX_BYTES, out.getChannel());
     } finally {
-      if(in != null) in.close();
-      if(out != null) out.close();
-    }
-  }
-  
-  // Copy one file's contents into the other
-  private void copyFile(File src, File dest) throws IOException {
-    InputStream in = null;
-    OutputStream out = null;
-    
-    try {
-      in = new FileInputStream(src);
-      out = new FileOutputStream(dest);
-
-      byte [] b = new byte[1024];
-      while( in.read(b)  > 0 ) {
-        out.write(b);
-      }
-    } finally {
-      if(in != null) in.close();
-      if(out != null) out.close();
+      IOUtils.cleanup(null, in);
+      IOUtils.cleanup(null, out);
     }
   }
 
-  private void outputOfFileDistributionVisitor(File originalFsimage) throws IOException {
-    File testFile = new File(ROOT, "/basicCheck");
-    File outputFile = new File(ROOT, "/fileDistributionCheckOutput");
+  @Test
+  public void testFileDistributionCalculator() throws IOException {
+    StringWriter output = new StringWriter();
+    PrintWriter o = new PrintWriter(output);
+    new FileDistributionCalculator(new Configuration(), 0, 0, o)
+        .visit(new RandomAccessFile(originalFsimage, "r"));
+    o.close();
 
-    int totalFiles = 0;
-    try {
-      copyFile(originalFsimage, testFile);
-      ImageVisitor v = new FileDistributionVisitor(outputFile.getPath(), 0, 0);
-      OfflineImageViewer oiv = 
-        new OfflineImageViewer(testFile.getPath(), v, false);
+    Pattern p = Pattern.compile("totalFiles = (\\d+)\n");
+    Matcher matcher = p.matcher(output.getBuffer());
+    assertTrue(matcher.find() && matcher.groupCount() == 1);
+    int totalFiles = Integer.parseInt(matcher.group(1));
+    assertEquals(NUM_DIRS * FILES_PER_DIR, totalFiles);
 
-      oiv.go();
+    p = Pattern.compile("totalDirectories = (\\d+)\n");
+    matcher = p.matcher(output.getBuffer());
+    assertTrue(matcher.find() && matcher.groupCount() == 1);
+    int totalDirs = Integer.parseInt(matcher.group(1));
+    // totalDirs includes root directory, empty directory, and xattr directory
+    assertEquals(NUM_DIRS + 3, totalDirs);
 
-      BufferedReader reader = new BufferedReader(new FileReader(outputFile));
-      String line = reader.readLine();
-      assertEquals(line, "Size\tNumFiles");
-      while((line = reader.readLine()) != null) {
-        String[] row = line.split("\t");
-        assertEquals(row.length, 2);
-        totalFiles += Integer.parseInt(row[1]);
+    FileStatus maxFile = Collections.max(writtenFiles.values(),
+        new Comparator<FileStatus>() {
+      @Override
+      public int compare(FileStatus first, FileStatus second) {
+        return first.getLen() < second.getLen() ? -1 :
+            ((first.getLen() == second.getLen()) ? 0 : 1);
       }
+    });
+    p = Pattern.compile("maxFileSize = (\\d+)\n");
+    matcher = p.matcher(output.getBuffer());
+    assertTrue(matcher.find() && matcher.groupCount() == 1);
+    assertEquals(maxFile.getLen(), Long.parseLong(matcher.group(1)));
+  }
+
+  @Test
+  public void testFileDistributionCalculatorWithOptions() throws IOException {
+    int status = OfflineImageViewerPB.run(new String[] {"-i",
+        originalFsimage.getAbsolutePath(), "-o", "-", "-p", "FileDistribution",
+        "-maxSize", "512", "-step", "8"});
+    assertEquals(0, status);
+  }
+
+  @Test
+  public void testPBImageXmlWriter() throws IOException, SAXException,
+      ParserConfigurationException {
+    StringWriter output = new StringWriter();
+    PrintWriter o = new PrintWriter(output);
+    PBImageXmlWriter v = new PBImageXmlWriter(new Configuration(), o);
+    v.visit(new RandomAccessFile(originalFsimage, "r"));
+    SAXParserFactory spf = SAXParserFactory.newInstance();
+    SAXParser parser = spf.newSAXParser();
+    final String xml = output.getBuffer().toString();
+    parser.parse(new InputSource(new StringReader(xml)), new DefaultHandler());
+  }
+
+  @Test
+  public void testWebImageViewer() throws IOException, InterruptedException,
+      URISyntaxException {
+    WebImageViewer viewer = new WebImageViewer(
+        NetUtils.createSocketAddr("localhost:0"));
+    try {
+      viewer.initServer(originalFsimage.getAbsolutePath());
+      int port = viewer.getPort();
+
+      // create a WebHdfsFileSystem instance
+      URI uri = new URI("webhdfs://localhost:" + String.valueOf(port));
+      Configuration conf = new Configuration();
+      WebHdfsFileSystem webhdfs = (WebHdfsFileSystem)FileSystem.get(uri, conf);
+
+      // verify the number of directories
+      FileStatus[] statuses = webhdfs.listStatus(new Path("/"));
+      assertEquals(NUM_DIRS + 2, statuses.length); // contains empty and xattr directory
+
+      // verify the number of files in the directory
+      statuses = webhdfs.listStatus(new Path("/dir0"));
+      assertEquals(FILES_PER_DIR, statuses.length);
+
+      // compare a file
+      FileStatus status = webhdfs.listStatus(new Path("/dir0/file0"))[0];
+      FileStatus expected = writtenFiles.get("/dir0/file0");
+      compareFile(expected, status);
+
+      // LISTSTATUS operation to an empty directory
+      statuses = webhdfs.listStatus(new Path("/emptydir"));
+      assertEquals(0, statuses.length);
+
+      // LISTSTATUS operation to a invalid path
+      URL url = new URL("http://localhost:" + port +
+                    "/webhdfs/v1/invalid/?op=LISTSTATUS");
+      verifyHttpResponseCode(HttpURLConnection.HTTP_NOT_FOUND, url);
+
+      // LISTSTATUS operation to a invalid prefix
+      url = new URL("http://localhost:" + port + "/webhdfs/v1?op=LISTSTATUS");
+      verifyHttpResponseCode(HttpURLConnection.HTTP_NOT_FOUND, url);
+
+      // GETFILESTATUS operation
+      status = webhdfs.getFileStatus(new Path("/dir0/file0"));
+      compareFile(expected, status);
+
+      // GETFILESTATUS operation to a invalid path
+      url = new URL("http://localhost:" + port +
+                    "/webhdfs/v1/invalid/?op=GETFILESTATUS");
+      verifyHttpResponseCode(HttpURLConnection.HTTP_NOT_FOUND, url);
+
+      // invalid operation
+      url = new URL("http://localhost:" + port + "/webhdfs/v1/?op=INVALID");
+      verifyHttpResponseCode(HttpURLConnection.HTTP_BAD_REQUEST, url);
+
+      // invalid method
+      url = new URL("http://localhost:" + port + "/webhdfs/v1/?op=LISTSTATUS");
+      HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+      connection.setRequestMethod("POST");
+      connection.connect();
+      assertEquals(HttpURLConnection.HTTP_BAD_METHOD,
+          connection.getResponseCode());
     } finally {
-      if(testFile.exists()) testFile.delete();
-      if(outputFile.exists()) outputFile.delete();
+      // shutdown the viewer
+      viewer.shutdown();
     }
-    assertEquals(totalFiles, NUM_DIRS * FILES_PER_DIR);
+  }
+
+  private static void compareFile(FileStatus expected, FileStatus status) {
+    assertEquals(expected.getAccessTime(), status.getAccessTime());
+    assertEquals(expected.getBlockSize(), status.getBlockSize());
+    assertEquals(expected.getGroup(), status.getGroup());
+    assertEquals(expected.getLen(), status.getLen());
+    assertEquals(expected.getModificationTime(),
+        status.getModificationTime());
+    assertEquals(expected.getOwner(), status.getOwner());
+    assertEquals(expected.getPermission(), status.getPermission());
+    assertEquals(expected.getReplication(), status.getReplication());
+    assertEquals(expected.isDirectory(), status.isDirectory());
+  }
+
+  private void verifyHttpResponseCode(int expectedCode, URL url)
+      throws IOException {
+    HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+    connection.setRequestMethod("GET");
+    connection.connect();
+    assertEquals(expectedCode, connection.getResponseCode());
   }
 }

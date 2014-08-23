@@ -24,6 +24,7 @@ import java.io.IOException;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.mapred.IFile.Reader;
 import org.apache.hadoop.mapreduce.TaskAttemptID;
@@ -35,28 +36,28 @@ import org.apache.hadoop.mapreduce.TaskAttemptID;
 @InterfaceStability.Unstable
 public class InMemoryReader<K, V> extends Reader<K, V> {
   private final TaskAttemptID taskAttemptId;
-  private final MergeManager<K,V> merger;
-  DataInputBuffer memDataIn = new DataInputBuffer();
-  private int start;
-  private int length;
-
-  public InMemoryReader(MergeManager<K,V> merger, TaskAttemptID taskAttemptId,
-                        byte[] data, int start, int length)
+  private final MergeManagerImpl<K,V> merger;
+  private final DataInputBuffer memDataIn = new DataInputBuffer();
+  private final int start;
+  private final int length;
+  
+  public InMemoryReader(MergeManagerImpl<K,V> merger, TaskAttemptID taskAttemptId,
+                        byte[] data, int start, int length, Configuration conf)
   throws IOException {
-    super(null, null, length - start, null, null);
+    super(conf, null, length - start, null, null);
     this.merger = merger;
     this.taskAttemptId = taskAttemptId;
 
     buffer = data;
     bufferSize = (int)fileLength;
-    memDataIn.reset(buffer, start, length);
+    memDataIn.reset(buffer, start, length - start);
     this.start = start;
     this.length = length;
   }
 
   @Override
   public void reset(int offset) {
-    memDataIn.reset(buffer, start + offset, length);
+    memDataIn.reset(buffer, start + offset, length - start - offset);
     bytesRead = offset;
     eof = false;
   }

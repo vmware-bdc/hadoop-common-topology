@@ -27,7 +27,8 @@ import java.io.PrintWriter;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
-import java.util.Timer;
+
+import org.apache.hadoop.fs.FileUtil;
 
 public class TestShell extends TestCase {
 
@@ -38,10 +39,17 @@ public class TestShell extends TestCase {
       super(interval);
     }
 
+    @Override
     protected String[] getExecString() {
-      return new String[] {"echo", "hello"};
+      // There is no /bin/echo equivalent on Windows so just launch it as a
+      // shell built-in.
+      //
+      return Shell.WINDOWS ?
+          (new String[] {"cmd.exe", "/c", "echo", "hello"}) :
+          (new String[] {"echo", "hello"});
     }
 
+    @Override
     protected void parseExecResult(BufferedReader lines) throws IOException {
       ++runCount;
     }
@@ -55,7 +63,7 @@ public class TestShell extends TestCase {
     testInterval(Long.MIN_VALUE / 60000);  // test a negative interval
     testInterval(0L);  // test a zero interval
     testInterval(10L); // interval equal to 10mins
-    testInterval(System.currentTimeMillis() / 60000 + 60); // test a very big interval
+    testInterval(Time.now() / 60000 + 60); // test a very big interval
   }
 
   /**
@@ -80,6 +88,10 @@ public class TestShell extends TestCase {
   }
   
   public void testShellCommandTimeout() throws Throwable {
+    if(Shell.WINDOWS) {
+      // setExecutable does not work on Windows
+      return;
+    }
     String rootDir = new File(System.getProperty(
         "test.build.data", "/tmp")).getAbsolutePath();
     File shellFile = new File(rootDir, "timeout.sh");
@@ -87,7 +99,7 @@ public class TestShell extends TestCase {
     PrintWriter writer = new PrintWriter(new FileOutputStream(shellFile));
     writer.println(timeoutCommand);
     writer.close();
-    shellFile.setExecutable(true);
+    FileUtil.setExecutable(shellFile, true);
     Shell.ShellCommandExecutor shexc 
     = new Shell.ShellCommandExecutor(new String[]{shellFile.getAbsolutePath()},
                                       null, null, 100);

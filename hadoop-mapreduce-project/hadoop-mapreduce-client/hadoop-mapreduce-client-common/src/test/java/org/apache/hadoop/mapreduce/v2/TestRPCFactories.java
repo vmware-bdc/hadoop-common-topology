@@ -19,13 +19,16 @@
 package org.apache.hadoop.mapreduce.v2;
 
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.mapreduce.v2.api.MRClientProtocol;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.CancelDelegationTokenRequest;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.CancelDelegationTokenResponse;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.FailTaskAttemptRequest;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.FailTaskAttemptResponse;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.GetCountersRequest;
@@ -50,9 +53,10 @@ import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskAttemptRequest
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskAttemptResponse;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskRequest;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskResponse;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.RenewDelegationTokenRequest;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.RenewDelegationTokenResponse;
 import org.apache.hadoop.net.NetUtils;
-import org.apache.hadoop.yarn.YarnException;
-import org.apache.hadoop.yarn.exceptions.YarnRemoteException;
+import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.impl.pb.RpcClientFactoryPBImpl;
 import org.apache.hadoop.yarn.factories.impl.pb.RpcServerFactoryPBImpl;
 import org.junit.Test;
@@ -80,7 +84,7 @@ public class TestRPCFactories {
         RpcServerFactoryPBImpl.get().getServer(
           MRClientProtocol.class, instance, addr, conf, null, 1);
       server.start();
-    } catch (YarnException e) {
+    } catch (YarnRuntimeException e) {
       e.printStackTrace();
       Assert.fail("Failed to crete server");
     } finally {
@@ -106,12 +110,12 @@ public class TestRPCFactories {
       MRClientProtocol client = null;
       try {
         client = (MRClientProtocol) RpcClientFactoryPBImpl.get().getClient(MRClientProtocol.class, 1, NetUtils.getConnectAddress(server), conf);
-      } catch (YarnException e) {
+      } catch (YarnRuntimeException e) {
         e.printStackTrace();
         Assert.fail("Failed to crete client");
       }
       
-    } catch (YarnException e) {
+    } catch (YarnRuntimeException e) {
       e.printStackTrace();
       Assert.fail("Failed to crete server");
     } finally {
@@ -123,75 +127,92 @@ public class TestRPCFactories {
   public class MRClientProtocolTestImpl implements MRClientProtocol {
 
     @Override
+    public InetSocketAddress getConnectAddress() {
+      return null;
+    }
+    
+    @Override
     public GetJobReportResponse getJobReport(GetJobReportRequest request)
-        throws YarnRemoteException {
+        throws IOException {
       return null;
     }
 
     @Override
     public GetTaskReportResponse getTaskReport(GetTaskReportRequest request)
-        throws YarnRemoteException {
+        throws IOException {
       return null;
     }
 
     @Override
     public GetTaskAttemptReportResponse getTaskAttemptReport(
-        GetTaskAttemptReportRequest request) throws YarnRemoteException {
+        GetTaskAttemptReportRequest request) throws IOException {
       return null;
     }
 
     @Override
     public GetCountersResponse getCounters(GetCountersRequest request)
-        throws YarnRemoteException {
+        throws IOException {
       return null;
     }
 
     @Override
     public GetTaskAttemptCompletionEventsResponse getTaskAttemptCompletionEvents(
         GetTaskAttemptCompletionEventsRequest request)
-        throws YarnRemoteException {
+        throws IOException {
       return null;
     }
 
     @Override
     public GetTaskReportsResponse getTaskReports(GetTaskReportsRequest request)
-        throws YarnRemoteException {
+        throws IOException {
       return null;
     }
 
     @Override
     public GetDiagnosticsResponse getDiagnostics(GetDiagnosticsRequest request)
-        throws YarnRemoteException {
+        throws IOException {
       return null;
     }
 
     @Override
     public KillJobResponse killJob(KillJobRequest request)
-        throws YarnRemoteException {
+        throws IOException {
       return null;
     }
 
     @Override
     public KillTaskResponse killTask(KillTaskRequest request)
-        throws YarnRemoteException {
+        throws IOException {
       return null;
     }
 
     @Override
     public KillTaskAttemptResponse killTaskAttempt(
-        KillTaskAttemptRequest request) throws YarnRemoteException {
+        KillTaskAttemptRequest request) throws IOException {
       return null;
     }
 
     @Override
     public FailTaskAttemptResponse failTaskAttempt(
-        FailTaskAttemptRequest request) throws YarnRemoteException {
+        FailTaskAttemptRequest request) throws IOException {
       return null;
     }
 
     @Override
     public GetDelegationTokenResponse getDelegationToken(
-        GetDelegationTokenRequest request) throws YarnRemoteException {
+        GetDelegationTokenRequest request) throws IOException {
+      return null;
+    }
+
+    @Override
+    public RenewDelegationTokenResponse renewDelegationToken(
+        RenewDelegationTokenRequest request) throws IOException {
+      return null;
+    }
+
+    @Override
+    public CancelDelegationTokenResponse cancelDelegationToken(
+        CancelDelegationTokenRequest request) throws IOException {
       return null;
     }   
   }

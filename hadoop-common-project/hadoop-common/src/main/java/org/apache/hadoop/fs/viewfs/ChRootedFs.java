@@ -22,6 +22,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
@@ -34,9 +35,15 @@ import org.apache.hadoop.fs.FileChecksum;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.FsStatus;
+import org.apache.hadoop.fs.Options.ChecksumOpt;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.UnresolvedLinkException;
+import org.apache.hadoop.fs.XAttrSetFlag;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.Progressable;
 
@@ -79,9 +86,15 @@ class ChRootedFs extends AbstractFileSystem {
    */
   protected Path fullPath(final Path path) {
     super.checkPath(path);
-    return new Path(chRootPathPartString + path.toUri().getPath());
+    return new Path((chRootPathPart.isRoot() ? "" : chRootPathPartString)
+        + path.toUri().getPath());
   }
-  
+
+  @Override
+  public boolean isValidName(String src) {
+    return myFs.isValidName(fullPath(new Path(src)).toUri().toString());
+  }
+
   public ChRootedFs(final AbstractFileSystem fs, final Path theRoot)
     throws URISyntaxException {
     super(fs.getUri(), fs.getUri().getScheme(),
@@ -101,7 +114,7 @@ class ChRootedFs extends AbstractFileSystem {
     //              scheme:/// and scheme://authority/
     myUri = new URI(myFs.getUri().toString() + 
         (myFs.getUri().getAuthority() == null ? "" :  Path.SEPARATOR) +
-          chRootPathPart.toString().substring(1));
+          chRootPathPart.toUri().getPath().substring(1));
     super.checkPath(theRoot);
   }
   
@@ -127,7 +140,8 @@ class ChRootedFs extends AbstractFileSystem {
     }
     String pathPart = p.toUri().getPath();
     return  (pathPart.length() == chRootPathPartString.length()) ?
-        "" : pathPart.substring(chRootPathPartString.length() + 1);   
+        "" : pathPart.substring(chRootPathPartString.length() +
+            (chRootPathPart.isRoot() ? 0 : 1));
   }
   
 
@@ -157,11 +171,11 @@ class ChRootedFs extends AbstractFileSystem {
   public FSDataOutputStream createInternal(final Path f,
       final EnumSet<CreateFlag> flag, final FsPermission absolutePermission,
       final int bufferSize, final short replication, final long blockSize,
-      final Progressable progress, final int bytesPerChecksum,
+      final Progressable progress, final ChecksumOpt checksumOpt,
       final boolean createParent) throws IOException, UnresolvedLinkException {
     return myFs.createInternal(fullPath(f), flag,
         absolutePermission, bufferSize,
-        replication, blockSize, progress, bytesPerChecksum, createParent);
+        replication, blockSize, progress, checksumOpt, createParent);
   }
 
   @Override
@@ -186,6 +200,11 @@ class ChRootedFs extends AbstractFileSystem {
   public FileStatus getFileStatus(final Path f) 
       throws IOException, UnresolvedLinkException {
     return myFs.getFileStatus(fullPath(f));
+  }
+
+  public void access(Path path, FsAction mode) throws AccessControlException,
+      FileNotFoundException, UnresolvedLinkException, IOException {
+    myFs.access(fullPath(path), mode);
   }
 
   @Override
@@ -269,6 +288,70 @@ class ChRootedFs extends AbstractFileSystem {
   public void setTimes(final Path f, final long mtime, final long atime) 
       throws IOException, UnresolvedLinkException {
     myFs.setTimes(fullPath(f), mtime, atime);
+  }
+
+  @Override
+  public void modifyAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    myFs.modifyAclEntries(fullPath(path), aclSpec);
+  }
+
+  @Override
+  public void removeAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    myFs.removeAclEntries(fullPath(path), aclSpec);
+  }
+
+  @Override
+  public void removeDefaultAcl(Path path) throws IOException {
+    myFs.removeDefaultAcl(fullPath(path));
+  }
+
+  @Override
+  public void removeAcl(Path path) throws IOException {
+    myFs.removeAcl(fullPath(path));
+  }
+
+  @Override
+  public void setAcl(Path path, List<AclEntry> aclSpec) throws IOException {
+    myFs.setAcl(fullPath(path), aclSpec);
+  }
+
+  @Override
+  public AclStatus getAclStatus(Path path) throws IOException {
+    return myFs.getAclStatus(fullPath(path));
+  }
+
+  @Override
+  public void setXAttr(Path path, String name, byte[] value,
+                       EnumSet<XAttrSetFlag> flag) throws IOException {
+    myFs.setXAttr(fullPath(path), name, value, flag);
+  }
+
+  @Override
+  public byte[] getXAttr(Path path, String name) throws IOException {
+    return myFs.getXAttr(fullPath(path), name);
+  }
+
+  @Override
+  public Map<String, byte[]> getXAttrs(Path path) throws IOException {
+    return myFs.getXAttrs(fullPath(path));
+  }
+
+  @Override
+  public Map<String, byte[]> getXAttrs(Path path, List<String> names)
+      throws IOException {
+    return myFs.getXAttrs(fullPath(path), names);
+  }
+
+  @Override
+  public List<String> listXAttrs(Path path) throws IOException {
+    return myFs.listXAttrs(fullPath(path));
+  }
+
+  @Override
+  public void removeXAttr(Path path, String name) throws IOException {
+    myFs.removeXAttr(fullPath(path), name);
   }
 
   @Override

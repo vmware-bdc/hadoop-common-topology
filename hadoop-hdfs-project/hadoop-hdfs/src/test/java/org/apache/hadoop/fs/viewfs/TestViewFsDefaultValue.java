@@ -18,26 +18,6 @@
 package org.apache.hadoop.fs.viewfs;
 
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
-
-import javax.security.auth.login.LoginException;
-
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileStatus;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.FileSystemTestHelper;
-import org.apache.hadoop.fs.FsConstants;
-import org.apache.hadoop.fs.ContentSummary;
-import org.apache.hadoop.hdfs.DistributedFileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.io.DataInputBuffer;
-import org.apache.hadoop.io.DataOutputBuffer;
-import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.fs.FsServerDefaults;
-import org.apache.hadoop.hdfs.DFSConfigKeys;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_DEFAULT;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT;
@@ -46,17 +26,29 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_DEFAUL
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_WRITE_PACKET_SIZE_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_WRITE_PACKET_SIZE_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_SYNCONCLOSE_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_REPLICATION_MIN_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_REPLICATION_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_REPLICATION_KEY;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
+import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
+
+import javax.security.auth.login.LoginException;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.ContentSummary;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileSystemTestHelper;
+import org.apache.hadoop.fs.FsConstants;
+import org.apache.hadoop.fs.FsServerDefaults;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.DistributedFileSystem;
+import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
-import static org.junit.Assert.*;
 
 /**
  * Tests for viewfs implementation of default fs level values.
@@ -69,7 +61,8 @@ public class TestViewFsDefaultValue {
   static final String testFileDir = "/tmp/test/";
   static final String testFileName = testFileDir + "testFileStatusSerialziation";
   private static MiniDFSCluster cluster;
-  private static Configuration CONF = new Configuration();
+  private static final FileSystemTestHelper fileSystemTestHelper = new FileSystemTestHelper(); 
+  private static final Configuration CONF = new Configuration();
   private static FileSystem fHdfs;
   private static FileSystem vfs;
   private static Path testFilePath;
@@ -89,7 +82,7 @@ public class TestViewFsDefaultValue {
     cluster = new MiniDFSCluster.Builder(CONF).numDataNodes(DFS_REPLICATION_DEFAULT + 1).build();
     cluster.waitClusterUp();
     fHdfs = cluster.getFileSystem();
-    FileSystemTestHelper.createFile(fHdfs, testFileName);
+    fileSystemTestHelper.createFile(fHdfs, testFileName);
     Configuration conf = ViewFileSystemTestSetup.createConfig();
     ConfigUtil.addLink(conf, "/tmp", new URI(fHdfs.getUri().toString() +
       "/tmp"));

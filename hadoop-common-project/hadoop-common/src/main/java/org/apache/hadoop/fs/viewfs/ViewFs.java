@@ -17,7 +17,7 @@
  */
 package org.apache.hadoop.fs.viewfs;
 
-import static org.apache.hadoop.fs.viewfs.Constants.PERMISSION_RRR;
+import static org.apache.hadoop.fs.viewfs.Constants.PERMISSION_555;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -26,6 +26,7 @@ import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
 
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -42,12 +43,18 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FsConstants;
 import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.FsStatus;
+import org.apache.hadoop.fs.Options.ChecksumOpt;
 import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.UnsupportedFileSystemException;
+import org.apache.hadoop.fs.XAttrSetFlag;
 import org.apache.hadoop.fs.local.LocalConfigKeys;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclUtil;
+import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.viewfs.InodeTree.INode;
 import org.apache.hadoop.fs.viewfs.InodeTree.INodeLink;
@@ -55,6 +62,7 @@ import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.Progressable;
+import org.apache.hadoop.util.Time;
 
 
 /**
@@ -192,7 +200,7 @@ public class ViewFs extends AbstractFileSystem {
   ViewFs(final URI theUri, final Configuration conf) throws IOException,
       URISyntaxException {
     super(theUri, FsConstants.VIEWFS_SCHEME, false, -1);
-    creationTime = System.currentTimeMillis();
+    creationTime = Time.now();
     ugi = UserGroupInformation.getCurrentUser();
     config = conf;
     // Now build  client side view (i.e. client side mount table) from config.
@@ -203,9 +211,13 @@ public class ViewFs extends AbstractFileSystem {
       protected
       AbstractFileSystem getTargetFileSystem(final URI uri)
         throws URISyntaxException, UnsupportedFileSystemException {
+          String pathString = uri.getPath();
+          if (pathString.isEmpty()) {
+            pathString = "/";
+          }
           return new ChRootedFs(
               AbstractFileSystem.createFileSystem(uri, config),
-              new Path(uri.getPath()));
+              new Path(pathString));
       }
 
       @Override
@@ -242,8 +254,9 @@ public class ViewFs extends AbstractFileSystem {
       if (base == null) {
         base = "/user";
       }
-      homeDir = 
-        this.makeQualified(new Path(base + "/" + ugi.getShortUserName()));
+      homeDir = (base.equals("/") ? 
+        this.makeQualified(new Path(base + ugi.getShortUserName())):
+        this.makeQualified(new Path(base + "/" + ugi.getShortUserName())));
     }
     return homeDir;
   }
@@ -264,7 +277,7 @@ public class ViewFs extends AbstractFileSystem {
   public FSDataOutputStream createInternal(final Path f,
       final EnumSet<CreateFlag> flag, final FsPermission absolutePermission,
       final int bufferSize, final short replication, final long blockSize,
-      final Progressable progress, final int bytesPerChecksum,
+      final Progressable progress, final ChecksumOpt checksumOpt,
       final boolean createParent) throws AccessControlException,
       FileAlreadyExistsException, FileNotFoundException,
       ParentNotDirectoryException, UnsupportedFileSystemException,
@@ -282,7 +295,7 @@ public class ViewFs extends AbstractFileSystem {
     assert(res.remainingPath != null);
     return res.targetFileSystem.createInternal(res.remainingPath, flag,
         absolutePermission, bufferSize, replication,
-        blockSize, progress, bytesPerChecksum,
+        blockSize, progress, checksumOpt,
         createParent);
   }
 
@@ -338,6 +351,14 @@ public class ViewFs extends AbstractFileSystem {
     
     FileStatus status =  res.targetFileSystem.getFileStatus(res.remainingPath);
     return new ViewFsFileStatus(status, this.makeQualified(f));
+  }
+
+  @Override
+  public void access(Path path, FsAction mode) throws AccessControlException,
+      FileNotFoundException, UnresolvedLinkException, IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+      fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.access(res.remainingPath, mode);
   }
 
   @Override
@@ -590,6 +611,101 @@ public class ViewFs extends AbstractFileSystem {
     return result;
   }
 
+  @Override
+  public boolean isValidName(String src) {
+    // Prefix validated at mount time and rest of path validated by mount target.
+    return true;
+  }
+
+  @Override
+  public void modifyAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.modifyAclEntries(res.remainingPath, aclSpec);
+  }
+
+  @Override
+  public void removeAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.removeAclEntries(res.remainingPath, aclSpec);
+  }
+
+  @Override
+  public void removeDefaultAcl(Path path)
+      throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.removeDefaultAcl(res.remainingPath);
+  }
+
+  @Override
+  public void removeAcl(Path path)
+      throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.removeAcl(res.remainingPath);
+  }
+
+  @Override
+  public void setAcl(Path path, List<AclEntry> aclSpec) throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.setAcl(res.remainingPath, aclSpec);
+  }
+
+  @Override
+  public AclStatus getAclStatus(Path path) throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    return res.targetFileSystem.getAclStatus(res.remainingPath);
+  }
+
+  @Override
+  public void setXAttr(Path path, String name, byte[] value,
+                       EnumSet<XAttrSetFlag> flag) throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.setXAttr(res.remainingPath, name, value, flag);
+  }
+
+  @Override
+  public byte[] getXAttr(Path path, String name) throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    return res.targetFileSystem.getXAttr(res.remainingPath, name);
+  }
+
+  @Override
+  public Map<String, byte[]> getXAttrs(Path path) throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    return res.targetFileSystem.getXAttrs(res.remainingPath);
+  }
+
+  @Override
+  public Map<String, byte[]> getXAttrs(Path path, List<String> names)
+      throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    return res.targetFileSystem.getXAttrs(res.remainingPath, names);
+  }
+
+  @Override
+  public List<String> listXAttrs(Path path) throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    return res.targetFileSystem.listXAttrs(res.remainingPath);
+  }
+
+  @Override
+  public void removeXAttr(Path path, String name) throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.removeXAttr(res.remainingPath, name);
+  }
   
   
   /*
@@ -631,7 +747,7 @@ public class ViewFs extends AbstractFileSystem {
     public FSDataOutputStream createInternal(final Path f,
         final EnumSet<CreateFlag> flag, final FsPermission absolutePermission,
         final int bufferSize, final short replication, final long blockSize,
-        final Progressable progress, final int bytesPerChecksum,
+        final Progressable progress, final ChecksumOpt checksumOpt,
         final boolean createParent) throws AccessControlException,
         FileAlreadyExistsException, FileNotFoundException,
         ParentNotDirectoryException, UnsupportedFileSystemException,
@@ -663,8 +779,8 @@ public class ViewFs extends AbstractFileSystem {
     @Override
     public FileStatus getFileStatus(final Path f) throws IOException {
       checkPathIsSlash(f);
-      return new FileStatus(0, true, 0, 0, creationTime, creationTime, 
-          PERMISSION_RRR, ugi.getUserName(), ugi.getGroupNames()[0],
+      return new FileStatus(0, true, 0, 0, creationTime, creationTime,
+          PERMISSION_555, ugi.getUserName(), ugi.getGroupNames()[0],
           new Path(theInternalDir.fullPath).makeQualified(
               myUri, null));
     }
@@ -684,13 +800,13 @@ public class ViewFs extends AbstractFileSystem {
         INodeLink<AbstractFileSystem> inodelink = 
           (INodeLink<AbstractFileSystem>) inode;
         result = new FileStatus(0, false, 0, 0, creationTime, creationTime,
-            PERMISSION_RRR, ugi.getUserName(), ugi.getGroupNames()[0],
+            PERMISSION_555, ugi.getUserName(), ugi.getGroupNames()[0],
             inodelink.getTargetLink(),
             new Path(inode.fullPath).makeQualified(
                 myUri, null));
       } else {
         result = new FileStatus(0, true, 0, 0, creationTime, creationTime,
-          PERMISSION_RRR, ugi.getUserName(), ugi.getGroupNames()[0],
+          PERMISSION_555, ugi.getUserName(), ugi.getGroupNames()[0],
           new Path(inode.fullPath).makeQualified(
               myUri, null));
       }
@@ -729,14 +845,14 @@ public class ViewFs extends AbstractFileSystem {
 
           result[i++] = new FileStatus(0, false, 0, 0,
             creationTime, creationTime,
-            PERMISSION_RRR, ugi.getUserName(), ugi.getGroupNames()[0],
+            PERMISSION_555, ugi.getUserName(), ugi.getGroupNames()[0],
             link.getTargetLink(),
             new Path(inode.fullPath).makeQualified(
                 myUri, null));
         } else {
           result[i++] = new FileStatus(0, true, 0, 0,
             creationTime, creationTime,
-            PERMISSION_RRR, ugi.getUserName(), ugi.getGroupNames()[0],
+            PERMISSION_555, ugi.getUserName(), ugi.getGroupNames()[0],
             new Path(inode.fullPath).makeQualified(
                 myUri, null));
         }
@@ -748,7 +864,7 @@ public class ViewFs extends AbstractFileSystem {
     public void mkdir(final Path dir, final FsPermission permission,
         final boolean createParent) throws AccessControlException,
         FileAlreadyExistsException {
-      if (theInternalDir.isRoot & dir == null) {
+      if (theInternalDir.isRoot && dir == null) {
         throw new FileAlreadyExistsException("/ already exits");
       }
       throw readOnlyMountTable("mkdir", dir);
@@ -818,6 +934,81 @@ public class ViewFs extends AbstractFileSystem {
     public void setVerifyChecksum(final boolean verifyChecksum)
         throws AccessControlException {
       throw readOnlyMountTable("setVerifyChecksum", "");   
+    }
+
+    @Override
+    public void modifyAclEntries(Path path, List<AclEntry> aclSpec)
+        throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("modifyAclEntries", path);
+    }
+
+    @Override
+    public void removeAclEntries(Path path, List<AclEntry> aclSpec)
+        throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("removeAclEntries", path);
+    }
+
+    @Override
+    public void removeDefaultAcl(Path path) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("removeDefaultAcl", path);
+    }
+
+    @Override
+    public void removeAcl(Path path) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("removeAcl", path);
+    }
+
+    @Override
+    public void setAcl(Path path, List<AclEntry> aclSpec) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("setAcl", path);
+    }
+
+    @Override
+    public AclStatus getAclStatus(Path path) throws IOException {
+      checkPathIsSlash(path);
+      return new AclStatus.Builder().owner(ugi.getUserName())
+          .group(ugi.getGroupNames()[0])
+          .addEntries(AclUtil.getMinimalAcl(PERMISSION_555))
+          .stickyBit(false).build();
+    }
+
+    @Override
+    public void setXAttr(Path path, String name, byte[] value,
+                         EnumSet<XAttrSetFlag> flag) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("setXAttr", path);
+    }
+
+    @Override
+    public byte[] getXAttr(Path path, String name) throws IOException {
+      throw new NotInMountpointException(path, "getXAttr");
+    }
+
+    @Override
+    public Map<String, byte[]> getXAttrs(Path path) throws IOException {
+      throw new NotInMountpointException(path, "getXAttrs");
+    }
+
+    @Override
+    public Map<String, byte[]> getXAttrs(Path path, List<String> names)
+        throws IOException {
+      throw new NotInMountpointException(path, "getXAttrs");
+    }
+
+    @Override
+    public List<String> listXAttrs(Path path) throws IOException {
+      throw new NotInMountpointException(path, "listXAttrs");
+    }
+
+    @Override
+    public void removeXAttr(Path path, String name) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("removeXAttr", path);
     }
   }
 }

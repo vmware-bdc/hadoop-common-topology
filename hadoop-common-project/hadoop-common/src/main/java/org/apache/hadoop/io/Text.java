@@ -55,6 +55,7 @@ public class Text extends BinaryComparable
   
   private static ThreadLocal<CharsetEncoder> ENCODER_FACTORY =
     new ThreadLocal<CharsetEncoder>() {
+      @Override
       protected CharsetEncoder initialValue() {
         return Charset.forName("UTF-8").newEncoder().
                onMalformedInput(CodingErrorAction.REPORT).
@@ -64,6 +65,7 @@ public class Text extends BinaryComparable
   
   private static ThreadLocal<CharsetDecoder> DECODER_FACTORY =
     new ThreadLocal<CharsetDecoder>() {
+    @Override
     protected CharsetDecoder initialValue() {
       return Charset.forName("UTF-8").newDecoder().
              onMalformedInput(CodingErrorAction.REPORT).
@@ -112,11 +114,13 @@ public class Text extends BinaryComparable
    * valid. Please use {@link #copyBytes()} if you
    * need the returned array to be precisely the length of the data.
    */
+  @Override
   public byte[] getBytes() {
     return bytes;
   }
 
   /** Returns the number of bytes in the byte array */ 
+  @Override
   public int getLength() {
     return length;
   }
@@ -124,7 +128,7 @@ public class Text extends BinaryComparable
   /**
    * Returns the Unicode Scalar Value (32-bit integer value)
    * for the character at <code>position</code>. Note that this
-   * method avoids using the converter or doing String instatiation
+   * method avoids using the converter or doing String instantiation
    * @return the Unicode scalar value at position or -1
    *          if the position is invalid or points to a
    *          trailing byte
@@ -236,10 +240,14 @@ public class Text extends BinaryComparable
 
   /**
    * Clear the string to empty.
+   *
+   * <em>Note</em>: For performance reasons, this call does not clear the
+   * underlying byte array that is retrievable via {@link #getBytes()}.
+   * In order to free the byte-array memory, call {@link #set(byte[])}
+   * with an empty byte array (For example, <code>new byte[0]</code>).
    */
   public void clear() {
     length = 0;
-    bytes = EMPTY_BYTES;
   }
 
   /*
@@ -277,11 +285,22 @@ public class Text extends BinaryComparable
   
   /** deserialize 
    */
+  @Override
   public void readFields(DataInput in) throws IOException {
     int newLength = WritableUtils.readVInt(in);
-    setCapacity(newLength, false);
-    in.readFully(bytes, 0, newLength);
-    length = newLength;
+    readWithKnownLength(in, newLength);
+  }
+  
+  public void readFields(DataInput in, int maxLength) throws IOException {
+    int newLength = WritableUtils.readVInt(in);
+    if (newLength < 0) {
+      throw new IOException("tried to deserialize " + newLength +
+          " bytes of data!  newLength must be non-negative.");
+    } else if (newLength >= maxLength) {
+      throw new IOException("tried to deserialize " + newLength +
+          " bytes of data, but maxLength = " + maxLength);
+    }
+    readWithKnownLength(in, newLength);
   }
 
   /** Skips over one Text in the input. */
@@ -290,17 +309,40 @@ public class Text extends BinaryComparable
     WritableUtils.skipFully(in, length);
   }
 
+  /**
+   * Read a Text object whose length is already known.
+   * This allows creating Text from a stream which uses a different serialization
+   * format.
+   */
+  public void readWithKnownLength(DataInput in, int len) throws IOException {
+    setCapacity(len, false);
+    in.readFully(bytes, 0, len);
+    length = len;
+  }
+
   /** serialize
    * write this object to out
    * length uses zero-compressed encoding
    * @see Writable#write(DataOutput)
    */
+  @Override
   public void write(DataOutput out) throws IOException {
     WritableUtils.writeVInt(out, length);
     out.write(bytes, 0, length);
   }
 
+  public void write(DataOutput out, int maxLength) throws IOException {
+    if (length > maxLength) {
+      throw new IOException("data was too long to write!  Expected " +
+          "less than or equal to " + maxLength + " bytes, but got " +
+          length + " bytes.");
+    }
+    WritableUtils.writeVInt(out, length);
+    out.write(bytes, 0, length);
+  }
+
   /** Returns true iff <code>o</code> is a Text with the same contents.  */
+  @Override
   public boolean equals(Object o) {
     if (o instanceof Text)
       return super.equals(o);
@@ -318,6 +360,7 @@ public class Text extends BinaryComparable
       super(Text.class);
     }
 
+    @Override
     public int compare(byte[] b1, int s1, int l1,
                        byte[] b2, int s2, int l2) {
       int n1 = WritableUtils.decodeVIntSize(b1[s1]);
@@ -413,20 +456,45 @@ public class Text extends BinaryComparable
     return bytes;
   }
 
+  static final public int DEFAULT_MAX_LEN = 1024 * 1024;
+
   /** Read a UTF8 encoded string from in
    */
   public static String readString(DataInput in) throws IOException {
-    int length = WritableUtils.readVInt(in);
+    return readString(in, Integer.MAX_VALUE);
+  }
+  
+  /** Read a UTF8 encoded string with a maximum size
+   */
+  public static String readString(DataInput in, int maxLength)
+      throws IOException {
+    int length = WritableUtils.readVIntInRange(in, 0, maxLength);
     byte [] bytes = new byte[length];
     in.readFully(bytes, 0, length);
     return decode(bytes);
   }
-
+  
   /** Write a UTF8 encoded string to out
    */
   public static int writeString(DataOutput out, String s) throws IOException {
     ByteBuffer bytes = encode(s);
     int length = bytes.limit();
+    WritableUtils.writeVInt(out, length);
+    out.write(bytes.array(), 0, length);
+    return length;
+  }
+
+  /** Write a UTF8 encoded string with a maximum size to out
+   */
+  public static int writeString(DataOutput out, String s, int maxLength)
+      throws IOException {
+    ByteBuffer bytes = encode(s);
+    int length = bytes.limit();
+    if (length > maxLength) {
+      throw new IOException("string was too long to write!  Expected " +
+          "less than or equal to " + maxLength + " bytes, but got " +
+          length + " bytes.");
+    }
     WritableUtils.writeVInt(out, length);
     out.write(bytes.array(), 0, length);
     return length;
@@ -463,7 +531,7 @@ public class Text extends BinaryComparable
     int length = 0;
     int state = LEAD_BYTE;
     while (count < start+len) {
-      int aByte = ((int) utf8[count] & 0xFF);
+      int aByte = utf8[count] & 0xFF;
 
       switch (state) {
       case LEAD_BYTE:

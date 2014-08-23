@@ -20,31 +20,38 @@ package org.apache.hadoop.fs.viewfs;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
+import java.util.Collections;
+import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystemTestHelper;
+import org.apache.hadoop.fs.FilterFileSystem;
 import org.apache.hadoop.fs.FsConstants;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.viewfs.ChRootedFileSystem;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import static org.mockito.Mockito.*;
 
 public class TestChRootedFileSystem {
   FileSystem fSys; // The ChRoootedFs
   FileSystem fSysTarget; //
   Path chrootedTo;
-
+  FileSystemTestHelper fileSystemTestHelper;
+  
   @Before
   public void setUp() throws Exception {
     // create the test root on local_fs
     Configuration conf = new Configuration();
     fSysTarget = FileSystem.getLocal(conf);
-    chrootedTo = FileSystemTestHelper.getAbsoluteTestRootPath(fSysTarget);
+    fileSystemTestHelper = new FileSystemTestHelper();
+    chrootedTo = fileSystemTestHelper.getAbsoluteTestRootPath(fSysTarget);
     // In case previous test was killed before cleanup
     fSysTarget.delete(chrootedTo, true);
     
@@ -71,10 +78,10 @@ public class TestChRootedFileSystem {
     URI uri = fSys.getUri();
     Assert.assertEquals(chrootedTo.toUri(), uri);
     Assert.assertEquals(fSys.makeQualified(
-        new Path("/user/" + System.getProperty("user.name"))),
+        new Path(System.getProperty("user.home"))),
         fSys.getWorkingDirectory());
     Assert.assertEquals(fSys.makeQualified(
-        new Path("/user/" + System.getProperty("user.name"))),
+        new Path(System.getProperty("user.home"))),
         fSys.getHomeDirectory());
     /*
      * ChRootedFs as its uri like file:///chrootRoot.
@@ -105,12 +112,12 @@ public class TestChRootedFileSystem {
     
 
     // Create file 
-    FileSystemTestHelper.createFile(fSys, "/foo");
+    fileSystemTestHelper.createFile(fSys, "/foo");
     Assert.assertTrue(fSys.isFile(new Path("/foo")));
     Assert.assertTrue(fSysTarget.isFile(new Path(chrootedTo, "foo")));
     
     // Create file with recursive dir
-    FileSystemTestHelper.createFile(fSys, "/newDir/foo");
+    fileSystemTestHelper.createFile(fSys, "/newDir/foo");
     Assert.assertTrue(fSys.isFile(new Path("/newDir/foo")));
     Assert.assertTrue(fSysTarget.isFile(new Path(chrootedTo,"newDir/foo")));
     
@@ -120,7 +127,7 @@ public class TestChRootedFileSystem {
     Assert.assertFalse(fSysTarget.exists(new Path(chrootedTo, "newDir/foo")));
     
     // Create file with a 2 component dirs recursively
-    FileSystemTestHelper.createFile(fSys, "/newDir/newDir2/foo");
+    fileSystemTestHelper.createFile(fSys, "/newDir/newDir2/foo");
     Assert.assertTrue(fSys.isFile(new Path("/newDir/newDir2/foo")));
     Assert.assertTrue(fSysTarget.isFile(new Path(chrootedTo,"newDir/newDir2/foo")));
     
@@ -133,11 +140,11 @@ public class TestChRootedFileSystem {
   
   @Test
   public void testMkdirDelete() throws IOException {
-    fSys.mkdirs(FileSystemTestHelper.getTestRootPath(fSys, "/dirX"));
+    fSys.mkdirs(fileSystemTestHelper.getTestRootPath(fSys, "/dirX"));
     Assert.assertTrue(fSys.isDirectory(new Path("/dirX")));
     Assert.assertTrue(fSysTarget.isDirectory(new Path(chrootedTo,"dirX")));
     
-    fSys.mkdirs(FileSystemTestHelper.getTestRootPath(fSys, "/dirX/dirY"));
+    fSys.mkdirs(fileSystemTestHelper.getTestRootPath(fSys, "/dirX/dirY"));
     Assert.assertTrue(fSys.isDirectory(new Path("/dirX/dirY")));
     Assert.assertTrue(fSysTarget.isDirectory(new Path(chrootedTo,"dirX/dirY")));
     
@@ -155,11 +162,11 @@ public class TestChRootedFileSystem {
   @Test
   public void testRename() throws IOException {
     // Rename a file
-    FileSystemTestHelper.createFile(fSys, "/newDir/foo");
+    fileSystemTestHelper.createFile(fSys, "/newDir/foo");
     fSys.rename(new Path("/newDir/foo"), new Path("/newDir/fooBar"));
     Assert.assertFalse(fSys.exists(new Path("/newDir/foo")));
     Assert.assertFalse(fSysTarget.exists(new Path(chrootedTo,"newDir/foo")));
-    Assert.assertTrue(fSys.isFile(FileSystemTestHelper.getTestRootPath(fSys,"/newDir/fooBar")));
+    Assert.assertTrue(fSys.isFile(fileSystemTestHelper.getTestRootPath(fSys,"/newDir/fooBar")));
     Assert.assertTrue(fSysTarget.isFile(new Path(chrootedTo,"newDir/fooBar")));
     
     
@@ -168,7 +175,7 @@ public class TestChRootedFileSystem {
     fSys.rename(new Path("/newDir/dirFoo"), new Path("/newDir/dirFooBar"));
     Assert.assertFalse(fSys.exists(new Path("/newDir/dirFoo")));
     Assert.assertFalse(fSysTarget.exists(new Path(chrootedTo,"newDir/dirFoo")));
-    Assert.assertTrue(fSys.isDirectory(FileSystemTestHelper.getTestRootPath(fSys,"/newDir/dirFooBar")));
+    Assert.assertTrue(fSys.isDirectory(fileSystemTestHelper.getTestRootPath(fSys,"/newDir/dirFooBar")));
     Assert.assertTrue(fSysTarget.isDirectory(new Path(chrootedTo,"newDir/dirFooBar")));
   }
 
@@ -212,10 +219,10 @@ public class TestChRootedFileSystem {
     
     
 
-    FileSystemTestHelper.createFile(fSys, "/foo");
-    FileSystemTestHelper.createFile(fSys, "/bar");
+    fileSystemTestHelper.createFile(fSys, "/foo");
+    fileSystemTestHelper.createFile(fSys, "/bar");
     fSys.mkdirs(new Path("/dirX"));
-    fSys.mkdirs(FileSystemTestHelper.getTestRootPath(fSys, "/dirY"));
+    fSys.mkdirs(fileSystemTestHelper.getTestRootPath(fSys, "/dirY"));
     fSys.mkdirs(new Path("/dirX/dirXX"));
     
     dirPaths = fSys.listStatus(new Path("/"));
@@ -305,7 +312,7 @@ public class TestChRootedFileSystem {
   @Test
   public void testResolvePath() throws IOException {
     Assert.assertEquals(chrootedTo, fSys.resolvePath(new Path("/"))); 
-    FileSystemTestHelper.createFile(fSys, "/foo");
+    fileSystemTestHelper.createFile(fSys, "/foo");
     Assert.assertEquals(new Path(chrootedTo, "foo"),
         fSys.resolvePath(new Path("/foo"))); 
   }
@@ -313,5 +320,86 @@ public class TestChRootedFileSystem {
   @Test(expected=FileNotFoundException.class) 
   public void testResolvePathNonExisting() throws IOException {
       fSys.resolvePath(new Path("/nonExisting"));
+  }
+  
+  @Test
+  public void testDeleteOnExitPathHandling() throws IOException {
+    Configuration conf = new Configuration();
+    conf.setClass("fs.mockfs.impl", MockFileSystem.class, FileSystem.class);
+        
+    URI chrootUri = URI.create("mockfs://foo/a/b");
+    ChRootedFileSystem chrootFs = new ChRootedFileSystem(chrootUri, conf);
+    FileSystem mockFs = ((FilterFileSystem)chrootFs.getRawFileSystem())
+        .getRawFileSystem();
+    
+    // ensure delete propagates the correct path
+    Path chrootPath = new Path("/c");
+    Path rawPath = new Path("/a/b/c");
+    chrootFs.delete(chrootPath, false);
+    verify(mockFs).delete(eq(rawPath), eq(false));
+    reset(mockFs);
+ 
+    // fake that the path exists for deleteOnExit
+    FileStatus stat = mock(FileStatus.class);
+    when(mockFs.getFileStatus(eq(rawPath))).thenReturn(stat);
+    // ensure deleteOnExit propagates the correct path
+    chrootFs.deleteOnExit(chrootPath);
+    chrootFs.close();
+    verify(mockFs).delete(eq(rawPath), eq(true));
+  }
+  
+  @Test
+  public void testURIEmptyPath() throws IOException {
+    Configuration conf = new Configuration();
+    conf.setClass("fs.mockfs.impl", MockFileSystem.class, FileSystem.class);
+
+    URI chrootUri = URI.create("mockfs://foo");
+    new ChRootedFileSystem(chrootUri, conf);
+  }
+
+  /**
+   * Tests that ChRootedFileSystem delegates calls for every ACL method to the
+   * underlying FileSystem with all Path arguments translated as required to
+   * enforce chroot.
+   */
+  @Test
+  public void testAclMethodsPathTranslation() throws IOException {
+    Configuration conf = new Configuration();
+    conf.setClass("fs.mockfs.impl", MockFileSystem.class, FileSystem.class);
+
+    URI chrootUri = URI.create("mockfs://foo/a/b");
+    ChRootedFileSystem chrootFs = new ChRootedFileSystem(chrootUri, conf);
+    FileSystem mockFs = ((FilterFileSystem)chrootFs.getRawFileSystem())
+        .getRawFileSystem();
+
+    Path chrootPath = new Path("/c");
+    Path rawPath = new Path("/a/b/c");
+    List<AclEntry> entries = Collections.emptyList();
+
+    chrootFs.modifyAclEntries(chrootPath, entries);
+    verify(mockFs).modifyAclEntries(rawPath, entries);
+
+    chrootFs.removeAclEntries(chrootPath, entries);
+    verify(mockFs).removeAclEntries(rawPath, entries);
+
+    chrootFs.removeDefaultAcl(chrootPath);
+    verify(mockFs).removeDefaultAcl(rawPath);
+
+    chrootFs.removeAcl(chrootPath);
+    verify(mockFs).removeAcl(rawPath);
+
+    chrootFs.setAcl(chrootPath, entries);
+    verify(mockFs).setAcl(rawPath, entries);
+
+    chrootFs.getAclStatus(chrootPath);
+    verify(mockFs).getAclStatus(rawPath);
+  }
+
+  static class MockFileSystem extends FilterFileSystem {
+    MockFileSystem() {
+      super(mock(FileSystem.class));
+    }
+    @Override
+    public void initialize(URI name, Configuration conf) throws IOException {}
   }
 }

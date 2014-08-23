@@ -31,9 +31,9 @@ import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptDiagnosticsUpdateEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
-import org.apache.hadoop.yarn.Clock;
+import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.yarn.event.EventHandler;
-import org.apache.hadoop.yarn.service.AbstractService;
+import org.apache.hadoop.yarn.util.Clock;
 
 
 /**
@@ -46,33 +46,22 @@ import org.apache.hadoop.yarn.service.AbstractService;
 public class TaskHeartbeatHandler extends AbstractService {
   
   private static class ReportTime {
-    private long lastPing;
     private long lastProgress;
     
     public ReportTime(long time) {
       setLastProgress(time);
     }
     
-    public synchronized void setLastPing(long time) {
-      lastPing = time;
-    }
-    
     public synchronized void setLastProgress(long time) {
       lastProgress = time;
-      lastPing = time;
     }
-    
-    public synchronized long getLastPing() {
-      return lastPing;
-    }
-    
+
     public synchronized long getLastProgress() {
       return lastProgress;
     }
   }
   
   private static final Log LOG = LogFactory.getLog(TaskHeartbeatHandler.class);
-  private static final int PING_TIMEOUT = 5 * 60 * 1000;
   
   //thread which runs periodically to see the last time since a heartbeat is
   //received from a task.
@@ -96,26 +85,28 @@ public class TaskHeartbeatHandler extends AbstractService {
   }
 
   @Override
-  public void init(Configuration conf) {
-    super.init(conf);
+  protected void serviceInit(Configuration conf) throws Exception {
+    super.serviceInit(conf);
     taskTimeOut = conf.getInt(MRJobConfig.TASK_TIMEOUT, 5 * 60 * 1000);
     taskTimeOutCheckInterval =
         conf.getInt(MRJobConfig.TASK_TIMEOUT_CHECK_INTERVAL_MS, 30 * 1000);
   }
 
   @Override
-  public void start() {
+  protected void serviceStart() throws Exception {
     lostTaskCheckerThread = new Thread(new PingChecker());
     lostTaskCheckerThread.setName("TaskHeartbeatHandler PingChecker");
     lostTaskCheckerThread.start();
-    super.start();
+    super.serviceStart();
   }
 
   @Override
-  public void stop() {
+  protected void serviceStop() throws Exception {
     stopped = true;
-    lostTaskCheckerThread.interrupt();
-    super.stop();
+    if (lostTaskCheckerThread != null) {
+      lostTaskCheckerThread.interrupt();
+    }
+    super.serviceStop();
   }
 
   public void progressing(TaskAttemptId attemptID) {
@@ -127,14 +118,6 @@ public class TaskHeartbeatHandler extends AbstractService {
     }
   }
 
-  public void pinged(TaskAttemptId attemptID) {
-    //only put for the registered attempts
-      //TODO throw an exception if the task isn't registered.
-      ReportTime time = runningAttempts.get(attemptID);
-      if(time != null) {
-        time.setLastPing(clock.getTime());
-      }
-    }
   
   public void register(TaskAttemptId attemptID) {
     runningAttempts.put(attemptID, new ReportTime(clock.getTime()));
@@ -159,10 +142,8 @@ public class TaskHeartbeatHandler extends AbstractService {
           Map.Entry<TaskAttemptId, ReportTime> entry = iterator.next();
           boolean taskTimedOut = (taskTimeOut > 0) && 
               (currentTime > (entry.getValue().getLastProgress() + taskTimeOut));
-          boolean pingTimedOut =
-              (currentTime > (entry.getValue().getLastPing() + PING_TIMEOUT));
-              
-          if(taskTimedOut || pingTimedOut) {
+           
+          if(taskTimedOut) {
             // task is lost, remove from the list and raise lost event
             iterator.remove();
             eventHandler.handle(new TaskAttemptDiagnosticsUpdateEvent(entry

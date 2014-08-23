@@ -20,7 +20,6 @@ package org.apache.hadoop.mapred;
 
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapreduce.MRJobConfig;
-import org.apache.hadoop.mapreduce.OutputCommitter;
 import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier;
 import org.apache.hadoop.mapreduce.split.JobSplit.TaskSplitMetaInfo;
@@ -30,8 +29,8 @@ import org.apache.hadoop.mapreduce.v2.app.TaskAttemptListener;
 import org.apache.hadoop.mapreduce.v2.app.job.impl.TaskAttemptImpl;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.token.Token;
-import org.apache.hadoop.yarn.Clock;
 import org.apache.hadoop.yarn.event.EventHandler;
+import org.apache.hadoop.yarn.util.Clock;
 
 @SuppressWarnings("rawtypes")
 public class MapTaskAttemptImpl extends TaskAttemptImpl {
@@ -42,12 +41,12 @@ public class MapTaskAttemptImpl extends TaskAttemptImpl {
       EventHandler eventHandler, Path jobFile, 
       int partition, TaskSplitMetaInfo splitInfo, JobConf conf,
       TaskAttemptListener taskAttemptListener, 
-      OutputCommitter committer, Token<JobTokenIdentifier> jobToken,
+      Token<JobTokenIdentifier> jobToken,
       Credentials credentials, Clock clock,
       AppContext appContext) {
     super(taskId, attempt, eventHandler, 
         taskAttemptListener, jobFile, partition, conf, splitInfo.getLocations(),
-        committer, jobToken, credentials, clock, appContext);
+        jobToken, credentials, clock, appContext);
     this.splitInfo = splitInfo;
   }
 

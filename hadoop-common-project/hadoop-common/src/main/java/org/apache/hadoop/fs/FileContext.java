@@ -24,7 +24,6 @@ import java.io.OutputStream;
 import java.net.URI;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -43,6 +42,9 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem.Statistics;
 import org.apache.hadoop.fs.Options.CreateOpts;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_DEFAULT_NAME_DEFAULT;
@@ -54,109 +56,101 @@ import org.apache.hadoop.fs.InvalidPathException;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.util.ShutdownHookManager;
 
 /**
- * The FileContext class provides an interface to the application writer for
- * using the Hadoop file system.
- * It provides a set of methods for the usual operation: create, open, 
- * list, etc 
+ * The FileContext class provides an interface for users of the Hadoop
+ * file system. It exposes a number of file system operations, e.g. create,
+ * open, list.
  * 
- * <p>
- * <b> *** Path Names *** </b>
- * <p>
+ * <h2>Path Names</h2>
  * 
- * The Hadoop file system supports a URI name space and URI names.
- * It offers a forest of file systems that can be referenced using fully
- * qualified URIs.
- * Two common Hadoop file systems implementations are
+ * The Hadoop file system supports a URI namespace and URI names. This enables
+ * multiple types of file systems to be referenced using fully-qualified URIs.
+ * Two common Hadoop file system implementations are
  * <ul>
- * <li> the local file system: file:///path
- * <li> the hdfs file system hdfs://nnAddress:nnPort/path
+ * <li>the local file system: file:///path
+ * <li>the HDFS file system: hdfs://nnAddress:nnPort/path
  * </ul>
  * 
- * While URI names are very flexible, it requires knowing the name or address
- * of the server. For convenience one often wants to access the default system
- * in one's environment without knowing its name/address. This has an
- * additional benefit that it allows one to change one's default fs
- *  (e.g. admin moves application from cluster1 to cluster2).
+ * The Hadoop file system also supports additional naming schemes besides URIs.
+ * Hadoop has the concept of a <i>default file system</i>, which implies a
+ * default URI scheme and authority. This enables <i>slash-relative names</i>
+ * relative to the default FS, which are more convenient for users and
+ * application writers. The default FS is typically set by the user's
+ * environment, though it can also be manually specified.
  * <p>
  * 
- * To facilitate this, Hadoop supports a notion of a default file system.
- * The user can set his default file system, although this is
- * typically set up for you in your environment via your default config.
- * A default file system implies a default scheme and authority; slash-relative
- * names (such as /for/bar) are resolved relative to that default FS.
- * Similarly a user can also have working-directory-relative names (i.e. names
- * not starting with a slash). While the working directory is generally in the
- * same default FS, the wd can be in a different FS.
+ * Hadoop also supports <i>working-directory-relative</i> names, which are paths
+ * relative to the current working directory (similar to Unix). The working
+ * directory can be in a different file system than the default FS.
  * <p>
- *  Hence Hadoop path names can be one of:
- *  <ul>
- *  <li> fully qualified URI: scheme://authority/path
- *  <li> slash relative names: /path relative to the default file system
- *  <li> wd-relative names: path  relative to the working dir
- *  </ul>   
+ * Thus, Hadoop path names can be specified as one of the following:
+ * <ul>
+ * <li>a fully-qualified URI: scheme://authority/path (e.g.
+ * hdfs://nnAddress:nnPort/foo/bar)
+ * <li>a slash-relative name: path relative to the default file system (e.g.
+ * /foo/bar)
+ * <li>a working-directory-relative name: path relative to the working dir (e.g.
+ * foo/bar)
+ * </ul>
  *  Relative paths with scheme (scheme:foo/bar) are illegal.
  *  
- *  <p>
- *  <b>****The Role of the FileContext and configuration defaults****</b>
- *  <p>
- *  The FileContext provides file namespace context for resolving file names;
- *  it also contains the umask for permissions, In that sense it is like the
- *  per-process file-related state in Unix system.
- *  These two properties
- *  <ul> 
- *  <li> default file system i.e your slash)
- *  <li> umask
- *  </ul>
- *  in general, are obtained from the default configuration file
- *  in your environment,  (@see {@link Configuration}).
- *  
- *  No other configuration parameters are obtained from the default config as 
- *  far as the file context layer is concerned. All file system instances
- *  (i.e. deployments of file systems) have default properties; we call these
- *  server side (SS) defaults. Operation like create allow one to select many 
- *  properties: either pass them in as explicit parameters or use
- *  the SS properties.
- *  <p>
- *  The file system related SS defaults are
+ * <h2>Role of FileContext and Configuration Defaults</h2>
+ *
+ * The FileContext is the analogue of per-process file-related state in Unix. It
+ * contains two properties:
+ * 
+ * <ul>
+ * <li>the default file system (for resolving slash-relative names)
+ * <li>the umask (for file permissions)
+ * </ul>
+ * In general, these properties are obtained from the default configuration file
+ * in the user's environment (see {@link Configuration}).
+ * 
+ * Further file system properties are specified on the server-side. File system
+ * operations default to using these server-side defaults unless otherwise
+ * specified.
+ * <p>
+ * The file system related server-side defaults are:
  *  <ul>
  *  <li> the home directory (default is "/user/userName")
  *  <li> the initial wd (only for local fs)
  *  <li> replication factor
  *  <li> block size
  *  <li> buffer size
- *  <li> bytesPerChecksum (if used).
+ *  <li> encryptDataTransfer 
+ *  <li> checksum option. (checksumType and  bytesPerChecksum)
  *  </ul>
  *
- * <p>
- * <b> *** Usage Model for the FileContext class *** </b>
- * <p>
+ * <h2>Example Usage</h2>
+ *
  * Example 1: use the default config read from the $HADOOP_CONFIG/core.xml.
  *   Unspecified values come from core-defaults.xml in the release jar.
  *  <ul>  
  *  <li> myFContext = FileContext.getFileContext(); // uses the default config
  *                                                // which has your default FS 
  *  <li>  myFContext.create(path, ...);
- *  <li>  myFContext.setWorkingDir(path)
+ *  <li>  myFContext.setWorkingDir(path);
  *  <li>  myFContext.open (path, ...);  
+ *  <li>...
  *  </ul>  
  * Example 2: Get a FileContext with a specific URI as the default FS
  *  <ul>  
- *  <li> myFContext = FileContext.getFileContext(URI)
+ *  <li> myFContext = FileContext.getFileContext(URI);
  *  <li> myFContext.create(path, ...);
- *   ...
- * </ul> 
+ *  <li>...
+ * </ul>
  * Example 3: FileContext with local file system as the default
  *  <ul> 
- *  <li> myFContext = FileContext.getLocalFSFileContext()
+ *  <li> myFContext = FileContext.getLocalFSFileContext();
  *  <li> myFContext.create(path, ...);
  *  <li> ...
  *  </ul> 
  * Example 4: Use a specific config, ignoring $HADOOP_CONFIG
  *  Generally you should not need use a config unless you are doing
  *   <ul> 
- *   <li> configX = someConfigSomeOnePassedToYou.
+ *   <li> configX = someConfigSomeOnePassedToYou;
  *   <li> myFContext = getFileContext(configX); // configX is not changed,
  *                                              // is passed down 
  *   <li> myFContext.create(path, ...);
@@ -170,8 +164,31 @@ import org.apache.hadoop.security.token.Token;
 public final class FileContext {
   
   public static final Log LOG = LogFactory.getLog(FileContext.class);
+  /**
+   * Default permission for directory and symlink
+   * In previous versions, this default permission was also used to
+   * create files, so files created end up with ugo+x permission.
+   * See HADOOP-9155 for detail. 
+   * Two new constants are added to solve this, please use 
+   * {@link FileContext#DIR_DEFAULT_PERM} for directory, and use
+   * {@link FileContext#FILE_DEFAULT_PERM} for file.
+   * This constant is kept for compatibility.
+   */
   public static final FsPermission DEFAULT_PERM = FsPermission.getDefault();
-  
+  /**
+   * Default permission for directory
+   */
+  public static final FsPermission DIR_DEFAULT_PERM = FsPermission.getDirDefault();
+  /**
+   * Default permission for file
+   */
+  public static final FsPermission FILE_DEFAULT_PERM = FsPermission.getFileDefault();
+
+  /**
+   * Priority of the FileContext shutdown hook.
+   */
+  public static final int SHUTDOWN_HOOK_PRIORITY = 20;
+
   /**
    * List of files that should be deleted on JVM shutdown.
    */
@@ -183,6 +200,7 @@ public final class FileContext {
     new FileContextFinalizer();
   
   private static final PathFilter DEFAULT_FILTER = new PathFilter() {
+    @Override
     public boolean accept(final Path file) {
       return true;
     }
@@ -199,6 +217,7 @@ public final class FileContext {
   private FsPermission umask;
   private final Configuration conf;
   private final UserGroupInformation ugi;
+  final boolean resolveSymlinks;
 
   private FileContext(final AbstractFileSystem defFs,
     final FsPermission theUmask, final Configuration aConf) {
@@ -224,9 +243,12 @@ public final class FileContext {
     if (workingDir == null) {
       workingDir = defaultFS.getHomeDirectory();
     }
+    resolveSymlinks = conf.getBoolean(
+        CommonConfigurationKeys.FS_CLIENT_RESOLVE_REMOTE_SYMLINKS_KEY,
+        CommonConfigurationKeys.FS_CLIENT_RESOLVE_REMOTE_SYMLINKS_DEFAULT);
     util = new Util(); // for the inner class
   }
- 
+
   /* 
    * Remove relative part - return "absolute":
    * If input is relative path ("foo/bar") add wd: ie "/<workingDir>/foo/bar"
@@ -238,7 +260,7 @@ public final class FileContext {
    * Hence this method is not called makeAbsolute() and 
    * has been deliberately declared private.
    */
-  private Path fixRelativePart(Path p) {
+  Path fixRelativePart(Path p) {
     if (p.isUriPathAbsolute()) {
       return p;
     } else {
@@ -266,17 +288,6 @@ public final class FileContext {
       DELETE_ON_EXIT.clear();
     }
   }
-  
-  /**
-   * Pathnames with scheme and relative path are illegal.
-   * @param path to be checked
-   */
-  private static void checkNotSchemeWithRelative(final Path path) {
-    if (path.toUri().isAbsolute() && !path.isUriPathAbsolute()) {
-      throw new HadoopIllegalArgumentException(
-          "Unsupported name: has scheme but relative path-part");
-    }
-  }
 
   /**
    * Get the file system of supplied path.
@@ -289,13 +300,10 @@ public final class FileContext {
    * @throws IOExcepton If the file system for <code>absOrFqPath</code> could
    *         not be instantiated.
    */
-  private AbstractFileSystem getFSofPath(final Path absOrFqPath)
+  protected AbstractFileSystem getFSofPath(final Path absOrFqPath)
       throws UnsupportedFileSystemException, IOException {
-    checkNotSchemeWithRelative(absOrFqPath);
-    if (!absOrFqPath.isAbsolute() && absOrFqPath.toUri().getScheme() == null) {
-      throw new HadoopIllegalArgumentException(
-          "FileContext Bug: path is relative");
-    }
+    absOrFqPath.checkNotSchemeWithRelative();
+    absOrFqPath.checkNotRelative();
 
     try { 
       // Is it the default FS for this FileContext?
@@ -311,6 +319,7 @@ public final class FileContext {
       throws UnsupportedFileSystemException, IOException {
     try {
       return user.doAs(new PrivilegedExceptionAction<AbstractFileSystem>() {
+        @Override
         public AbstractFileSystem run() throws UnsupportedFileSystemException {
           return AbstractFileSystem.get(uri, conf);
         }
@@ -496,7 +505,7 @@ public final class FileContext {
    *           </ul>
    */
   public void setWorkingDirectory(final Path newWDir) throws IOException {
-    checkNotSchemeWithRelative(newWDir);
+    newWDir.checkNotSchemeWithRelative();
     /* wd is stored as a fully qualified path. We check if the given 
      * path is not relative first since resolve requires and returns 
      * an absolute path.
@@ -607,7 +616,8 @@ public final class FileContext {
    *          <li>BufferSize - buffersize used in FSDataOutputStream
    *          <li>Blocksize - block size for file blocks
    *          <li>ReplicationFactor - replication for blocks
-   *          <li>BytesPerChecksum - bytes per checksum
+   *          <li>ChecksumParam - Checksum parameters. server default is used
+   *          if not specified.
    *          </ul>
    *          </ul>
    * 
@@ -643,15 +653,15 @@ public final class FileContext {
     // If not, add a default Perms and apply umask;
     // AbstractFileSystem#create
 
-    CreateOpts.Perms permOpt = 
-      (CreateOpts.Perms) CreateOpts.getOpt(CreateOpts.Perms.class, opts);
+    CreateOpts.Perms permOpt = CreateOpts.getOpt(CreateOpts.Perms.class, opts);
     FsPermission permission = (permOpt != null) ? permOpt.getValue() :
-                                      FsPermission.getDefault();
+                                      FILE_DEFAULT_PERM;
     permission = permission.applyUMask(umask);
 
     final CreateOpts[] updatedOpts = 
                       CreateOpts.setOpt(CreateOpts.perms(permission), opts);
     return new FSLinkResolver<FSDataOutputStream>() {
+      @Override
       public FSDataOutputStream next(final AbstractFileSystem fs, final Path p) 
         throws IOException {
         return fs.create(p, createFlag, updatedOpts);
@@ -693,8 +703,9 @@ public final class FileContext {
       IOException {
     final Path absDir = fixRelativePart(dir);
     final FsPermission absFerms = (permission == null ? 
-          FsPermission.getDefault() : permission).applyUMask(umask);
+          FsPermission.getDirDefault() : permission).applyUMask(umask);
     new FSLinkResolver<Void>() {
+      @Override
       public Void next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         fs.mkdir(p, absFerms, createParent);
@@ -730,6 +741,7 @@ public final class FileContext {
       UnsupportedFileSystemException, IOException {
     Path absF = fixRelativePart(f);
     return new FSLinkResolver<Boolean>() {
+      @Override
       public Boolean next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         return Boolean.valueOf(fs.delete(p, recursive));
@@ -758,6 +770,7 @@ public final class FileContext {
       FileNotFoundException, UnsupportedFileSystemException, IOException {
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<FSDataInputStream>() {
+      @Override
       public FSDataInputStream next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         return fs.open(p);
@@ -788,6 +801,7 @@ public final class FileContext {
       UnsupportedFileSystemException, IOException {
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<FSDataInputStream>() {
+      @Override
       public FSDataInputStream next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         return fs.open(p, bufferSize);
@@ -818,6 +832,7 @@ public final class FileContext {
       IOException {
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<Boolean>() {
+      @Override
       public Boolean next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         return Boolean.valueOf(fs.setReplication(p, replication));
@@ -886,6 +901,7 @@ public final class FileContext {
        */
       final Path source = resolveIntermediate(absSrc);    
       new FSLinkResolver<Void>() {
+        @Override
         public Void next(final AbstractFileSystem fs, final Path p) 
           throws IOException, UnresolvedLinkException {
           fs.rename(source, p, options);
@@ -917,6 +933,7 @@ public final class FileContext {
       UnsupportedFileSystemException, IOException {
     final Path absF = fixRelativePart(f);
     new FSLinkResolver<Void>() {
+      @Override
       public Void next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         fs.setPermission(p, permission);
@@ -959,6 +976,7 @@ public final class FileContext {
     }
     final Path absF = fixRelativePart(f);
     new FSLinkResolver<Void>() {
+      @Override
       public Void next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         fs.setOwner(p, username, groupname);
@@ -994,6 +1012,7 @@ public final class FileContext {
       UnsupportedFileSystemException, IOException {
     final Path absF = fixRelativePart(f);
     new FSLinkResolver<Void>() {
+      @Override
       public Void next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         fs.setTimes(p, mtime, atime);
@@ -1026,6 +1045,7 @@ public final class FileContext {
       IOException {
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<FileChecksum>() {
+      @Override
       public FileChecksum next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         return fs.getFileChecksum(p);
@@ -1081,6 +1101,7 @@ public final class FileContext {
       FileNotFoundException, UnsupportedFileSystemException, IOException {
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<FileStatus>() {
+      @Override
       public FileStatus next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         return fs.getFileStatus(p);
@@ -1089,25 +1110,54 @@ public final class FileContext {
   }
 
   /**
-   * Return a fully qualified version of the given symlink target if it
-   * has no scheme and authority. Partially and fully qualified paths 
-   * are returned unmodified.
-   * @param pathFS The AbstractFileSystem of the path
-   * @param pathWithLink Path that contains the symlink
-   * @param target The symlink's absolute target
-   * @return Fully qualified version of the target.
+   * Checks if the user can access a path.  The mode specifies which access
+   * checks to perform.  If the requested permissions are granted, then the
+   * method returns normally.  If access is denied, then the method throws an
+   * {@link AccessControlException}.
+   * <p/>
+   * The default implementation of this method calls {@link #getFileStatus(Path)}
+   * and checks the returned permissions against the requested permissions.
+   * Note that the getFileStatus call will be subject to authorization checks.
+   * Typically, this requires search (execute) permissions on each directory in
+   * the path's prefix, but this is implementation-defined.  Any file system
+   * that provides a richer authorization model (such as ACLs) may override the
+   * default implementation so that it checks against that model instead.
+   * <p>
+   * In general, applications should avoid using this method, due to the risk of
+   * time-of-check/time-of-use race conditions.  The permissions on a file may
+   * change immediately after the access call returns.  Most applications should
+   * prefer running specific file system actions as the desired user represented
+   * by a {@link UserGroupInformation}.
+   *
+   * @param path Path to check
+   * @param mode type of access to check
+   * @throws AccessControlException if access is denied
+   * @throws FileNotFoundException if the path does not exist
+   * @throws UnsupportedFileSystemException if file system for <code>path</code>
+   *   is not supported
+   * @throws IOException see specific implementation
+   * 
+   * Exceptions applicable to file systems accessed over RPC:
+   * @throws RpcClientException If an exception occurred in the RPC client
+   * @throws RpcServerException If an exception occurred in the RPC server
+   * @throws UnexpectedServerException If server implementation throws 
+   *           undeclared exception to RPC server
    */
-  private Path qualifySymlinkTarget(final AbstractFileSystem pathFS,
-    Path pathWithLink, Path target) {
-    // NB: makeQualified uses the target's scheme and authority, if
-    // specified, and the scheme and authority of pathFS, if not.
-    final String scheme = target.toUri().getScheme();
-    final String auth   = target.toUri().getAuthority();
-    return (scheme == null && auth == null)
-      ? target.makeQualified(pathFS.getUri(), pathWithLink.getParent())
-      : target;
+  @InterfaceAudience.LimitedPrivate({"HDFS", "Hive"})
+  public void access(final Path path, final FsAction mode)
+      throws AccessControlException, FileNotFoundException,
+      UnsupportedFileSystemException, IOException {
+    final Path absPath = fixRelativePart(path);
+    new FSLinkResolver<Void>() {
+      @Override
+      public Void next(AbstractFileSystem fs, Path p) throws IOException,
+          UnresolvedLinkException {
+        fs.access(p, mode);
+        return null;
+      }
+    }.resolve(this, absPath);
   }
-  
+
   /**
    * Return a file status object that represents the path. If the path 
    * refers to a symlink then the FileStatus of the symlink is returned.
@@ -1127,11 +1177,13 @@ public final class FileContext {
       UnsupportedFileSystemException, IOException {
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<FileStatus>() {
+      @Override
       public FileStatus next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         FileStatus fi = fs.getFileLinkStatus(p);
         if (fi.isSymlink()) {
-          fi.setSymlink(qualifySymlinkTarget(fs, p, fi.getSymlink()));
+          fi.setSymlink(FSLinkResolver.qualifySymlinkTarget(fs.getUri(), p,
+              fi.getSymlink()));
         }
         return fi;
       }
@@ -1157,6 +1209,7 @@ public final class FileContext {
       FileNotFoundException, UnsupportedFileSystemException, IOException {
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<Path>() {
+      @Override
       public Path next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         FileStatus fi = fs.getFileLinkStatus(p);
@@ -1200,6 +1253,7 @@ public final class FileContext {
       UnsupportedFileSystemException, IOException {
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<BlockLocation[]>() {
+      @Override
       public BlockLocation[] next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         return fs.getFileBlockLocations(p, start, len);
@@ -1238,6 +1292,7 @@ public final class FileContext {
     }
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<FsStatus>() {
+      @Override
       public FsStatus next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         return fs.getFsStatus(p);
@@ -1292,7 +1347,7 @@ public final class FileContext {
    * 
    * 2. Partially qualified URIs (eg scheme but no host)
    * 
-   * fs:///A/B/file  Resolved according to the target file sytem. Eg resolving
+   * fs:///A/B/file  Resolved according to the target file system. Eg resolving
    *                 a symlink to hdfs:///A results in an exception because
    *                 HDFS URIs must be fully qualified, while a symlink to 
    *                 file:///A will not since Hadoop's local file systems 
@@ -1331,6 +1386,7 @@ public final class FileContext {
       IOException { 
     final Path nonRelLink = fixRelativePart(link);
     new FSLinkResolver<Void>() {
+      @Override
       public Void next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         fs.createSymlink(target, p, createParent);
@@ -1365,6 +1421,7 @@ public final class FileContext {
       UnsupportedFileSystemException, IOException {
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<RemoteIterator<FileStatus>>() {
+      @Override
       public RemoteIterator<FileStatus> next(
           final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
@@ -1424,6 +1481,7 @@ public final class FileContext {
       UnsupportedFileSystemException, IOException {
     final Path absF = fixRelativePart(f);
     return new FSLinkResolver<RemoteIterator<LocatedFileStatus>>() {
+      @Override
       public RemoteIterator<LocatedFileStatus> next(
           final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
@@ -1456,8 +1514,8 @@ public final class FileContext {
       return false;
     }
     synchronized (DELETE_ON_EXIT) {
-      if (DELETE_ON_EXIT.isEmpty() && !FINALIZER.isAlive()) {
-        Runtime.getRuntime().addShutdownHook(FINALIZER);
+      if (DELETE_ON_EXIT.isEmpty()) {
+        ShutdownHookManager.get().addShutdownHook(FINALIZER, SHUTDOWN_HOOK_PRIORITY);
       }
       
       Set<Path> set = DELETE_ON_EXIT.get(this);
@@ -1510,40 +1568,6 @@ public final class FileContext {
         return false;
       }
     }
-    
-    /**
-     * Return a list of file status objects that corresponds to supplied paths
-     * excluding those non-existent paths.
-     * 
-     * @param paths list of paths we want information from
-     *
-     * @return a list of FileStatus objects
-     *
-     * @throws AccessControlException If access is denied
-     * @throws IOException If an I/O error occurred
-     * 
-     * Exceptions applicable to file systems accessed over RPC:
-     * @throws RpcClientException If an exception occurred in the RPC client
-     * @throws RpcServerException If an exception occurred in the RPC server
-     * @throws UnexpectedServerException If server implementation throws 
-     *           undeclared exception to RPC server
-     */
-    private FileStatus[] getFileStatus(Path[] paths)
-        throws AccessControlException, IOException {
-      if (paths == null) {
-        return null;
-      }
-      ArrayList<FileStatus> results = new ArrayList<FileStatus>(paths.length);
-      for (int i = 0; i < paths.length; i++) {
-        try {
-          results.add(FileContext.this.getFileStatus(paths[i]));
-        } catch (FileNotFoundException fnfe) {
-          // ignoring 
-        }
-      }
-      return results.toArray(new FileStatus[results.size()]);
-    }
-    
     
     /**
      * Return the {@link ContentSummary} of path f.
@@ -1695,6 +1719,7 @@ public final class FileContext {
         IOException {
       final Path absF = fixRelativePart(f);
       return new FSLinkResolver<FileStatus[]>() {
+        @Override
         public FileStatus[] next(final AbstractFileSystem fs, final Path p) 
           throws IOException, UnresolvedLinkException {
           return fs.listStatus(p);
@@ -1896,7 +1921,7 @@ public final class FileContext {
     public FileStatus[] globStatus(Path pathPattern)
         throws AccessControlException, UnsupportedFileSystemException,
         IOException {
-      return globStatus(pathPattern, DEFAULT_FILTER);
+      return new Globber(FileContext.this, pathPattern, DEFAULT_FILTER).glob();
     }
     
     /**
@@ -1925,146 +1950,7 @@ public final class FileContext {
     public FileStatus[] globStatus(final Path pathPattern,
         final PathFilter filter) throws AccessControlException,
         UnsupportedFileSystemException, IOException {
-      URI uri = getFSofPath(fixRelativePart(pathPattern)).getUri();
-
-      String filename = pathPattern.toUri().getPath();
-
-      List<String> filePatterns = GlobExpander.expand(filename);
-      if (filePatterns.size() == 1) {
-        Path absPathPattern = fixRelativePart(pathPattern);
-        return globStatusInternal(uri, new Path(absPathPattern.toUri()
-            .getPath()), filter);
-      } else {
-        List<FileStatus> results = new ArrayList<FileStatus>();
-        for (String iFilePattern : filePatterns) {
-          Path iAbsFilePattern = fixRelativePart(new Path(iFilePattern));
-          FileStatus[] files = globStatusInternal(uri, iAbsFilePattern, filter);
-          for (FileStatus file : files) {
-            results.add(file);
-          }
-        }
-        return results.toArray(new FileStatus[results.size()]);
-      }
-    }
-
-    /**
-     * 
-     * @param uri for all the inPathPattern
-     * @param inPathPattern - without the scheme & authority (take from uri)
-     * @param filter
-     *
-     * @return an array of FileStatus objects
-     *
-     * @throws AccessControlException If access is denied
-     * @throws IOException If an I/O error occurred
-     */
-    private FileStatus[] globStatusInternal(final URI uri,
-        final Path inPathPattern, final PathFilter filter)
-        throws AccessControlException, IOException
-      {
-      Path[] parents = new Path[1];
-      int level = 0;
-      
-      assert(inPathPattern.toUri().getScheme() == null &&
-          inPathPattern.toUri().getAuthority() == null && 
-          inPathPattern.isUriPathAbsolute());
-
-      
-      String filename = inPathPattern.toUri().getPath();
-      
-      // path has only zero component
-      if ("".equals(filename) || Path.SEPARATOR.equals(filename)) {
-        Path p = inPathPattern.makeQualified(uri, null);
-        return getFileStatus(new Path[]{p});
-      }
-
-      // path has at least one component
-      String[] components = filename.split(Path.SEPARATOR);
-      
-      // Path is absolute, first component is "/" hence first component
-      // is the uri root
-      parents[0] = new Path(new Path(uri), new Path("/"));
-      level = 1;
-
-      // glob the paths that match the parent path, ie. [0, components.length-1]
-      boolean[] hasGlob = new boolean[]{false};
-      Path[] relParentPaths = 
-        globPathsLevel(parents, components, level, hasGlob);
-      FileStatus[] results;
-      
-      if (relParentPaths == null || relParentPaths.length == 0) {
-        results = null;
-      } else {
-        // fix the pathes to be abs
-        Path[] parentPaths = new Path [relParentPaths.length]; 
-        for(int i=0; i<relParentPaths.length; i++) {
-          parentPaths[i] = relParentPaths[i].makeQualified(uri, null);
-        }
-        
-        // Now work on the last component of the path
-        GlobFilter fp = 
-                    new GlobFilter(components[components.length - 1], filter);
-        if (fp.hasPattern()) { // last component has a pattern
-          // list parent directories and then glob the results
-          results = listStatus(parentPaths, fp);
-          hasGlob[0] = true;
-        } else { // last component does not have a pattern
-          // get all the path names
-          ArrayList<Path> filteredPaths = 
-                                      new ArrayList<Path>(parentPaths.length);
-          for (int i = 0; i < parentPaths.length; i++) {
-            parentPaths[i] = new Path(parentPaths[i],
-              components[components.length - 1]);
-            if (fp.accept(parentPaths[i])) {
-              filteredPaths.add(parentPaths[i]);
-            }
-          }
-          // get all their statuses
-          results = getFileStatus(
-              filteredPaths.toArray(new Path[filteredPaths.size()]));
-        }
-      }
-
-      // Decide if the pathPattern contains a glob or not
-      if (results == null) {
-        if (hasGlob[0]) {
-          results = new FileStatus[0];
-        }
-      } else {
-        if (results.length == 0) {
-          if (!hasGlob[0]) {
-            results = null;
-          }
-        } else {
-          Arrays.sort(results);
-        }
-      }
-      return results;
-    }
-
-    /*
-     * For a path of N components, return a list of paths that match the
-     * components [<code>level</code>, <code>N-1</code>].
-     */
-    private Path[] globPathsLevel(Path[] parents, String[] filePattern,
-        int level, boolean[] hasGlob) throws AccessControlException,
-        FileNotFoundException, IOException {
-      if (level == filePattern.length - 1) {
-        return parents;
-      }
-      if (parents == null || parents.length == 0) {
-        return null;
-      }
-      GlobFilter fp = new GlobFilter(filePattern[level]);
-      if (fp.hasPattern()) {
-        parents = FileUtil.stat2Paths(listStatus(parents, fp));
-        hasGlob[0] = true;
-      } else {
-        for (int i = 0; i < parents.length; i++) {
-          parents[i] = new Path(parents[i], filePattern[level]);
-        }
-      }
-      return globPathsLevel(parents, filePattern, level + 1, hasGlob);
+      return new Globber(FileContext.this, pathPattern, filter).glob();
     }
 
     /**
@@ -2110,16 +1996,16 @@ public final class FileContext {
         boolean overwrite) throws AccessControlException,
         FileAlreadyExistsException, FileNotFoundException,
         ParentNotDirectoryException, UnsupportedFileSystemException, 
-	IOException {
-      checkNotSchemeWithRelative(src);
-      checkNotSchemeWithRelative(dst);
+        IOException {
+      src.checkNotSchemeWithRelative();
+      dst.checkNotSchemeWithRelative();
       Path qSrc = makeQualified(src);
       Path qDst = makeQualified(dst);
       checkDest(qSrc.getName(), qDst, overwrite);
       FileStatus fs = FileContext.this.getFileStatus(qSrc);
       if (fs.isDirectory()) {
         checkDependencies(qSrc, qDst);
-        mkdir(qDst, FsPermission.getDefault(), true);
+        mkdir(qDst, FsPermission.getDirDefault(), true);
         FileStatus[] contents = listStatus(qSrc);
         for (FileStatus content : contents) {
           copy(makeQualified(content.getPath()), makeQualified(new Path(qDst,
@@ -2215,7 +2101,8 @@ public final class FileContext {
   /**
    * Deletes all the paths in deleteOnExit on JVM shutdown.
    */
-  static class FileContextFinalizer extends Thread {
+  static class FileContextFinalizer implements Runnable {
+    @Override
     public synchronized void run() {
       processDeleteOnExit();
     }
@@ -2228,6 +2115,7 @@ public final class FileContext {
   protected Path resolve(final Path f) throws FileNotFoundException,
       UnresolvedLinkException, AccessControlException, IOException {
     return new FSLinkResolver<Path>() {
+      @Override
       public Path next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         return fs.resolvePath(p);
@@ -2243,6 +2131,7 @@ public final class FileContext {
    */
   protected Path resolveIntermediate(final Path f) throws IOException {
     return new FSLinkResolver<FileStatus>() {
+      @Override
       public FileStatus next(final AbstractFileSystem fs, final Path p) 
         throws IOException, UnresolvedLinkException {
         return fs.getFileLinkStatus(p);
@@ -2265,6 +2154,7 @@ public final class FileContext {
     final HashSet<AbstractFileSystem> result 
       = new HashSet<AbstractFileSystem>();
     new FSLinkResolver<Void>() {
+      @Override
       public Void next(final AbstractFileSystem fs, final Path p)
           throws IOException, UnresolvedLinkException {
         result.add(fs);
@@ -2274,64 +2164,7 @@ public final class FileContext {
     }.resolve(this, absF);
     return result;
   }
-  
-  /**
-   * Class used to perform an operation on and resolve symlinks in a
-   * path. The operation may potentially span multiple file systems.  
-   */
-  protected abstract class FSLinkResolver<T> {
-    // The maximum number of symbolic link components in a path
-    private static final int MAX_PATH_LINKS = 32;
 
-    /**
-     * Generic helper function overridden on instantiation to perform a 
-     * specific operation on the given file system using the given path
-     * which may result in an UnresolvedLinkException. 
-     * @param fs AbstractFileSystem to perform the operation on.
-     * @param p Path given the file system.
-     * @return Generic type determined by the specific implementation.
-     * @throws UnresolvedLinkException If symbolic link <code>path</code> could 
-     *           not be resolved
-     * @throws IOException an I/O error occured
-     */
-    public abstract T next(final AbstractFileSystem fs, final Path p) 
-      throws IOException, UnresolvedLinkException;  
-        
-    /**
-     * Performs the operation specified by the next function, calling it
-     * repeatedly until all symlinks in the given path are resolved.
-     * @param fc FileContext used to access file systems.
-     * @param p The path to resolve symlinks in.
-     * @return Generic type determined by the implementation of next.
-     * @throws IOException
-     */
-    public T resolve(final FileContext fc, Path p) throws IOException {
-      int count = 0;
-      T in = null;
-      Path first = p;
-      // NB: More than one AbstractFileSystem can match a scheme, eg 
-      // "file" resolves to LocalFs but could have come by RawLocalFs.
-      AbstractFileSystem fs = fc.getFSofPath(p);      
-
-      // Loop until all symlinks are resolved or the limit is reached
-      for (boolean isLink = true; isLink;) {
-        try {
-          in = next(fs, p);
-          isLink = false;
-        } catch (UnresolvedLinkException e) {
-          if (count++ > MAX_PATH_LINKS) {
-            throw new IOException("Possible cyclic loop while " +
-                                  "following symbolic link " + first);
-          }
-          // Resolve the first unresolved path component
-          p = qualifySymlinkTarget(fs, p, fs.getLinkTarget(p));
-          fs = fc.getFSofPath(p);
-        }
-      }
-      return in;
-    }
-  }
-  
   /**
    * Get the statistics for a particular file system
    * 
@@ -2387,5 +2220,286 @@ public final class FileContext {
       tokenList.addAll(afsTokens);
     }
     return tokenList;
+  }
+
+  /**
+   * Modifies ACL entries of files and directories.  This method can add new ACL
+   * entries or modify the permissions on existing ACL entries.  All existing
+   * ACL entries that are not specified in this call are retained without
+   * changes.  (Modifications are merged into the current ACL.)
+   *
+   * @param path Path to modify
+   * @param aclSpec List<AclEntry> describing modifications
+   * @throws IOException if an ACL could not be modified
+   */
+  public void modifyAclEntries(final Path path, final List<AclEntry> aclSpec)
+      throws IOException {
+    Path absF = fixRelativePart(path);
+    new FSLinkResolver<Void>() {
+      @Override
+      public Void next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        fs.modifyAclEntries(p, aclSpec);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Removes ACL entries from files and directories.  Other ACL entries are
+   * retained.
+   *
+   * @param path Path to modify
+   * @param aclSpec List<AclEntry> describing entries to remove
+   * @throws IOException if an ACL could not be modified
+   */
+  public void removeAclEntries(final Path path, final List<AclEntry> aclSpec)
+      throws IOException {
+    Path absF = fixRelativePart(path);
+    new FSLinkResolver<Void>() {
+      @Override
+      public Void next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        fs.removeAclEntries(p, aclSpec);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Removes all default ACL entries from files and directories.
+   *
+   * @param path Path to modify
+   * @throws IOException if an ACL could not be modified
+   */
+  public void removeDefaultAcl(Path path)
+      throws IOException {
+    Path absF = fixRelativePart(path);
+    new FSLinkResolver<Void>() {
+      @Override
+      public Void next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        fs.removeDefaultAcl(p);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Removes all but the base ACL entries of files and directories.  The entries
+   * for user, group, and others are retained for compatibility with permission
+   * bits.
+   *
+   * @param path Path to modify
+   * @throws IOException if an ACL could not be removed
+   */
+  public void removeAcl(Path path) throws IOException {
+    Path absF = fixRelativePart(path);
+    new FSLinkResolver<Void>() {
+      @Override
+      public Void next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        fs.removeAcl(p);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Fully replaces ACL of files and directories, discarding all existing
+   * entries.
+   *
+   * @param path Path to modify
+   * @param aclSpec List<AclEntry> describing modifications, must include entries
+   *   for user, group, and others for compatibility with permission bits.
+   * @throws IOException if an ACL could not be modified
+   */
+  public void setAcl(Path path, final List<AclEntry> aclSpec)
+      throws IOException {
+    Path absF = fixRelativePart(path);
+    new FSLinkResolver<Void>() {
+      @Override
+      public Void next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        fs.setAcl(p, aclSpec);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Gets the ACLs of files and directories.
+   *
+   * @param path Path to get
+   * @return RemoteIterator<AclStatus> which returns each AclStatus
+   * @throws IOException if an ACL could not be read
+   */
+  public AclStatus getAclStatus(Path path) throws IOException {
+    Path absF = fixRelativePart(path);
+    return new FSLinkResolver<AclStatus>() {
+      @Override
+      public AclStatus next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        return fs.getAclStatus(p);
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Set an xattr of a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to modify
+   * @param name xattr name.
+   * @param value xattr value.
+   * @throws IOException
+   */
+  public void setXAttr(Path path, String name, byte[] value)
+      throws IOException {
+    setXAttr(path, name, value, EnumSet.of(XAttrSetFlag.CREATE,
+        XAttrSetFlag.REPLACE));
+  }
+
+  /**
+   * Set an xattr of a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to modify
+   * @param name xattr name.
+   * @param value xattr value.
+   * @param flag xattr set flag
+   * @throws IOException
+   */
+  public void setXAttr(Path path, final String name, final byte[] value,
+      final EnumSet<XAttrSetFlag> flag) throws IOException {
+    final Path absF = fixRelativePart(path);
+    new FSLinkResolver<Void>() {
+      @Override
+      public Void next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        fs.setXAttr(p, name, value, flag);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Get an xattr for a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attribute
+   * @param name xattr name.
+   * @return byte[] xattr value.
+   * @throws IOException
+   */
+  public byte[] getXAttr(Path path, final String name) throws IOException {
+    final Path absF = fixRelativePart(path);
+    return new FSLinkResolver<byte[]>() {
+      @Override
+      public byte[] next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        return fs.getXAttr(p, name);
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Get all of the xattrs for a file or directory.
+   * Only those xattrs for which the logged-in user has permissions to view
+   * are returned.
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attributes
+   * @return Map<String, byte[]> describing the XAttrs of the file or directory
+   * @throws IOException
+   */
+  public Map<String, byte[]> getXAttrs(Path path) throws IOException {
+    final Path absF = fixRelativePart(path);
+    return new FSLinkResolver<Map<String, byte[]>>() {
+      @Override
+      public Map<String, byte[]> next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        return fs.getXAttrs(p);
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Get all of the xattrs for a file or directory.
+   * Only those xattrs for which the logged-in user has permissions to view
+   * are returned.
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attributes
+   * @param names XAttr names.
+   * @return Map<String, byte[]> describing the XAttrs of the file or directory
+   * @throws IOException
+   */
+  public Map<String, byte[]> getXAttrs(Path path, final List<String> names)
+      throws IOException {
+    final Path absF = fixRelativePart(path);
+    return new FSLinkResolver<Map<String, byte[]>>() {
+      @Override
+      public Map<String, byte[]> next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        return fs.getXAttrs(p, names);
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Remove an xattr of a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to remove extended attribute
+   * @param name xattr name
+   * @throws IOException
+   */
+  public void removeXAttr(Path path, final String name) throws IOException {
+    final Path absF = fixRelativePart(path);
+    new FSLinkResolver<Void>() {
+      @Override
+      public Void next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        fs.removeXAttr(p, name);
+        return null;
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Get all of the xattr names for a file or directory.
+   * Only those xattr names which the logged-in user has permissions to view
+   * are returned.
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attributes
+   * @return List<String> of the XAttr names of the file or directory
+   * @throws IOException
+   */
+  public List<String> listXAttrs(Path path) throws IOException {
+    final Path absF = fixRelativePart(path);
+    return new FSLinkResolver<List<String>>() {
+      @Override
+      public List<String> next(final AbstractFileSystem fs, final Path p)
+          throws IOException {
+        return fs.listXAttrs(p);
+      }
+    }.resolve(this, absF);
   }
 }

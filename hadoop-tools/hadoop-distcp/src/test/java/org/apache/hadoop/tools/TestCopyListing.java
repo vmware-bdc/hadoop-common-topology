@@ -18,12 +18,14 @@
 
 package org.apache.hadoop.tools;
 
+import static org.mockito.Mockito.*;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputCommitter;
 import org.apache.hadoop.tools.util.TestDistCpUtils;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.security.Credentials;
@@ -35,6 +37,7 @@ import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.AfterClass;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.List;
@@ -79,7 +82,41 @@ public class TestCopyListing extends SimpleCopyListing {
     return 0;
   }
 
-  @Test
+  @Test(timeout=10000)
+  public void testSkipCopy() throws Exception {
+    SimpleCopyListing listing = new SimpleCopyListing(getConf(), CREDENTIALS) {
+      @Override
+      protected boolean shouldCopy(Path path, DistCpOptions options) {
+        return !path.getName().equals(FileOutputCommitter.SUCCEEDED_FILE_NAME);
+      }
+    };
+    FileSystem fs = FileSystem.get(getConf());
+    List<Path> srcPaths = new ArrayList<Path>();
+    srcPaths.add(new Path("/tmp/in4/1"));
+    srcPaths.add(new Path("/tmp/in4/2"));
+    Path target = new Path("/tmp/out4/1");
+    TestDistCpUtils.createFile(fs, "/tmp/in4/1/_SUCCESS");
+    TestDistCpUtils.createFile(fs, "/tmp/in4/1/file");
+    TestDistCpUtils.createFile(fs, "/tmp/in4/2");
+    fs.mkdirs(target);
+    DistCpOptions options = new DistCpOptions(srcPaths, target);
+    Path listingFile = new Path("/tmp/list4");
+    listing.buildListing(listingFile, options);
+    Assert.assertEquals(listing.getNumberOfPaths(), 3);
+    SequenceFile.Reader reader = new SequenceFile.Reader(getConf(),
+        SequenceFile.Reader.file(listingFile));
+    CopyListingFileStatus fileStatus = new CopyListingFileStatus();
+    Text relativePath = new Text();
+    Assert.assertTrue(reader.next(relativePath, fileStatus));
+    Assert.assertEquals(relativePath.toString(), "/1");
+    Assert.assertTrue(reader.next(relativePath, fileStatus));
+    Assert.assertEquals(relativePath.toString(), "/1/file");
+    Assert.assertTrue(reader.next(relativePath, fileStatus));
+    Assert.assertEquals(relativePath.toString(), "/2");
+    Assert.assertFalse(reader.next(relativePath, fileStatus));
+  }
+
+  @Test(timeout=10000)
   public void testMultipleSrcToFile() {
     FileSystem fs = null;
     try {
@@ -124,15 +161,15 @@ public class TestCopyListing extends SimpleCopyListing {
     }
   }
 
-  @Test
+  @Test(timeout=10000)
   public void testDuplicates() {
     FileSystem fs = null;
     try {
       fs = FileSystem.get(getConf());
       List<Path> srcPaths = new ArrayList<Path>();
       srcPaths.add(new Path("/tmp/in/*/*"));
-      TestDistCpUtils.createFile(fs, "/tmp/in/1.txt");
-      TestDistCpUtils.createFile(fs, "/tmp/in/src/1.txt");
+      TestDistCpUtils.createFile(fs, "/tmp/in/src1/1.txt");
+      TestDistCpUtils.createFile(fs, "/tmp/in/src2/1.txt");
       Path target = new Path("/tmp/out");
       Path listingFile = new Path("/tmp/list");
       DistCpOptions options = new DistCpOptions(srcPaths, target);
@@ -150,7 +187,7 @@ public class TestCopyListing extends SimpleCopyListing {
     }
   }
 
-  @Test
+  @Test(timeout=10000)
   public void testBuildListing() {
     FileSystem fs = null;
     try {
@@ -206,7 +243,7 @@ public class TestCopyListing extends SimpleCopyListing {
     }
   }
 
-  @Test
+  @Test(timeout=10000)
   public void testBuildListingForSingleFile() {
     FileSystem fs = null;
     String testRootString = "/singleFileListing";
@@ -234,8 +271,9 @@ public class TestCopyListing extends SimpleCopyListing {
       final Path listFile = new Path(testRoot, "/tmp/fileList.seq");
       listing.buildListing(listFile, options);
 
-      reader = new SequenceFile.Reader(fs, listFile, getConf());
-      FileStatus fileStatus = new FileStatus();
+      reader = new SequenceFile.Reader(getConf(), SequenceFile.Reader.file(listFile));
+
+      CopyListingFileStatus fileStatus = new CopyListingFileStatus();
       Text relativePath = new Text();
       Assert.assertTrue(reader.next(relativePath, fileStatus));
       Assert.assertTrue(relativePath.toString().equals(""));
@@ -248,5 +286,30 @@ public class TestCopyListing extends SimpleCopyListing {
       TestDistCpUtils.delete(fs, testRootString);
       IOUtils.closeStream(reader);
     }
+  }
+  
+  @Test
+  public void testFailOnCloseError() throws IOException {
+    File inFile = File.createTempFile("TestCopyListingIn", null);
+    inFile.deleteOnExit();
+    File outFile = File.createTempFile("TestCopyListingOut", null);
+    outFile.deleteOnExit();
+    List<Path> srcs = new ArrayList<Path>();
+    srcs.add(new Path(inFile.toURI()));
+    
+    Exception expectedEx = new IOException("boom");
+    SequenceFile.Writer writer = mock(SequenceFile.Writer.class);
+    doThrow(expectedEx).when(writer).close();
+    
+    SimpleCopyListing listing = new SimpleCopyListing(getConf(), CREDENTIALS);
+    DistCpOptions options = new DistCpOptions(srcs, new Path(outFile.toURI()));
+    Exception actualEx = null;
+    try {
+      listing.doBuildListing(writer, options);
+    } catch (Exception e) {
+      actualEx = e;
+    }
+    Assert.assertNotNull("close writer didn't fail", actualEx);
+    Assert.assertEquals(expectedEx, actualEx);
   }
 }

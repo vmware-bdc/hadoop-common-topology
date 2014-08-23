@@ -120,32 +120,6 @@ public class AuthenticatedURL {
       return token;
     }
 
-    /**
-     * Return the hashcode for the token.
-     *
-     * @return the hashcode for the token.
-     */
-    @Override
-    public int hashCode() {
-      return (token != null) ? token.hashCode() : 0;
-    }
-
-    /**
-     * Return if two token instances are equal.
-     *
-     * @param o the other token instance.
-     *
-     * @return if this instance and the other instance are equal.
-     */
-    @Override
-    public boolean equals(Object o) {
-      boolean eq = false;
-      if (o instanceof Token) {
-        Token other = (Token) o;
-        eq = (token == null && other.token == null) || (token != null && this.token.equals(other.token));
-      }
-      return eq;
-    }
   }
 
   private static Class<? extends Authenticator> DEFAULT_AUTHENTICATOR = KerberosAuthenticator.class;
@@ -171,6 +145,7 @@ public class AuthenticatedURL {
   }
 
   private Authenticator authenticator;
+  private ConnectionConfigurator connConfigurator;
 
   /**
    * Creates an {@link AuthenticatedURL}.
@@ -186,11 +161,35 @@ public class AuthenticatedURL {
    * KerberosAuthenticator} is used.
    */
   public AuthenticatedURL(Authenticator authenticator) {
+    this(authenticator, null);
+  }
+
+  /**
+   * Creates an <code>AuthenticatedURL</code>.
+   *
+   * @param authenticator the {@link Authenticator} instance to use, if <code>null</code> a {@link
+   * KerberosAuthenticator} is used.
+   * @param connConfigurator a connection configurator.
+   */
+  public AuthenticatedURL(Authenticator authenticator,
+                          ConnectionConfigurator connConfigurator) {
     try {
       this.authenticator = (authenticator != null) ? authenticator : DEFAULT_AUTHENTICATOR.newInstance();
     } catch (Exception ex) {
       throw new RuntimeException(ex);
     }
+    this.connConfigurator = connConfigurator;
+    this.authenticator.setConnectionConfigurator(connConfigurator);
+  }
+
+  /**
+   * Returns the {@link Authenticator} instance used by the
+   * <code>AuthenticatedURL</code>.
+   *
+   * @return the {@link Authenticator} instance
+   */
+  protected Authenticator getAuthenticator() {
+    return authenticator;
   }
 
   /**
@@ -216,6 +215,9 @@ public class AuthenticatedURL {
     }
     authenticator.authenticate(url, token);
     HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+    if (connConfigurator != null) {
+      conn = connConfigurator.configure(conn);
+    }
     injectToken(conn, token);
     return conn;
   }
@@ -266,6 +268,7 @@ public class AuthenticatedURL {
         }
       }
     } else {
+      token.set(null);
       throw new AuthenticationException("Authentication failed, status: " + conn.getResponseCode() +
                                         ", message: " + conn.getResponseMessage());
     }

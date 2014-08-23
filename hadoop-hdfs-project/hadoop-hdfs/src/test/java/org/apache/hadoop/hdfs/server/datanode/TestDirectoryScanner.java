@@ -17,6 +17,12 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -24,8 +30,6 @@ import java.nio.channels.FileChannel;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Random;
-
-import junit.framework.TestCase;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -36,17 +40,20 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.server.common.GenerationStamp;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetTestUtil;
+import org.apache.hadoop.io.IOUtils;
+import org.junit.Test;
 
 /**
  * Tests {@link DirectoryScanner} handling of differences
  * between blocks on the disk and block in memory.
  */
-public class TestDirectoryScanner extends TestCase {
+public class TestDirectoryScanner {
   private static final Log LOG = LogFactory.getLog(TestDirectoryScanner.class);
   private static final Configuration CONF = new HdfsConfiguration();
   private static final int DEFAULT_GEN_STAMP = 9999;
@@ -55,8 +62,8 @@ public class TestDirectoryScanner extends TestCase {
   private String bpid;
   private FsDatasetSpi<? extends FsVolumeSpi> fds = null;
   private DirectoryScanner scanner = null;
-  private Random rand = new Random();
-  private Random r = new Random();
+  private final Random rand = new Random();
+  private final Random r = new Random();
 
   static {
     CONF.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, 100);
@@ -79,11 +86,17 @@ public class TestDirectoryScanner extends TestCase {
         File mf = b.getMetaFile();
         // Truncate a block file that has a corresponding metadata file
         if (f.exists() && f.length() != 0 && mf.exists()) {
-          FileOutputStream s = new FileOutputStream(f);
-          FileChannel channel = s.getChannel();
-          channel.truncate(0);
-          LOG.info("Truncated block file " + f.getAbsolutePath());
-          return b.getBlockId();
+          FileOutputStream s = null;
+          FileChannel channel = null;
+          try {
+            s = new FileOutputStream(f);
+            channel = s.getChannel();
+            channel.truncate(0);
+            LOG.info("Truncated block file " + f.getAbsolutePath());
+            return b.getBlockId();
+          } finally {
+            IOUtils.cleanup(LOG, channel, s);
+          }
         }
       }
     }
@@ -218,6 +231,7 @@ public class TestDirectoryScanner extends TestCase {
     assertEquals(mismatchBlocks, stats.mismatchBlocks);
   }
 
+  @Test
   public void testDirectoryScanner() throws Exception {
     // Run the test with and without parallel scanning
     for (int parallelism = 1; parallelism < 3; parallelism++) {
@@ -233,8 +247,7 @@ public class TestDirectoryScanner extends TestCase {
       fds = DataNodeTestUtils.getFSDataset(cluster.getDataNodes().get(0));
       CONF.setInt(DFSConfigKeys.DFS_DATANODE_DIRECTORYSCAN_THREADS_KEY,
                   parallelism);
-      DataNode dn = cluster.getDataNodes().get(0);
-      scanner = new DirectoryScanner(dn, fds, CONF);
+      scanner = new DirectoryScanner(fds, CONF);
       scanner.setRetainDiffs(true);
 
       // Add files with 100 blocks
@@ -374,5 +387,102 @@ public class TestDirectoryScanner extends TestCase {
     memBlock = FsDatasetTestUtil.fetchReplicaInfo(fds, bpid, blockId);
     assertNotNull(memBlock);
     assertEquals(genStamp, memBlock.getGenerationStamp());
+  }
+  
+  private static class TestFsVolumeSpi implements FsVolumeSpi {
+    @Override
+    public String[] getBlockPoolList() {
+      return new String[0];
+    }
+    
+    @Override
+    public long getAvailable() throws IOException {
+      return 0;
+    }
+    
+    @Override
+    public String getBasePath() {
+      return (new File("/base")).getAbsolutePath();
+    }
+    
+    @Override
+    public String getPath(String bpid) throws IOException {
+      return (new File("/base/current/" + bpid)).getAbsolutePath();
+    }
+
+    @Override
+    public File getFinalizedDir(String bpid) throws IOException {
+      return new File("/base/current/" + bpid + "/finalized");
+    }
+
+    @Override
+    public StorageType getStorageType() {
+      return StorageType.DEFAULT;
+    }
+
+    @Override
+    public String getStorageID() {
+      return "";
+    }
+  }
+
+  private final static TestFsVolumeSpi TEST_VOLUME = new TestFsVolumeSpi();
+  
+  private final static String BPID_1 = "BP-783049782-127.0.0.1-1370971773491";
+  
+  private final static String BPID_2 = "BP-367845636-127.0.0.1-5895645674231";
+      
+  void testScanInfoObject(long blockId, File blockFile, File metaFile)
+      throws Exception {
+    DirectoryScanner.ScanInfo scanInfo =
+        new DirectoryScanner.ScanInfo(blockId, blockFile, metaFile, TEST_VOLUME);
+    assertEquals(blockId, scanInfo.getBlockId());
+    if (blockFile != null) {
+      assertEquals(blockFile.getAbsolutePath(),
+          scanInfo.getBlockFile().getAbsolutePath());
+    } else {
+      assertNull(scanInfo.getBlockFile());
+    }
+    if (metaFile != null) {
+      assertEquals(metaFile.getAbsolutePath(),
+          scanInfo.getMetaFile().getAbsolutePath());
+    } else {
+      assertNull(scanInfo.getMetaFile());
+    }
+    assertEquals(TEST_VOLUME, scanInfo.getVolume());
+  }
+  
+  void testScanInfoObject(long blockId) throws Exception {
+    DirectoryScanner.ScanInfo scanInfo =
+        new DirectoryScanner.ScanInfo(blockId, null, null, null);
+    assertEquals(blockId, scanInfo.getBlockId());
+    assertNull(scanInfo.getBlockFile());
+    assertNull(scanInfo.getMetaFile());
+  }
+
+  @Test(timeout=120000)
+  public void TestScanInfo() throws Exception {
+    testScanInfoObject(123,
+        new File(TEST_VOLUME.getFinalizedDir(BPID_1).getAbsolutePath(),
+            "blk_123"),
+        new File(TEST_VOLUME.getFinalizedDir(BPID_1).getAbsolutePath(),
+            "blk_123__1001.meta"));
+    testScanInfoObject(464,
+        new File(TEST_VOLUME.getFinalizedDir(BPID_1).getAbsolutePath(),
+            "blk_123"),
+        null);
+    testScanInfoObject(523,
+        null,
+        new File(TEST_VOLUME.getFinalizedDir(BPID_1).getAbsolutePath(),
+            "blk_123__1009.meta"));
+    testScanInfoObject(789,
+        null,
+        null);
+    testScanInfoObject(456);
+    testScanInfoObject(123,
+        new File(TEST_VOLUME.getFinalizedDir(BPID_2).getAbsolutePath(),
+            "blk_567"),
+        new File(TEST_VOLUME.getFinalizedDir(BPID_2).getAbsolutePath(),
+            "blk_567__1004.meta"));
   }
 }

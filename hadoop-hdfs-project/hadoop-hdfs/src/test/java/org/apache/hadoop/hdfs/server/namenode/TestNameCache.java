@@ -17,7 +17,10 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -51,6 +54,17 @@ public class TestNameCache {
     }
     // Check dictionary size
     assertEquals(matching.length, cache.size());
+    
+    for (String s : notMatching) {
+      verifyNameReuse(cache, s, false);
+    }
+    
+    cache.reset();
+    cache.initialized();
+    
+    for (String s : matching) {
+      verifyNameReuse(cache, s, false);
+    }
     
     for (String s : notMatching) {
       verifyNameReuse(cache, s, false);

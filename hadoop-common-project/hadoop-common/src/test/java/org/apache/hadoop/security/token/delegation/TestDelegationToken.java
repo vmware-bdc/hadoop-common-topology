@@ -30,7 +30,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -39,12 +39,14 @@ import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.security.AccessControlException;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
 import org.apache.hadoop.security.token.SecretManager;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecretManager.DelegationTokenInformation;
 import org.apache.hadoop.util.Daemon;
-import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.util.Time;
 import org.junit.Test;
 
 import static org.junit.Assert.*;
@@ -69,9 +71,11 @@ public class TestDelegationToken {
       return KIND;
     }
     
+    @Override
     public void write(DataOutput out) throws IOException {
       super.write(out); 
     }
+    @Override
     public void readFields(DataInput in) throws IOException {
       super.readFields(in);
     }
@@ -80,6 +84,11 @@ public class TestDelegationToken {
   public static class TestDelegationTokenSecretManager 
   extends AbstractDelegationTokenSecretManager<TestDelegationTokenIdentifier> {
 
+    public boolean isStoreNewMasterKeyCalled = false;
+    public boolean isRemoveStoredMasterKeyCalled = false;
+    public boolean isStoreNewTokenCalled = false;
+    public boolean isRemoveStoredTokenCalled = false;
+    public boolean isUpdateStoredTokenCalled = false;
     public TestDelegationTokenSecretManager(long delegationKeyUpdateInterval,
                          long delegationTokenMaxLifetime,
                          long delegationTokenRenewInterval,
@@ -97,7 +106,40 @@ public class TestDelegationToken {
     protected byte[] createPassword(TestDelegationTokenIdentifier t) {
       return super.createPassword(t);
     }
-    
+
+    @Override
+    protected void storeNewMasterKey(DelegationKey key) throws IOException {
+      isStoreNewMasterKeyCalled = true;
+      super.storeNewMasterKey(key);
+    }
+
+    @Override
+    protected void removeStoredMasterKey(DelegationKey key) {
+      isRemoveStoredMasterKeyCalled = true;
+      Assert.assertFalse(key.equals(allKeys.get(currentId)));
+    }
+
+    @Override
+    protected void storeNewToken(TestDelegationTokenIdentifier ident,
+        long renewDate) {
+      super.storeNewToken(ident, renewDate);
+      isStoreNewTokenCalled = true;
+    }
+
+    @Override
+    protected void removeStoredToken(TestDelegationTokenIdentifier ident)
+        throws IOException {
+      super.removeStoredToken(ident);
+      isRemoveStoredTokenCalled = true;
+    }
+
+    @Override
+    protected void updateStoredToken(TestDelegationTokenIdentifier ident,
+        long renewDate) {
+      super.updateStoredToken(ident, renewDate);
+      isUpdateStoredTokenCalled = true;
+    }
+
     public byte[] createPassword(TestDelegationTokenIdentifier t, DelegationKey key) {
       return SecretManager.createPassword(t.getBytes(), key.getKey());
     }
@@ -170,6 +212,52 @@ public class TestDelegationToken {
   }
 
   @Test
+  public void testGetUserNullOwner() {
+    TestDelegationTokenIdentifier ident =
+        new TestDelegationTokenIdentifier(null, null, null);
+    UserGroupInformation ugi = ident.getUser();
+    assertNull(ugi);
+  }
+  
+  @Test
+  public void testGetUserWithOwner() {
+    TestDelegationTokenIdentifier ident =
+        new TestDelegationTokenIdentifier(new Text("owner"), null, null);
+    UserGroupInformation ugi = ident.getUser();
+    assertNull(ugi.getRealUser());
+    assertEquals("owner", ugi.getUserName());
+    assertEquals(AuthenticationMethod.TOKEN, ugi.getAuthenticationMethod());
+  }
+
+  @Test
+  public void testGetUserWithOwnerEqualsReal() {
+    Text owner = new Text("owner");
+    TestDelegationTokenIdentifier ident =
+        new TestDelegationTokenIdentifier(owner, null, owner);
+    UserGroupInformation ugi = ident.getUser();
+    assertNull(ugi.getRealUser());
+    assertEquals("owner", ugi.getUserName());
+    assertEquals(AuthenticationMethod.TOKEN, ugi.getAuthenticationMethod());
+  }
+
+  @Test
+  public void testGetUserWithOwnerAndReal() {
+    Text owner = new Text("owner");
+    Text realUser = new Text("realUser");
+    TestDelegationTokenIdentifier ident =
+        new TestDelegationTokenIdentifier(owner, null, realUser);
+    UserGroupInformation ugi = ident.getUser();
+    assertNotNull(ugi.getRealUser());
+    assertNull(ugi.getRealUser().getRealUser());
+    assertEquals("owner", ugi.getUserName());
+    assertEquals("realUser", ugi.getRealUser().getUserName());
+    assertEquals(AuthenticationMethod.PROXY,
+                 ugi.getAuthenticationMethod());
+    assertEquals(AuthenticationMethod.TOKEN,
+                 ugi.getRealUser().getAuthenticationMethod());
+  }
+
+  @Test
   public void testDelegationTokenSecretManager() throws Exception {
     final TestDelegationTokenSecretManager dtSecretManager = 
       new TestDelegationTokenSecretManager(24*60*60*1000,
@@ -179,15 +267,18 @@ public class TestDelegationToken {
       final Token<TestDelegationTokenIdentifier> token = 
         generateDelegationToken(
           dtSecretManager, "SomeUser", "JobTracker");
+      Assert.assertTrue(dtSecretManager.isStoreNewTokenCalled);
       // Fake renewer should not be able to renew
       shouldThrow(new PrivilegedExceptionAction<Object>() {
+        @Override
         public Object run() throws Exception {
           dtSecretManager.renewToken(token, "FakeRenewer");
           return null;
         }
       }, AccessControlException.class);
       long time = dtSecretManager.renewToken(token, "JobTracker");
-      assertTrue("renew time is in future", time > System.currentTimeMillis());
+      Assert.assertTrue(dtSecretManager.isUpdateStoredTokenCalled);
+      assertTrue("renew time is in future", time > Time.now());
       TestDelegationTokenIdentifier identifier = 
         new TestDelegationTokenIdentifier();
       byte[] tokenId = token.getIdentifier();
@@ -209,6 +300,7 @@ public class TestDelegationToken {
       Thread.sleep(2000);
       
       shouldThrow(new PrivilegedExceptionAction<Object>() {
+        @Override
         public Object run() throws Exception {
           dtSecretManager.renewToken(token, "JobTracker");
           return null;
@@ -230,13 +322,16 @@ public class TestDelegationToken {
         generateDelegationToken(dtSecretManager, "SomeUser", "JobTracker");
       //Fake renewer should not be able to renew
       shouldThrow(new PrivilegedExceptionAction<Object>() {
+        @Override
         public Object run() throws Exception {
           dtSecretManager.renewToken(token, "FakeCanceller");
           return null;
         }
       }, AccessControlException.class);
       dtSecretManager.cancelToken(token, "JobTracker");
+      Assert.assertTrue(dtSecretManager.isRemoveStoredTokenCalled);
       shouldThrow(new PrivilegedExceptionAction<Object>() {
+        @Override
         public Object run() throws Exception {
           dtSecretManager.renewToken(token, "JobTracker");
           return null;
@@ -247,11 +342,11 @@ public class TestDelegationToken {
     }
   }
 
-  @Test
+  @Test(timeout = 10000)
   public void testRollMasterKey() throws Exception {
     TestDelegationTokenSecretManager dtSecretManager = 
-      new TestDelegationTokenSecretManager(24*60*60*1000,
-        10*1000,1*1000,3600000);
+      new TestDelegationTokenSecretManager(800,
+        800,1*1000,3600000);
     try {
       dtSecretManager.startThreads();
       //generate a token and store the password
@@ -262,7 +357,8 @@ public class TestDelegationToken {
       int prevNumKeys = dtSecretManager.getAllKeys().length;
       
       dtSecretManager.rollMasterKey();
-      
+      Assert.assertTrue(dtSecretManager.isStoreNewMasterKeyCalled);
+
       //after rolling, the length of the keys list must increase
       int currNumKeys = dtSecretManager.getAllKeys().length;
       Assert.assertEquals((currNumKeys - prevNumKeys) >= 1, true);
@@ -279,6 +375,10 @@ public class TestDelegationToken {
         dtSecretManager.retrievePassword(identifier);
       //compare the passwords
       Assert.assertEquals(oldPasswd, newPasswd);
+      // wait for keys to expire
+      while(!dtSecretManager.isRemoveStoredMasterKeyCalled) {
+        Thread.sleep(200);
+      }
     } finally {
       dtSecretManager.stopThreads();
     }
@@ -329,6 +429,7 @@ public class TestDelegationToken {
       final int numTokensPerThread = 100;
       class tokenIssuerThread implements Runnable {
 
+        @Override
         public void run() {
           for(int i =0;i <numTokensPerThread; i++) {
             generateDelegationToken(dtSecretManager, "auser", "arenewer");
@@ -387,4 +488,55 @@ public class TestDelegationToken {
     }
   }
 
+  private boolean testDelegationTokenIdentiferSerializationRoundTrip(Text owner,
+      Text renewer, Text realUser) throws IOException {
+    TestDelegationTokenIdentifier dtid = new TestDelegationTokenIdentifier(
+        owner, renewer, realUser);
+    DataOutputBuffer out = new DataOutputBuffer();
+    dtid.writeImpl(out);
+    DataInputBuffer in = new DataInputBuffer();
+    in.reset(out.getData(), out.getLength());
+    try {
+      TestDelegationTokenIdentifier dtid2 =
+          new TestDelegationTokenIdentifier();
+      dtid2.readFields(in);
+      assertTrue(dtid.equals(dtid2));
+      return true;
+    } catch(IOException e){
+      return false;
+    }
+  }
+      
+  @Test
+  public void testSimpleDtidSerialization() throws IOException {
+    assertTrue(testDelegationTokenIdentiferSerializationRoundTrip(
+        new Text("owner"), new Text("renewer"), new Text("realUser")));
+    assertTrue(testDelegationTokenIdentiferSerializationRoundTrip(
+        new Text(""), new Text(""), new Text("")));
+    assertTrue(testDelegationTokenIdentiferSerializationRoundTrip(
+        new Text(""), new Text("b"), new Text("")));
+  }
+  
+  @Test
+  public void testOverlongDtidSerialization() throws IOException {
+    byte[] bigBuf = new byte[Text.DEFAULT_MAX_LEN + 1];
+    for (int i = 0; i < bigBuf.length; i++) {
+      bigBuf[i] = 0;
+    }
+    assertFalse(testDelegationTokenIdentiferSerializationRoundTrip(
+        new Text(bigBuf), new Text("renewer"), new Text("realUser")));
+    assertFalse(testDelegationTokenIdentiferSerializationRoundTrip(
+        new Text("owner"), new Text(bigBuf), new Text("realUser")));
+    assertFalse(testDelegationTokenIdentiferSerializationRoundTrip(
+        new Text("owner"), new Text("renewer"), new Text(bigBuf)));
+  }
+
+  @Test
+  public void testDelegationKeyEqualAndHash() {
+    DelegationKey key1 = new DelegationKey(1111, 2222, "keyBytes".getBytes());
+    DelegationKey key2 = new DelegationKey(1111, 2222, "keyBytes".getBytes());
+    DelegationKey key3 = new DelegationKey(3333, 2222, "keyBytes".getBytes());
+    Assert.assertEquals(key1, key2);
+    Assert.assertFalse(key2.equals(key3));
+  }
 }

@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
@@ -40,7 +41,7 @@ import com.google.common.collect.Lists;
 @InterfaceAudience.Private
 public class BackupImage extends FSImage {
   /** Backup input stream for loading edits into memory */
-  private EditLogBackupInputStream backupInputStream =
+  private final EditLogBackupInputStream backupInputStream =
     new EditLogBackupInputStream("Data from remote NameNode");
   
   /**
@@ -183,21 +184,9 @@ public class BackupImage extends FSImage {
     }
     
     // write to BN's local edit log.
-    logEditsLocally(firstTxId, numTxns, data);
+    editLog.journal(firstTxId, numTxns, data);
   }
 
-  /**
-   * Write the batch of edits to the local copy of the edit logs.
-   */
-  private void logEditsLocally(long firstTxId, int numTxns, byte[] data) {
-    long expectedTxId = editLog.getLastWrittenTxId() + 1;
-    Preconditions.checkState(firstTxId == expectedTxId,
-        "received txid batch starting at %s but expected txn %s",
-        firstTxId, expectedTxId);
-    editLog.setNextTxId(firstTxId + numTxns - 1);
-    editLog.logEdit(data.length, data);
-    editLog.logSync();
-  }
 
   /**
    * Apply the batch of edits to the local namespace.
@@ -218,8 +207,8 @@ public class BackupImage extends FSImage {
       int logVersion = storage.getLayoutVersion();
       backupInputStream.setBytes(data, logVersion);
 
-      long numTxnsAdvanced = logLoader.loadEditRecords(logVersion, 
-          backupInputStream, true, lastAppliedTxId + 1, null);
+      long numTxnsAdvanced = logLoader.loadEditRecords(
+          backupInputStream, true, lastAppliedTxId + 1, null, null);
       if (numTxnsAdvanced != numTxns) {
         throw new IOException("Batch of txns starting at txnid " +
             firstTxId + " was supposed to contain " + numTxns +
@@ -228,7 +217,7 @@ public class BackupImage extends FSImage {
       }
       lastAppliedTxId = logLoader.getLastAppliedTxId();
 
-      namesystem.dir.updateCountForINodeWithQuota(); // inefficient!
+      FSImage.updateCountForQuota(namesystem.dir.rootDir); // inefficient!
     } finally {
       backupInputStream.clear();
     }
@@ -277,7 +266,7 @@ public class BackupImage extends FSImage {
           editStreams.add(s);
         }
       }
-      loadEdits(editStreams, namesystem, null);
+      loadEdits(editStreams, namesystem);
     }
     
     // now, need to load the in-progress file
@@ -313,7 +302,7 @@ public class BackupImage extends FSImage {
         
         FSEditLogLoader loader =
             new FSEditLogLoader(namesystem, lastAppliedTxId);
-        loader.loadFSEdits(stream, lastAppliedTxId + 1, null);
+        loader.loadFSEdits(stream, lastAppliedTxId + 1);
         lastAppliedTxId = loader.getLastAppliedTxId();
         assert lastAppliedTxId == getEditLog().getLastWrittenTxId();
       } finally {
@@ -342,28 +331,9 @@ public class BackupImage extends FSImage {
    * This causes the BN to also start the new edit log in its local
    * directories.
    */
-  synchronized void namenodeStartedLogSegment(long txid)
-      throws IOException {
-    LOG.info("NameNode started a new log segment at txid " + txid);
-    if (editLog.isSegmentOpen()) {
-      if (editLog.getLastWrittenTxId() == txid - 1) {
-        // We are in sync with the NN, so end and finalize the current segment
-        editLog.endCurrentLogSegment(false);
-      } else {
-        // We appear to have missed some transactions -- the NN probably
-        // lost contact with us temporarily. So, mark the current segment
-        // as aborted.
-        LOG.warn("NN started new log segment at txid " + txid +
-            ", but BN had only written up to txid " +
-            editLog.getLastWrittenTxId() +
-            "in the log segment starting at " + 
-        		editLog.getCurSegmentTxId() + ". Aborting this " +
-        		"log segment.");
-        editLog.abortCurrentLogSegment();
-      }
-    }
-    editLog.setNextTxId(txid);
-    editLog.startLogSegment(txid, false);
+  synchronized void namenodeStartedLogSegment(long txid) throws IOException {
+    editLog.startLogSegment(txid, true);
+
     if (bnState == BNState.DROP_UNTIL_NEXT_ROLL) {
       setState(BNState.JOURNAL_ONLY);
     }

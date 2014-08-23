@@ -19,11 +19,16 @@ package org.apache.hadoop.fs.viewfs;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.ContentSummary;
+import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileChecksum;
@@ -33,7 +38,12 @@ import org.apache.hadoop.fs.FilterFileSystem;
 import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.FsStatus;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.XAttrSetFlag;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.util.Progressable;
 
 /**
@@ -75,7 +85,8 @@ class ChRootedFileSystem extends FilterFileSystem {
   protected Path fullPath(final Path path) {
     super.checkPath(path);
     return path.isAbsolute() ? 
-        new Path(chRootPathPartString + path.toUri().getPath()) :
+        new Path((chRootPathPart.isRoot() ? "" : chRootPathPartString)
+            + path.toUri().getPath()) :
         new Path(chRootPathPartString + workingDir.toUri().getPath(), path);
   }
   
@@ -88,7 +99,11 @@ class ChRootedFileSystem extends FilterFileSystem {
   public ChRootedFileSystem(final URI uri, Configuration conf)
       throws IOException {
     super(FileSystem.get(uri, conf));
-    chRootPathPart = new Path(uri.getPath());
+    String pathString = uri.getPath();
+    if (pathString.isEmpty()) {
+      pathString = "/";
+    }
+    chRootPathPart = new Path(pathString);
     chRootPathPartString = chRootPathPart.toUri().getPath();
     myUri = uri;
     workingDir = getHomeDirectory();
@@ -101,6 +116,7 @@ class ChRootedFileSystem extends FilterFileSystem {
    *   for this FileSystem
    * @param conf the configuration
    */
+  @Override
   public void initialize(final URI name, final Configuration conf)
       throws IOException {
     super.initialize(name, conf);
@@ -127,7 +143,7 @@ class ChRootedFileSystem extends FilterFileSystem {
     }
     String pathPart = p.toUri().getPath();
     return (pathPart.length() == chRootPathPartString.length()) ? "" : pathPart
-        .substring(chRootPathPartString.length() + 1);   
+        .substring(chRootPathPartString.length() + (chRootPathPart.isRoot() ? 0 : 1));
   }
   
   @Override
@@ -147,12 +163,6 @@ class ChRootedFileSystem extends FilterFileSystem {
     return makeQualified(
         new Path(chRootPathPartString + f.toUri().toString()));
   }
-  
-  @Override
-  public Path getHomeDirectory() {
-    return  new Path("/user/"+System.getProperty("user.name")).makeQualified(
-          getUri(), null);
-  }
 
   @Override
   public Path getWorkingDirectory() {
@@ -170,6 +180,16 @@ class ChRootedFileSystem extends FilterFileSystem {
       final long blockSize, final Progressable progress) throws IOException {
     return super.create(fullPath(f), permission, overwrite, bufferSize,
         replication, blockSize, progress);
+  }
+  
+  @Override
+  @Deprecated
+  public FSDataOutputStream createNonRecursive(Path f, FsPermission permission,
+      EnumSet<CreateFlag> flags, int bufferSize, short replication, long blockSize,
+      Progressable progress) throws IOException {
+    
+    return super.createNonRecursive(fullPath(f), permission, flags, bufferSize, replication, blockSize,
+        progress);
   }
 
   @Override
@@ -202,6 +222,12 @@ class ChRootedFileSystem extends FilterFileSystem {
   public FileStatus getFileStatus(final Path f) 
       throws IOException {
     return super.getFileStatus(fullPath(f));
+  }
+
+  @Override
+  public void access(Path path, FsAction mode) throws AccessControlException,
+      FileNotFoundException, IOException {
+    super.access(fullPath(path), mode);
   }
 
   @Override
@@ -264,7 +290,71 @@ class ChRootedFileSystem extends FilterFileSystem {
       throws IOException {
     super.setTimes(fullPath(f), mtime, atime);
   }
-  
+
+  @Override
+  public void modifyAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    super.modifyAclEntries(fullPath(path), aclSpec);
+  }
+
+  @Override
+  public void removeAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    super.removeAclEntries(fullPath(path), aclSpec);
+  }
+
+  @Override
+  public void removeDefaultAcl(Path path) throws IOException {
+    super.removeDefaultAcl(fullPath(path));
+  }
+
+  @Override
+  public void removeAcl(Path path) throws IOException {
+    super.removeAcl(fullPath(path));
+  }
+
+  @Override
+  public void setAcl(Path path, List<AclEntry> aclSpec) throws IOException {
+    super.setAcl(fullPath(path), aclSpec);
+  }
+
+  @Override
+  public AclStatus getAclStatus(Path path) throws IOException {
+    return super.getAclStatus(fullPath(path));
+  }
+
+  @Override
+  public void setXAttr(Path path, String name, byte[] value,
+      EnumSet<XAttrSetFlag> flag) throws IOException {
+    super.setXAttr(fullPath(path), name, value, flag);
+  }
+
+  @Override
+  public byte[] getXAttr(Path path, String name) throws IOException {
+    return super.getXAttr(fullPath(path), name);
+  }
+
+  @Override
+  public Map<String, byte[]> getXAttrs(Path path) throws IOException {
+    return super.getXAttrs(fullPath(path));
+  }
+
+  @Override
+  public Map<String, byte[]> getXAttrs(Path path, List<String> names)
+      throws IOException {
+    return super.getXAttrs(fullPath(path), names);
+  }
+
+  @Override
+  public List<String> listXAttrs(Path path) throws IOException {
+    return super.listXAttrs(fullPath(path));
+  }
+
+  @Override
+  public void removeXAttr(Path path, String name) throws IOException {
+    super.removeXAttr(fullPath(path), name);
+  }
+
   @Override
   public Path resolvePath(final Path p) throws IOException {
     return super.resolvePath(fullPath(p));
@@ -272,7 +362,7 @@ class ChRootedFileSystem extends FilterFileSystem {
 
   @Override
   public ContentSummary getContentSummary(Path f) throws IOException {
-    return super.getContentSummary(fullPath(f));
+    return fs.getContentSummary(fullPath(f));
   }
   
 

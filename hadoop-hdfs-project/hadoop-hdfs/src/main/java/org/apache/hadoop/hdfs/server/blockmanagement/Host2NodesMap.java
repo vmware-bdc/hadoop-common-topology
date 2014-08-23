@@ -17,7 +17,9 @@
  */
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -29,9 +31,10 @@ import org.apache.hadoop.hdfs.DFSUtil;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 class Host2NodesMap {
-  private HashMap<String, DatanodeDescriptor[]> map
+  private HashMap<String, String> mapHost = new HashMap<String, String>();
+  private final HashMap<String, DatanodeDescriptor[]> map
     = new HashMap<String, DatanodeDescriptor[]>();
-  private ReadWriteLock hostmapLock = new ReentrantReadWriteLock();
+  private final ReadWriteLock hostmapLock = new ReentrantReadWriteLock();
 
   /** Check if node is already in the map. */
   boolean contains(DatanodeDescriptor node) {
@@ -67,6 +70,10 @@ class Host2NodesMap {
       }
       
       String ipAddr = node.getIpAddr();
+      String hostname = node.getHostName();
+      
+      mapHost.put(hostname, ipAddr);
+      
       DatanodeDescriptor[] nodes = map.get(ipAddr);
       DatanodeDescriptor[] newNodes;
       if (nodes==null) {
@@ -93,6 +100,7 @@ class Host2NodesMap {
     }
       
     String ipAddr = node.getIpAddr();
+    String hostname = node.getHostName();
     hostmapLock.writeLock().lock();
     try {
 
@@ -103,6 +111,8 @@ class Host2NodesMap {
       if (nodes.length==1) {
         if (nodes[0]==node) {
           map.remove(ipAddr);
+          //remove hostname key since last datanode is removed
+          mapHost.remove(hostname);
           return true;
         } else {
           return false;
@@ -155,5 +165,72 @@ class Host2NodesMap {
     } finally {
       hostmapLock.readLock().unlock();
     }
+  }
+  
+  /**
+   * Find data node by its transfer address
+   *
+   * @return DatanodeDescriptor if found or null otherwise
+   */
+  public DatanodeDescriptor getDatanodeByXferAddr(String ipAddr,
+      int xferPort) {
+    if (ipAddr==null) {
+      return null;
+    }
+
+    hostmapLock.readLock().lock();
+    try {
+      DatanodeDescriptor[] nodes = map.get(ipAddr);
+      // no entry
+      if (nodes== null) {
+        return null;
+      }
+      for(DatanodeDescriptor containedNode:nodes) {
+        if (xferPort == containedNode.getXferPort()) {
+          return containedNode;
+        }
+      }
+      return null;
+    } finally {
+      hostmapLock.readLock().unlock();
+    }
+  }
+
+  
+
+  /** get a data node by its hostname. This should be used if only one 
+   * datanode service is running on a hostname. If multiple datanodes
+   * are running on a hostname then use methods getDataNodeByXferAddr and
+   * getDataNodeByHostNameAndPort.
+   * @return DatanodeDescriptor if found; otherwise null.
+   */
+  DatanodeDescriptor getDataNodeByHostName(String hostname) {
+    if(hostname == null) {
+      return null;
+    }
+    
+    hostmapLock.readLock().lock();
+    try {
+      String ipAddr = mapHost.get(hostname);
+      if(ipAddr == null) {
+        return null;
+      } else {  
+        return getDatanodeByHost(ipAddr);
+      }
+    } finally {
+      hostmapLock.readLock().unlock();
+    }
+  }
+
+  @Override
+  public String toString() {
+    final StringBuilder b = new StringBuilder(getClass().getSimpleName())
+        .append("[");
+    for(Map.Entry<String, String> host: mapHost.entrySet()) {
+      DatanodeDescriptor[] e = map.get(host.getValue());
+      b.append("\n  " + host.getKey() + " => "+host.getValue() + " => " 
+          + Arrays.asList(e));
+    }
+    return b.append("\n]").toString();
   }
 }

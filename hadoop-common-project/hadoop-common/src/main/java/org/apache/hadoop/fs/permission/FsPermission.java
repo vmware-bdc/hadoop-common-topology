@@ -40,12 +40,16 @@ public class FsPermission implements Writable {
   private static final Log LOG = LogFactory.getLog(FsPermission.class);
 
   static final WritableFactory FACTORY = new WritableFactory() {
+    @Override
     public Writable newInstance() { return new FsPermission(); }
   };
   static {                                      // register a ctor
     WritableFactories.setFactory(FsPermission.class, FACTORY);
     WritableFactories.setFactory(ImmutableFsPermission.class, FACTORY);
   }
+
+  /** Maximum acceptable length of a permission string to parse */
+  public static final int MAX_PERMISSION_LENGTH = 10;
 
   /** Create an immutable {@link FsPermission} object. */
   public static FsPermission createImmutable(short permission) {
@@ -119,17 +123,16 @@ public class FsPermission implements Writable {
   }
 
   public void fromShort(short n) {
-    FsAction[] v = FsAction.values();
-
+    FsAction[] v = FSACTION_VALUES;
     set(v[(n >>> 6) & 7], v[(n >>> 3) & 7], v[n & 7], (((n >>> 9) & 1) == 1) );
   }
 
-  /** {@inheritDoc} */
+  @Override
   public void write(DataOutput out) throws IOException {
     out.writeShort(toShort());
   }
 
-  /** {@inheritDoc} */
+  @Override
   public void readFields(DataInput in) throws IOException {
     fromShort(in.readShort());
   }
@@ -155,7 +158,18 @@ public class FsPermission implements Writable {
     return (short)s;
   }
 
-  /** {@inheritDoc} */
+  /**
+   * Encodes the object to a short.  Unlike {@link #toShort()}, this method may
+   * return values outside the fixed range 00000 - 01777 if extended features
+   * are encoded into this permission, such as the ACL bit.
+   *
+   * @return short extended short representation of this permission
+   */
+  public short toExtendedShort() {
+    return toShort();
+  }
+
+  @Override
   public boolean equals(Object obj) {
     if (obj instanceof FsPermission) {
       FsPermission that = (FsPermission)obj;
@@ -167,10 +181,10 @@ public class FsPermission implements Writable {
     return false;
   }
 
-  /** {@inheritDoc} */
+  @Override
   public int hashCode() {return toShort();}
 
-  /** {@inheritDoc} */
+  @Override
   public String toString() {
     String str = useraction.SYMBOL + groupaction.SYMBOL + otheraction.SYMBOL;
     if(stickyBit) {
@@ -183,7 +197,18 @@ public class FsPermission implements Writable {
     return str;
   }
 
-  /** Apply a umask to this permission and return a new one */
+  /**
+   * Apply a umask to this permission and return a new one.
+   *
+   * The umask is used by create, mkdir, and other Hadoop filesystem operations.
+   * The mode argument for these operations is modified by removing the bits
+   * which are set in the umask.  Thus, the umask limits the permissions which
+   * newly created files and directories get.
+   *
+   * @param umask              The umask to use
+   * 
+   * @return                   The effective permission
+   */
   public FsPermission applyUMask(FsPermission umask) {
     return new FsPermission(useraction.and(umask.useraction.not()),
         groupaction.and(umask.groupaction.not()),
@@ -197,6 +222,8 @@ public class FsPermission implements Writable {
                   CommonConfigurationKeys.FS_PERMISSIONS_UMASK_KEY;
   public static final int DEFAULT_UMASK = 
                   CommonConfigurationKeys.FS_PERMISSIONS_UMASK_DEFAULT;
+
+  private static final FsAction[] FSACTION_VALUES = FsAction.values();
 
   /** 
    * Get the user file creation mask (umask)
@@ -257,15 +284,55 @@ public class FsPermission implements Writable {
     return stickyBit;
   }
 
+  /**
+   * Returns true if there is also an ACL (access control list).
+   *
+   * @return boolean true if there is also an ACL (access control list).
+   */
+  public boolean getAclBit() {
+    // File system subclasses that support the ACL bit would override this.
+    return false;
+  }
+
   /** Set the user file creation mask (umask) */
   public static void setUMask(Configuration conf, FsPermission umask) {
     conf.set(UMASK_LABEL, String.format("%1$03o", umask.toShort()));
     conf.setInt(DEPRECATED_UMASK_LABEL, umask.toShort());
   }
 
-  /** Get the default permission. */
+  /**
+   * Get the default permission for directory and symlink.
+   * In previous versions, this default permission was also used to
+   * create files, so files created end up with ugo+x permission.
+   * See HADOOP-9155 for detail. 
+   * Two new methods are added to solve this, please use 
+   * {@link FsPermission#getDirDefault()} for directory, and use
+   * {@link FsPermission#getFileDefault()} for file.
+   * This method is kept for compatibility.
+   */
   public static FsPermission getDefault() {
     return new FsPermission((short)00777);
+  }
+
+  /**
+   * Get the default permission for directory.
+   */
+  public static FsPermission getDirDefault() {
+    return new FsPermission((short)00777);
+  }
+
+  /**
+   * Get the default permission for file.
+   */
+  public static FsPermission getFileDefault() {
+    return new FsPermission((short)00666);
+  }
+
+  /**
+   * Get the default permission for cache pools.
+   */
+  public static FsPermission getCachePoolDefault() {
+    return new FsPermission((short)00755);
   }
 
   /**
@@ -276,9 +343,10 @@ public class FsPermission implements Writable {
     if (unixSymbolicPermission == null) {
       return null;
     }
-    else if (unixSymbolicPermission.length() != 10) {
-      throw new IllegalArgumentException("length != 10(unixSymbolicPermission="
-          + unixSymbolicPermission + ")");
+    else if (unixSymbolicPermission.length() != MAX_PERMISSION_LENGTH) {
+      throw new IllegalArgumentException(String.format(
+        "length != %d(unixSymbolicPermission=%s)", MAX_PERMISSION_LENGTH,
+        unixSymbolicPermission));
     }
 
     int n = 0;
@@ -300,9 +368,11 @@ public class FsPermission implements Writable {
     public ImmutableFsPermission(short permission) {
       super(permission);
     }
+    @Override
     public FsPermission applyUMask(FsPermission umask) {
       throw new UnsupportedOperationException();
     }
+    @Override
     public void readFields(DataInput in) throws IOException {
       throw new UnsupportedOperationException();
     }    

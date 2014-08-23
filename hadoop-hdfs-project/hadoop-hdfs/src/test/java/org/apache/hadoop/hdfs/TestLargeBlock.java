@@ -17,6 +17,8 @@
  */
 package org.apache.hadoop.hdfs;
 
+import static org.junit.Assert.assertTrue;
+
 import java.io.IOException;
 import java.util.Arrays;
 
@@ -30,7 +32,6 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
 import org.junit.Test;
-import static org.junit.Assert.assertTrue;
 
 /**
  * This class tests that blocks can be larger than 2GB
@@ -154,10 +155,12 @@ public class TestLargeBlock {
   }
  
   /**
-   * Test for block size of 2GB + 512B
+   * Test for block size of 2GB + 512B. This test can take a rather long time to
+   * complete on Windows (reading the file back can be slow) so we use a larger
+   * timeout here.
    * @throws IOException in case of errors
    */
-  @Test
+  @Test (timeout = 900000)
   public void testLargeBlockSize() throws IOException {
     final long blockSize = 2L * 1024L * 1024L * 1024L + 512L; // 2GB + 512B
     runTest(blockSize);
@@ -182,8 +185,7 @@ public class TestLargeBlock {
     try {
 
       // create a new file in test data directory
-      Path file1 = new Path(System.getProperty("test.build.data") + "/" +
-          Long.toString(blockSize) + ".dat");
+      Path file1 = new Path("/tmp/TestLargeBlock", blockSize + ".dat");
       FSDataOutputStream stm = createFile(fs, file1, 1, blockSize);
       LOG.info("File " + file1 + " created with file size " +
           fileSize +

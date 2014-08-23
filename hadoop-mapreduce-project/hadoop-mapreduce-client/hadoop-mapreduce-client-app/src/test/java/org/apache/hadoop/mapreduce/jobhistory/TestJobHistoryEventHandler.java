@@ -18,8 +18,7 @@
 
 package org.apache.hadoop.mapreduce.jobhistory;
 
-import static junit.framework.Assert.assertFalse;
-import static junit.framework.Assert.assertTrue;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -28,14 +27,23 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FileContext;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.HdfsConfiguration;
+import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.mapreduce.Counters;
+import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TaskID;
 import org.apache.hadoop.mapreduce.TaskType;
@@ -43,23 +51,48 @@ import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
+import org.apache.hadoop.mapreduce.v2.app.job.JobStateInternal;
+import org.apache.hadoop.mapreduce.v2.jobhistory.JHAdminConfig;
+import org.apache.hadoop.mapreduce.v2.jobhistory.JobHistoryUtils;
 import org.apache.hadoop.mapreduce.v2.util.MRBuilderUtils;
-import org.apache.hadoop.yarn.YarnException;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.util.BuilderUtils;
+import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
+import org.junit.After;
+import org.junit.AfterClass;
+import static org.junit.Assert.assertFalse;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockito.Mockito;
-import org.mockito.verification.VerificationMode;
 
 public class TestJobHistoryEventHandler {
 
 
   private static final Log LOG = LogFactory
       .getLog(TestJobHistoryEventHandler.class);
+  private static MiniDFSCluster dfsCluster = null;
+  private static String coreSitePath;
 
-  @Test
+  @BeforeClass
+  public static void setUpClass() throws Exception {
+    coreSitePath = "." + File.separator + "target" + File.separator +
+            "test-classes" + File.separator + "core-site.xml";
+    Configuration conf = new HdfsConfiguration();
+    dfsCluster = new MiniDFSCluster.Builder(conf).build();
+  }
+
+  @AfterClass
+  public static void cleanUpClass() throws Exception {
+    dfsCluster.shutdown();
+  }
+
+  @After
+  public void cleanTest() throws Exception {
+    new File(coreSitePath).delete();
+  }
+
+  @Test (timeout=50000)
   public void testFirstFlushOnCompletionEvent() throws Exception {
     TestParams t = new TestParams();
     Configuration conf = new Configuration();
@@ -93,7 +126,7 @@ public class TestJobHistoryEventHandler {
 
       // First completion event, but min-queue-size for batching flushes is 10
       handleEvent(jheh, new JobHistoryEvent(t.jobId, new TaskFinishedEvent(
-          t.taskID, 0, TaskType.MAP, "", null)));
+          t.taskID, null, 0, TaskType.MAP, "", null)));
       verify(mockWriter).flush();
 
     } finally {
@@ -102,7 +135,7 @@ public class TestJobHistoryEventHandler {
     }
   }
 
-  @Test
+  @Test (timeout=50000)
   public void testMaxUnflushedCompletionEvents() throws Exception {
     TestParams t = new TestParams();
     Configuration conf = new Configuration();
@@ -129,7 +162,7 @@ public class TestJobHistoryEventHandler {
 
       for (int i = 0 ; i < 100 ; i++) {
         queueEvent(jheh, new JobHistoryEvent(t.jobId, new TaskFinishedEvent(
-            t.taskID, 0, TaskType.MAP, "", null)));
+            t.taskID, null, 0, TaskType.MAP, "", null)));
       }
 
       handleNextNEvents(jheh, 9);
@@ -137,17 +170,17 @@ public class TestJobHistoryEventHandler {
 
       handleNextNEvents(jheh, 1);
       verify(mockWriter).flush();
-      
+
       handleNextNEvents(jheh, 50);
       verify(mockWriter, times(6)).flush();
-      
+
     } finally {
       jheh.stop();
       verify(mockWriter).close();
     }
   }
-  
-  @Test
+
+  @Test (timeout=50000)
   public void testUnflushedTimer() throws Exception {
     TestParams t = new TestParams();
     Configuration conf = new Configuration();
@@ -174,7 +207,7 @@ public class TestJobHistoryEventHandler {
 
       for (int i = 0 ; i < 100 ; i++) {
         queueEvent(jheh, new JobHistoryEvent(t.jobId, new TaskFinishedEvent(
-            t.taskID, 0, TaskType.MAP, "", null)));
+            t.taskID, null, 0, TaskType.MAP, "", null)));
       }
 
       handleNextNEvents(jheh, 9);
@@ -187,8 +220,8 @@ public class TestJobHistoryEventHandler {
       verify(mockWriter).close();
     }
   }
-  
-  @Test
+
+  @Test (timeout=50000)
   public void testBatchedFlushJobEndMultiplier() throws Exception {
     TestParams t = new TestParams();
     Configuration conf = new Configuration();
@@ -215,7 +248,7 @@ public class TestJobHistoryEventHandler {
 
       for (int i = 0 ; i < 100 ; i++) {
         queueEvent(jheh, new JobHistoryEvent(t.jobId, new TaskFinishedEvent(
-            t.taskID, 0, TaskType.MAP, "", null)));
+            t.taskID, null, 0, TaskType.MAP, "", null)));
       }
       queueEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
           TypeConverter.fromYarn(t.jobId), 0, 10, 10, 0, 0, null, null, new Counters())));
@@ -229,6 +262,169 @@ public class TestJobHistoryEventHandler {
       jheh.stop();
       verify(mockWriter).close();
     }
+  }
+
+  // In case of all types of events, process Done files if it's last AM retry
+  @Test (timeout=50000)
+  public void testProcessDoneFilesOnLastAMRetry() throws Exception {
+    TestParams t = new TestParams(true);
+    Configuration conf = new Configuration();
+
+    JHEvenHandlerForTest realJheh =
+        new JHEvenHandlerForTest(t.mockAppContext, 0);
+    JHEvenHandlerForTest jheh = spy(realJheh);
+    jheh.init(conf);
+
+    EventWriter mockWriter = null;
+    try {
+      jheh.start();
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new AMStartedEvent(
+        t.appAttemptId, 200, t.containerId, "nmhost", 3000, 4000)));
+      verify(jheh, times(0)).processDoneFiles(any(JobId.class));
+
+      handleEvent(jheh, new JobHistoryEvent(t.jobId,
+        new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
+          0, 0, JobStateInternal.ERROR.toString())));
+      verify(jheh, times(1)).processDoneFiles(any(JobId.class));
+
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
+        TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, new Counters(),
+        new Counters(), new Counters())));
+      verify(jheh, times(2)).processDoneFiles(any(JobId.class));
+
+      handleEvent(jheh, new JobHistoryEvent(t.jobId,
+        new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
+          0, 0, JobStateInternal.FAILED.toString())));
+      verify(jheh, times(3)).processDoneFiles(any(JobId.class));
+
+      handleEvent(jheh, new JobHistoryEvent(t.jobId,
+        new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
+          0, 0, JobStateInternal.KILLED.toString())));
+      verify(jheh, times(4)).processDoneFiles(any(JobId.class));
+
+      mockWriter = jheh.getEventWriter();
+      verify(mockWriter, times(5)).write(any(HistoryEvent.class));
+    } finally {
+      jheh.stop();
+      verify(mockWriter).close();
+    }
+  }
+
+  // Skip processing Done files in case of ERROR, if it's not last AM retry
+  @Test (timeout=50000)
+  public void testProcessDoneFilesNotLastAMRetry() throws Exception {
+    TestParams t = new TestParams(false);
+    Configuration conf = new Configuration();
+    JHEvenHandlerForTest realJheh =
+        new JHEvenHandlerForTest(t.mockAppContext, 0);
+    JHEvenHandlerForTest jheh = spy(realJheh);
+    jheh.init(conf);
+
+    EventWriter mockWriter = null;
+    try {
+      jheh.start();
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new AMStartedEvent(
+        t.appAttemptId, 200, t.containerId, "nmhost", 3000, 4000)));
+      verify(jheh, times(0)).processDoneFiles(t.jobId);
+
+      // skip processing done files
+      handleEvent(jheh, new JobHistoryEvent(t.jobId,
+        new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
+          0, 0, JobStateInternal.ERROR.toString())));
+      verify(jheh, times(0)).processDoneFiles(t.jobId);
+
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
+          TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, new Counters(),
+          new Counters(), new Counters())));
+      verify(jheh, times(1)).processDoneFiles(t.jobId);
+
+      handleEvent(jheh, new JobHistoryEvent(t.jobId,
+        new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
+          0, 0, JobStateInternal.FAILED.toString())));
+      verify(jheh, times(2)).processDoneFiles(t.jobId);
+
+      handleEvent(jheh, new JobHistoryEvent(t.jobId,
+        new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
+          0, 0, JobStateInternal.KILLED.toString())));
+      verify(jheh, times(3)).processDoneFiles(t.jobId);
+
+      mockWriter = jheh.getEventWriter();
+      verify(mockWriter, times(5)).write(any(HistoryEvent.class));
+    } finally {
+      jheh.stop();
+      verify(mockWriter).close();
+    }
+  }
+
+  @Test (timeout=50000)
+  public void testDefaultFsIsUsedForHistory() throws Exception {
+    // Create default configuration pointing to the minicluster
+    Configuration conf = new Configuration();
+    conf.set(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY,
+            dfsCluster.getURI().toString());
+    FileOutputStream os = new FileOutputStream(coreSitePath);
+    conf.writeXml(os);
+    os.close();
+
+    // simulate execution under a non-default namenode
+    conf.set(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY,
+            "file:///");
+
+    TestParams t = new TestParams();
+    conf.set(MRJobConfig.MR_AM_STAGING_DIR, t.dfsWorkDir);
+
+    JHEvenHandlerForTest realJheh =
+        new JHEvenHandlerForTest(t.mockAppContext, 0, false);
+    JHEvenHandlerForTest jheh = spy(realJheh);
+    jheh.init(conf);
+
+    try {
+      jheh.start();
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new AMStartedEvent(
+          t.appAttemptId, 200, t.containerId, "nmhost", 3000, 4000)));
+
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
+          TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, new Counters(),
+          new Counters(), new Counters())));
+
+      // If we got here then event handler worked but we don't know with which
+      // file system. Now we check that history stuff was written to minicluster
+      FileSystem dfsFileSystem = dfsCluster.getFileSystem();
+      assertTrue("Minicluster contains some history files",
+          dfsFileSystem.globStatus(new Path(t.dfsWorkDir + "/*")).length != 0);
+      FileSystem localFileSystem = LocalFileSystem.get(conf);
+      assertFalse("No history directory on non-default file system",
+          localFileSystem.exists(new Path(t.dfsWorkDir)));
+    } finally {
+      jheh.stop();
+    }
+  }
+
+  @Test
+  public void testGetHistoryIntermediateDoneDirForUser() throws IOException {
+    // Test relative path
+    Configuration conf = new Configuration();
+    conf.set(JHAdminConfig.MR_HISTORY_INTERMEDIATE_DONE_DIR,
+        "/mapred/history/done_intermediate");
+    conf.set(MRJobConfig.USER_NAME, System.getProperty("user.name"));
+    String pathStr = JobHistoryUtils.getHistoryIntermediateDoneDirForUser(conf);
+    Assert.assertEquals("/mapred/history/done_intermediate/" +
+        System.getProperty("user.name"), pathStr);
+
+    // Test fully qualified path
+    // Create default configuration pointing to the minicluster
+    conf.set(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY,
+        dfsCluster.getURI().toString());
+    FileOutputStream os = new FileOutputStream(coreSitePath);
+    conf.writeXml(os);
+    os.close();
+    // Simulate execution under a non-default namenode
+    conf.set(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY,
+            "file:///");
+    pathStr = JobHistoryUtils.getHistoryIntermediateDoneDirForUser(conf);
+    Assert.assertEquals(dfsCluster.getURI().toString() +
+        "/mapred/history/done_intermediate/" + System.getProperty("user.name"),
+        pathStr);
   }
 
   private void queueEvent(JHEvenHandlerForTest jheh, JobHistoryEvent event) {
@@ -256,39 +452,49 @@ public class TestJobHistoryEventHandler {
       return testWorkDir.getAbsolutePath();
     } catch (Exception e) {
       LOG.warn("Could not cleanup", e);
-      throw new YarnException("could not cleanup test dir", e);
+      throw new YarnRuntimeException("could not cleanup test dir", e);
     }
   }
 
-  private AppContext mockAppContext(JobId jobId) {
+  private AppContext mockAppContext(ApplicationId appId, boolean isLastAMRetry) {
+    JobId jobId = TypeConverter.toYarn(TypeConverter.fromYarn(appId));
     AppContext mockContext = mock(AppContext.class);
     Job mockJob = mock(Job.class);
+    when(mockJob.getAllCounters()).thenReturn(new Counters());
     when(mockJob.getTotalMaps()).thenReturn(10);
     when(mockJob.getTotalReduces()).thenReturn(10);
     when(mockJob.getName()).thenReturn("mockjob");
     when(mockContext.getJob(jobId)).thenReturn(mockJob);
+    when(mockContext.getApplicationID()).thenReturn(appId);
+    when(mockContext.isLastAMRetry()).thenReturn(isLastAMRetry);
     return mockContext;
   }
-  
+
 
   private class TestParams {
+    boolean isLastAMRetry;
     String workDir = setupTestWorkDir();
-    ApplicationId appId = BuilderUtils.newApplicationId(200, 1);
+    String dfsWorkDir = "/" + this.getClass().getCanonicalName();
+    ApplicationId appId = ApplicationId.newInstance(200, 1);
     ApplicationAttemptId appAttemptId =
-        BuilderUtils.newApplicationAttemptId(appId, 1);
-    ContainerId containerId = BuilderUtils.newContainerId(appAttemptId, 1);
+        ApplicationAttemptId.newInstance(appId, 1);
+    ContainerId containerId = ContainerId.newInstance(appAttemptId, 1);
     TaskID taskID = TaskID.forName("task_200707121733_0003_m_000005");
     JobId jobId = MRBuilderUtils.newJobId(appId, 1);
-    AppContext mockAppContext = mockAppContext(jobId);
+    AppContext mockAppContext;
+
+    public TestParams() {
+      this(false);
+    }
+    public TestParams(boolean isLastAMRetry) {
+      this.isLastAMRetry = isLastAMRetry;
+      mockAppContext = mockAppContext(appId, this.isLastAMRetry);
+    }
   }
 
   private JobHistoryEvent getEventToEnqueue(JobId jobId) {
-    JobHistoryEvent toReturn = Mockito.mock(JobHistoryEvent.class);
-    HistoryEvent he = Mockito.mock(HistoryEvent.class);
-    Mockito.when(he.getEventType()).thenReturn(EventType.JOB_STATUS_CHANGED);
-    Mockito.when(toReturn.getHistoryEvent()).thenReturn(he);
-    Mockito.when(toReturn.getJobID()).thenReturn(jobId);
-    return toReturn;
+    HistoryEvent toReturn = new JobStatusChangedEvent(new JobID(Integer.toString(jobId.getId()), jobId.getId()), "change status");
+    return new JobHistoryEvent(jobId, toReturn);
   }
 
   @Test
@@ -330,7 +536,7 @@ public class TestJobHistoryEventHandler {
     Mockito.when(jobId.getAppId()).thenReturn(mockAppId);
 
     jheh.addToFileMap(jobId);
-    jheh.setSignalled(true);
+    jheh.setForcejobCompletion(true);
     for(int i=0; i < numEvents; ++i) {
       events[i] = getEventToEnqueue(jobId);
       jheh.handle(events[i]);
@@ -348,30 +554,48 @@ public class TestJobHistoryEventHandler {
 class JHEvenHandlerForTest extends JobHistoryEventHandler {
 
   private EventWriter eventWriter;
-  volatile int handleEventCompleteCalls = 0;
-  volatile int handleEventStartedCalls = 0;
-
+  private boolean mockHistoryProcessing = true;
   public JHEvenHandlerForTest(AppContext context, int startCount) {
     super(context, startCount);
   }
 
-  @Override
-  public void start() {
+  public JHEvenHandlerForTest(AppContext context, int startCount, boolean mockHistoryProcessing) {
+    super(context, startCount);
+    this.mockHistoryProcessing = mockHistoryProcessing;
   }
-  
+
+  @Override
+  protected void serviceStart() {
+  }
+
   @Override
   protected EventWriter createEventWriter(Path historyFilePath)
       throws IOException {
-    this.eventWriter = mock(EventWriter.class);
+    if (mockHistoryProcessing) {
+      this.eventWriter = mock(EventWriter.class);
+    }
+    else {
+      this.eventWriter = super.createEventWriter(historyFilePath);
+    }
     return this.eventWriter;
   }
 
   @Override
   protected void closeEventWriter(JobId jobId) {
   }
-  
+
   public EventWriter getEventWriter() {
     return this.eventWriter;
+  }
+
+  @Override
+  protected void processDoneFiles(JobId jobId) throws IOException {
+    if (!mockHistoryProcessing) {
+      super.processDoneFiles(jobId);
+    }
+    else {
+      // do nothing
+    }
   }
 }
 
@@ -379,13 +603,12 @@ class JHEvenHandlerForTest extends JobHistoryEventHandler {
  * Class to help with testSigTermedFunctionality
  */
 class JHEventHandlerForSigtermTest extends JobHistoryEventHandler {
-  private MetaInfo metaInfo;
   public JHEventHandlerForSigtermTest(AppContext context, int startCount) {
     super(context, startCount);
   }
 
   public void addToFileMap(JobId jobId) {
-    metaInfo = Mockito.mock(MetaInfo.class);
+    MetaInfo metaInfo = Mockito.mock(MetaInfo.class);
     Mockito.when(metaInfo.isWriterActive()).thenReturn(true);
     fileMap.put(jobId, metaInfo);
   }
@@ -393,7 +616,7 @@ class JHEventHandlerForSigtermTest extends JobHistoryEventHandler {
   JobHistoryEvent lastEventHandled;
   int eventsHandled = 0;
   @Override
-  protected void handleEvent(JobHistoryEvent event) {
+  public void handleEvent(JobHistoryEvent event) {
     this.lastEventHandled = event;
     this.eventsHandled++;
   }

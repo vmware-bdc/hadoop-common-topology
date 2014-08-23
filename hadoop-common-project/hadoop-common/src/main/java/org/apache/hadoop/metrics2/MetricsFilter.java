@@ -22,7 +22,9 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 
 /**
- * The metrics filter interface
+ * The metrics filter interface. The MetricsFilter objects can be used either to
+ * filter the metrics from {@link MetricsSource}s or to filter metrics per
+ * {@link MetricsSink}.
  */
 @InterfaceAudience.Public
 @InterfaceStability.Evolving
@@ -55,7 +57,7 @@ public abstract class MetricsFilter implements MetricsPlugin {
    * @return  true to accept; false otherwise.
    */
   public boolean accepts(MetricsRecord record) {
-    return accepts(record.tags());
+    return accepts(record.name()) && accepts(record.tags());
   }
 
 }

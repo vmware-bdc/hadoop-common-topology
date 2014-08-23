@@ -79,8 +79,15 @@ public class FileStatus implements Writable, Comparable {
     this.blocksize = blocksize;
     this.modification_time = modification_time;
     this.access_time = access_time;
-    this.permission = (permission == null) ? 
-                      FsPermission.getDefault() : permission;
+    if (permission != null) {
+      this.permission = permission;
+    } else if (isdir) {
+      this.permission = FsPermission.getDirDefault();
+    } else if (symlink!=null) {
+      this.permission = FsPermission.getDefault();
+    } else {
+      this.permission = FsPermission.getFileDefault();
+    }
     this.owner = (owner == null) ? "" : owner;
     this.group = (group == null) ? "" : group;
     this.symlink = symlink;
@@ -90,6 +97,21 @@ public class FileStatus implements Writable, Comparable {
     // 2. !isdir implies a file or symlink, symlink != null implies a
     //    symlink, otherwise it's a file.
     assert (isdir && symlink == null) || !isdir;
+  }
+
+  /**
+   * Copy constructor.
+   *
+   * @param other FileStatus to copy
+   */
+  public FileStatus(FileStatus other) throws IOException {
+    // It's important to call the getters here instead of directly accessing the
+    // members.  Subclasses like ViewFsFileStatus can override the getters.
+    this(other.getLen(), other.isDirectory(), other.getReplication(),
+      other.getBlockSize(), other.getModificationTime(), other.getAccessTime(),
+      other.getPermission(), other.getOwner(), other.getGroup(),
+      (other.isSymlink() ? other.getSymlink() : null),
+      other.getPath());
   }
 
   /**
@@ -217,7 +239,7 @@ public class FileStatus implements Writable, Comparable {
    */
   protected void setPermission(FsPermission permission) {
     this.permission = (permission == null) ? 
-                      FsPermission.getDefault() : permission;
+                      FsPermission.getFileDefault() : permission;
   }
   
   /**
@@ -253,8 +275,9 @@ public class FileStatus implements Writable, Comparable {
   //////////////////////////////////////////////////
   // Writable
   //////////////////////////////////////////////////
+  @Override
   public void write(DataOutput out) throws IOException {
-    Text.writeString(out, getPath().toString());
+    Text.writeString(out, getPath().toString(), Text.DEFAULT_MAX_LEN);
     out.writeLong(getLen());
     out.writeBoolean(isDirectory());
     out.writeShort(getReplication());
@@ -262,16 +285,17 @@ public class FileStatus implements Writable, Comparable {
     out.writeLong(getModificationTime());
     out.writeLong(getAccessTime());
     getPermission().write(out);
-    Text.writeString(out, getOwner());
-    Text.writeString(out, getGroup());
+    Text.writeString(out, getOwner(), Text.DEFAULT_MAX_LEN);
+    Text.writeString(out, getGroup(), Text.DEFAULT_MAX_LEN);
     out.writeBoolean(isSymlink());
     if (isSymlink()) {
-      Text.writeString(out, getSymlink().toString());
+      Text.writeString(out, getSymlink().toString(), Text.DEFAULT_MAX_LEN);
     }
   }
 
+  @Override
   public void readFields(DataInput in) throws IOException {
-    String strPath = Text.readString(in);
+    String strPath = Text.readString(in, Text.DEFAULT_MAX_LEN);
     this.path = new Path(strPath);
     this.length = in.readLong();
     this.isdir = in.readBoolean();
@@ -280,10 +304,10 @@ public class FileStatus implements Writable, Comparable {
     modification_time = in.readLong();
     access_time = in.readLong();
     permission.readFields(in);
-    owner = Text.readString(in);
-    group = Text.readString(in);
+    owner = Text.readString(in, Text.DEFAULT_MAX_LEN);
+    group = Text.readString(in, Text.DEFAULT_MAX_LEN);
     if (in.readBoolean()) {
-      this.symlink = new Path(Text.readString(in));
+      this.symlink = new Path(Text.readString(in, Text.DEFAULT_MAX_LEN));
     } else {
       this.symlink = null;
     }
@@ -299,6 +323,7 @@ public class FileStatus implements Writable, Comparable {
    * @throws ClassCastException if the specified object's is not of 
    *         type FileStatus
    */
+  @Override
   public int compareTo(Object o) {
     FileStatus other = (FileStatus)o;
     return this.getPath().compareTo(other.getPath());
@@ -308,6 +333,7 @@ public class FileStatus implements Writable, Comparable {
    * @param   o the object to be compared.
    * @return  true if two file status has the same path name; false if not.
    */
+  @Override
   public boolean equals(Object o) {
     if (o == null) {
       return false;
@@ -328,6 +354,7 @@ public class FileStatus implements Writable, Comparable {
    *
    * @return  a hash code value for the path name.
    */
+  @Override
   public int hashCode() {
     return getPath().hashCode();
   }
@@ -344,9 +371,15 @@ public class FileStatus implements Writable, Comparable {
       sb.append("; replication=" + block_replication);
       sb.append("; blocksize=" + blocksize);
     }
+    sb.append("; modification_time=" + modification_time);
+    sb.append("; access_time=" + access_time);
     sb.append("; owner=" + owner);
     sb.append("; group=" + group);
     sb.append("; permission=" + permission);
+    sb.append("; isSymlink=" + isSymlink());
+    if(isSymlink()) {
+      sb.append("; symlink=" + symlink);
+    }
     sb.append("}");
     return sb.toString();
   }

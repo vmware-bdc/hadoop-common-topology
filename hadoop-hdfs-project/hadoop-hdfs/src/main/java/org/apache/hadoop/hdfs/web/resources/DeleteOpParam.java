@@ -24,6 +24,7 @@ public class DeleteOpParam extends HttpOpParam<DeleteOpParam.Op> {
   /** Delete operations. */
   public static enum Op implements HttpOpParam.Op {
     DELETE(HttpURLConnection.HTTP_OK),
+    DELETESNAPSHOT(HttpURLConnection.HTTP_OK),
 
     NULL(HttpURLConnection.HTTP_NOT_IMPLEMENTED);
 
@@ -39,7 +40,17 @@ public class DeleteOpParam extends HttpOpParam<DeleteOpParam.Op> {
     }
 
     @Override
+    public boolean getRequireAuth() {
+      return false;
+    }
+
+    @Override
     public boolean getDoOutput() {
+      return false;
+    }
+
+    @Override
+    public boolean getRedirect() {
       return false;
     }
 

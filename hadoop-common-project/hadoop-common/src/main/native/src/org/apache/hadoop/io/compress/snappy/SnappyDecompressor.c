@@ -16,37 +16,19 @@
  * limitations under the License.
  */
 
-#if defined HAVE_CONFIG_H
-  #include <config.h>
-#endif
+#include "org_apache_hadoop_io_compress_snappy.h"
 
 #if defined HADOOP_SNAPPY_LIBRARY
 
-#if defined HAVE_STDIO_H
-  #include <stdio.h>
-#else
-  #error 'stdio.h not found'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef UNIX
+#include <dlfcn.h>
+#include "config.h"
 #endif
 
-#if defined HAVE_STDLIB_H
-  #include <stdlib.h>
-#else
-  #error 'stdlib.h not found'
-#endif
-
-#if defined HAVE_STRING_H
-  #include <string.h>
-#else
-  #error 'string.h not found'
-#endif
-
-#if defined HAVE_DLFCN_H
-  #include <dlfcn.h>
-#else
-  #error 'dlfcn.h not found'
-#endif
-
-#include "org_apache_hadoop_io_compress_snappy.h"
 #include "org_apache_hadoop_io_compress_snappy_SnappyDecompressor.h"
 
 static jfieldID SnappyDecompressor_clazz;
@@ -55,12 +37,20 @@ static jfieldID SnappyDecompressor_compressedDirectBufLen;
 static jfieldID SnappyDecompressor_uncompressedDirectBuf;
 static jfieldID SnappyDecompressor_directBufferSize;
 
+#ifdef UNIX
 static snappy_status (*dlsym_snappy_uncompress)(const char*, size_t, char*, size_t*);
+#endif
+
+#ifdef WINDOWS
+typedef snappy_status (__cdecl *__dlsym_snappy_uncompress)(const char*, size_t, char*, size_t*);
+static __dlsym_snappy_uncompress dlsym_snappy_uncompress;
+#endif
 
 JNIEXPORT void JNICALL Java_org_apache_hadoop_io_compress_snappy_SnappyDecompressor_initIDs
 (JNIEnv *env, jclass clazz){
 
   // Load libsnappy.so
+#ifdef UNIX
   void *libsnappy = dlopen(HADOOP_SNAPPY_LIBRARY, RTLD_LAZY | RTLD_GLOBAL);
   if (!libsnappy) {
     char* msg = (char*)malloc(1000);
@@ -68,10 +58,26 @@ JNIEXPORT void JNICALL Java_org_apache_hadoop_io_compress_snappy_SnappyDecompres
     THROW(env, "java/lang/UnsatisfiedLinkError", msg);
     return;
   }
+#endif
+
+#ifdef WINDOWS
+  HMODULE libsnappy = LoadLibrary(HADOOP_SNAPPY_LIBRARY);
+  if (!libsnappy) {
+    THROW(env, "java/lang/UnsatisfiedLinkError", "Cannot load snappy.dll");
+    return;
+  }
+#endif
 
   // Locate the requisite symbols from libsnappy.so
+#ifdef UNIX
   dlerror();                                 // Clear any existing error
   LOAD_DYNAMIC_SYMBOL(dlsym_snappy_uncompress, env, libsnappy, "snappy_uncompress");
+
+#endif
+
+#ifdef WINDOWS
+  LOAD_DYNAMIC_SYMBOL(__dlsym_snappy_uncompress, dlsym_snappy_uncompress, env, libsnappy, "snappy_uncompress");
+#endif
 
   SnappyDecompressor_clazz = (*env)->GetStaticFieldID(env, clazz, "clazz",
                                                    "Ljava/lang/Class;");
@@ -89,6 +95,9 @@ JNIEXPORT void JNICALL Java_org_apache_hadoop_io_compress_snappy_SnappyDecompres
 
 JNIEXPORT jint JNICALL Java_org_apache_hadoop_io_compress_snappy_SnappyDecompressor_decompressBytesDirect
 (JNIEnv *env, jobject thisj){
+  const char* compressed_bytes = NULL;
+  char* uncompressed_bytes = NULL;
+  snappy_status ret;
   // Get members of SnappyDecompressor
   jobject clazz = (*env)->GetStaticObjectField(env,thisj, SnappyDecompressor_clazz);
   jobject compressed_direct_buf = (*env)->GetObjectField(env,thisj, SnappyDecompressor_compressedDirectBuf);
@@ -98,7 +107,7 @@ JNIEXPORT jint JNICALL Java_org_apache_hadoop_io_compress_snappy_SnappyDecompres
 
   // Get the input direct buffer
   LOCK_CLASS(env, clazz, "SnappyDecompressor");
-  const char* compressed_bytes = (const char*)(*env)->GetDirectBufferAddress(env, compressed_direct_buf);
+  compressed_bytes = (const char*)(*env)->GetDirectBufferAddress(env, compressed_direct_buf);
   UNLOCK_CLASS(env, clazz, "SnappyDecompressor");
 
   if (compressed_bytes == 0) {
@@ -107,20 +116,21 @@ JNIEXPORT jint JNICALL Java_org_apache_hadoop_io_compress_snappy_SnappyDecompres
 
   // Get the output direct buffer
   LOCK_CLASS(env, clazz, "SnappyDecompressor");
-  char* uncompressed_bytes = (char *)(*env)->GetDirectBufferAddress(env, uncompressed_direct_buf);
+  uncompressed_bytes = (char *)(*env)->GetDirectBufferAddress(env, uncompressed_direct_buf);
   UNLOCK_CLASS(env, clazz, "SnappyDecompressor");
 
   if (uncompressed_bytes == 0) {
     return (jint)0;
   }
 
-  snappy_status ret = dlsym_snappy_uncompress(compressed_bytes, compressed_direct_buf_len, uncompressed_bytes, &uncompressed_direct_buf_len);
+  ret = dlsym_snappy_uncompress(compressed_bytes, compressed_direct_buf_len,
+        uncompressed_bytes, &uncompressed_direct_buf_len);
   if (ret == SNAPPY_BUFFER_TOO_SMALL){
-    THROW(env, "Ljava/lang/InternalError", "Could not decompress data. Buffer length is too small.");
+    THROW(env, "java/lang/InternalError", "Could not decompress data. Buffer length is too small.");
   } else if (ret == SNAPPY_INVALID_INPUT){
-    THROW(env, "Ljava/lang/InternalError", "Could not decompress data. Input is invalid.");
+    THROW(env, "java/lang/InternalError", "Could not decompress data. Input is invalid.");
   } else if (ret != SNAPPY_OK){
-    THROW(env, "Ljava/lang/InternalError", "Could not decompress data.");
+    THROW(env, "java/lang/InternalError", "Could not decompress data.");
   }
 
   (*env)->SetIntField(env, thisj, SnappyDecompressor_compressedDirectBufLen, 0);

@@ -24,8 +24,10 @@ import java.net.URISyntaxException;
 import javax.security.auth.login.LoginException;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystemTestHelper;
+import org.apache.hadoop.fs.FsConstants;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
@@ -42,12 +44,17 @@ public class TestViewFileSystemHdfs extends ViewFileSystemBaseTest {
   private static MiniDFSCluster cluster;
   private static Path defaultWorkingDirectory;
   private static Path defaultWorkingDirectory2;
-  private static Configuration CONF = new Configuration();
+  private static final Configuration CONF = new Configuration();
   private static FileSystem fHdfs;
   private static FileSystem fHdfs2;
   private FileSystem fsTarget2;
   Path targetTestRoot2;
   
+  @Override
+  protected FileSystemTestHelper createFileSystemHelper() {
+    return new FileSystemTestHelper("/tmp/TestViewFileSystemHdfs");
+  }
+
   @BeforeClass
   public static void clusterSetupAtBegining() throws IOException,
       LoginException, URISyntaxException {
@@ -64,7 +71,11 @@ public class TestViewFileSystemHdfs extends ViewFileSystemBaseTest {
     
     fHdfs = cluster.getFileSystem(0);
     fHdfs2 = cluster.getFileSystem(1);
-    
+    fHdfs.getConf().set(CommonConfigurationKeys.FS_DEFAULT_NAME_KEY,
+        FsConstants.VIEWFS_URI.toString());
+    fHdfs2.getConf().set(CommonConfigurationKeys.FS_DEFAULT_NAME_KEY,
+        FsConstants.VIEWFS_URI.toString());
+
     defaultWorkingDirectory = fHdfs.makeQualified( new Path("/user/" + 
         UserGroupInformation.getCurrentUser().getShortUserName()));
     defaultWorkingDirectory2 = fHdfs2.makeQualified( new Path("/user/" + 
@@ -80,15 +91,17 @@ public class TestViewFileSystemHdfs extends ViewFileSystemBaseTest {
     cluster.shutdown();   
   }
 
+  @Override
   @Before
   public void setUp() throws Exception {
     // create the test root on local_fs
     fsTarget = fHdfs;
     fsTarget2 = fHdfs2;
-    targetTestRoot2 = FileSystemTestHelper.getAbsoluteTestRootPath(fsTarget2);
+    targetTestRoot2 = new FileSystemTestHelper().getAbsoluteTestRootPath(fsTarget2);
     super.setUp();
   }
 
+  @Override
   @After
   public void tearDown() throws Exception {
     super.tearDown();
@@ -105,17 +118,17 @@ public class TestViewFileSystemHdfs extends ViewFileSystemBaseTest {
   // additional mount.
   @Override
   int getExpectedDirPaths() {
-    return 7;
+    return 8;
   }
   
   @Override
   int getExpectedMountPoints() {
-    return 8;
+    return 9;
   }
 
   @Override
   int getExpectedDelegationTokenCount() {
-    return 8;
+    return 2; // Mount points to 2 unique hdfs 
   }
 
   @Override

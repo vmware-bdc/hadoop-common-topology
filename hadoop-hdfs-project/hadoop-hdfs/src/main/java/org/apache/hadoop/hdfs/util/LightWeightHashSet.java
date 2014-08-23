@@ -55,6 +55,7 @@ public class LightWeightHashSet<T> implements Collection<T> {
       this.hashCode = hash;
     }
 
+    @Override
     public String toString() {
       return element.toString();
     }
@@ -86,11 +87,11 @@ public class LightWeightHashSet<T> implements Collection<T> {
    *
    * @see ConcurrentModificationException
    */
-  protected volatile int modification = 0;
+  protected int modification = 0;
 
   private float maxLoadFactor;
   private float minLoadFactor;
-  private int expandMultiplier = 2;
+  private final int expandMultiplier = 2;
 
   private int expandThreshold;
   private int shrinkThreshold;
@@ -142,6 +143,7 @@ public class LightWeightHashSet<T> implements Collection<T> {
    *
    * @return true is set empty, false otherwise
    */
+  @Override
   public boolean isEmpty() {
     return size == 0;
   }
@@ -156,6 +158,7 @@ public class LightWeightHashSet<T> implements Collection<T> {
   /**
    * Return the number of stored elements.
    */
+  @Override
   public int size() {
     return size;
   }
@@ -173,31 +176,42 @@ public class LightWeightHashSet<T> implements Collection<T> {
    * @return true if element present, false otherwise.
    */
   @SuppressWarnings("unchecked")
+  @Override
   public boolean contains(final Object key) {
+    return getElement((T)key) != null;
+  }
+  
+  /**
+   * Return the element in this set which is equal to
+   * the given key, if such an element exists.
+   * Otherwise returns null.
+   */
+  public T getElement(final T key) {
     // validate key
     if (key == null) {
       throw new IllegalArgumentException("Null element is not supported.");
     }
     // find element
-    final int hashCode = ((T)key).hashCode();
+    final int hashCode = key.hashCode();
     final int index = getIndex(hashCode);
-    return containsElem(index, (T) key, hashCode);
+    return getContainedElem(index, key, hashCode);
   }
 
   /**
-   * Check if the set contains given element at given index.
+   * Check if the set contains given element at given index. If it
+   * does, return that element.
    *
-   * @return true if element present, false otherwise.
+   * @return the element, or null, if no element matches
    */
-  protected boolean containsElem(int index, final T key, int hashCode) {
+  protected T getContainedElem(int index, final T key, int hashCode) {
     for (LinkedElement<T> e = entries[index]; e != null; e = e.next) {
       // element found
       if (hashCode == e.hashCode && e.element.equals(key)) {
-        return true;
+        return e.element;
       }
     }
     // element not found
-    return false;
+    return null;
   }
 
   /**
@@ -206,6 +220,7 @@ public class LightWeightHashSet<T> implements Collection<T> {
    * @param toAdd - elements to add.
    * @return true if the set has changed, false otherwise
    */
+  @Override
   public boolean addAll(Collection<? extends T> toAdd) {
     boolean changed = false;
     for (T elem : toAdd) {
@@ -220,6 +235,7 @@ public class LightWeightHashSet<T> implements Collection<T> {
    *
    * @return true if the element was not present in the table, false otherwise
    */
+  @Override
   public boolean add(final T element) {
     boolean added = addElem(element);
     expandIfNecessary();
@@ -240,7 +256,7 @@ public class LightWeightHashSet<T> implements Collection<T> {
     final int hashCode = element.hashCode();
     final int index = getIndex(hashCode);
     // return false if already present
-    if (containsElem(index, element, hashCode)) {
+    if (getContainedElem(index, element, hashCode) != null) {
       return false;
     }
 
@@ -259,6 +275,7 @@ public class LightWeightHashSet<T> implements Collection<T> {
    *
    * @return If such element exists, return true. Otherwise, return false.
    */
+  @Override
   @SuppressWarnings("unchecked")
   public boolean remove(final Object key) {
     // validate key
@@ -478,6 +495,7 @@ public class LightWeightHashSet<T> implements Collection<T> {
     }
   }
 
+  @Override
   public Iterator<T> iterator() {
     return new LinkedSetIterator();
   }
@@ -549,6 +567,7 @@ public class LightWeightHashSet<T> implements Collection<T> {
   /**
    * Clear the set. Resize it to the original capacity.
    */
+  @Override
   @SuppressWarnings("unchecked")
   public void clear() {
     this.capacity = this.initialCapacity;

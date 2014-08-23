@@ -14,33 +14,37 @@
 package org.apache.hadoop.security.authentication.server;
 
 import org.apache.hadoop.security.authentication.client.AuthenticationException;
-import junit.framework.TestCase;
 import org.apache.hadoop.security.authentication.client.PseudoAuthenticator;
+import org.junit.Assert;
+import org.junit.Test;
 import org.mockito.Mockito;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.util.Properties;
 
-public class TestPseudoAuthenticationHandler extends TestCase {
+public class TestPseudoAuthenticationHandler {
 
+  @Test
   public void testInit() throws Exception {
     PseudoAuthenticationHandler handler = new PseudoAuthenticationHandler();
     try {
       Properties props = new Properties();
       props.setProperty(PseudoAuthenticationHandler.ANONYMOUS_ALLOWED, "false");
       handler.init(props);
-      assertEquals(false, handler.getAcceptAnonymous());
+      Assert.assertEquals(false, handler.getAcceptAnonymous());
     } finally {
       handler.destroy();
     }
   }
 
+  @Test
   public void testType() throws Exception {
     PseudoAuthenticationHandler handler = new PseudoAuthenticationHandler();
-    assertEquals(PseudoAuthenticationHandler.TYPE, handler.getType());
+    Assert.assertEquals(PseudoAuthenticationHandler.TYPE, handler.getType());
   }
 
+  @Test
   public void testAnonymousOn() throws Exception {
     PseudoAuthenticationHandler handler = new PseudoAuthenticationHandler();
     try {
@@ -53,12 +57,13 @@ public class TestPseudoAuthenticationHandler extends TestCase {
 
       AuthenticationToken token = handler.authenticate(request, response);
 
-      assertEquals(AuthenticationToken.ANONYMOUS, token);
+      Assert.assertEquals(AuthenticationToken.ANONYMOUS, token);
     } finally {
       handler.destroy();
     }
   }
 
+  @Test
   public void testAnonymousOff() throws Exception {
     PseudoAuthenticationHandler handler = new PseudoAuthenticationHandler();
     try {
@@ -70,11 +75,11 @@ public class TestPseudoAuthenticationHandler extends TestCase {
       HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
 
       handler.authenticate(request, response);
-      fail();
+      Assert.fail();
     } catch (AuthenticationException ex) {
       // Expected
     } catch (Exception ex) {
-      fail();
+      Assert.fail();
     } finally {
       handler.destroy();
     }
@@ -89,23 +94,25 @@ public class TestPseudoAuthenticationHandler extends TestCase {
 
       HttpServletRequest request = Mockito.mock(HttpServletRequest.class);
       HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
-      Mockito.when(request.getParameter(PseudoAuthenticator.USER_NAME)).thenReturn("user");
+      Mockito.when(request.getQueryString()).thenReturn(PseudoAuthenticator.USER_NAME + "=" + "user");
 
       AuthenticationToken token = handler.authenticate(request, response);
 
-      assertNotNull(token);
-      assertEquals("user", token.getUserName());
-      assertEquals("user", token.getName());
-      assertEquals(PseudoAuthenticationHandler.TYPE, token.getType());
+      Assert.assertNotNull(token);
+      Assert.assertEquals("user", token.getUserName());
+      Assert.assertEquals("user", token.getName());
+      Assert.assertEquals(PseudoAuthenticationHandler.TYPE, token.getType());
     } finally {
       handler.destroy();
     }
   }
 
+  @Test
   public void testUserNameAnonymousOff() throws Exception {
     _testUserName(false);
   }
 
+  @Test
   public void testUserNameAnonymousOn() throws Exception {
     _testUserName(true);
   }

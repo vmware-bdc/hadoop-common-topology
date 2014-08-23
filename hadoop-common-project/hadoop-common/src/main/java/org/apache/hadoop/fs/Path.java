@@ -21,9 +21,11 @@ package org.apache.hadoop.fs;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.regex.Pattern;
 
 import org.apache.avro.reflect.Stringable;
 import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -43,10 +45,44 @@ public class Path implements Comparable {
   
   public static final String CUR_DIR = ".";
   
-  static final boolean WINDOWS
+  public static final boolean WINDOWS
     = System.getProperty("os.name").startsWith("Windows");
 
+  /**
+   *  Pre-compiled regular expressions to detect path formats.
+   */
+  private static final Pattern hasUriScheme =
+      Pattern.compile("^[a-zA-Z][a-zA-Z0-9+-.]+:");
+  private static final Pattern hasDriveLetterSpecifier =
+      Pattern.compile("^/?[a-zA-Z]:");
+
   private URI uri;                                // a hierarchical uri
+
+  /**
+   * Pathnames with scheme and relative path are illegal.
+   * @param path to be checked
+   */
+  void checkNotSchemeWithRelative() {
+    if (toUri().isAbsolute() && !isUriPathAbsolute()) {
+      throw new HadoopIllegalArgumentException(
+          "Unsupported name: has scheme but relative path-part");
+    }
+  }
+
+  void checkNotRelative() {
+    if (!isAbsolute() && toUri().getScheme() == null) {
+      throw new HadoopIllegalArgumentException("Path is relative");
+    }
+  }
+
+  public static Path getPathWithoutSchemeAndAuthority(Path path) {
+    // This code depends on Path.toString() to remove the leading slash before
+    // the drive specification on Windows.
+    Path newPath = path.isUriPathAbsolute() ?
+      new Path(null, null, path.toUri().getPath()) :
+      path;
+    return newPath;
+  }
 
   /** Resolve a child path against a parent path. */
   public Path(String parent, String child) {
@@ -68,7 +104,7 @@ public class Path implements Comparable {
     // Add a slash to parent's path so resolution is compatible with URI's
     URI parentUri = parent.uri;
     String parentPath = parentUri.getPath();
-    if (!(parentPath.equals("/") || parentPath.equals(""))) {
+    if (!(parentPath.equals("/") || parentPath.isEmpty())) {
       try {
         parentUri = new URI(parentUri.getScheme(), parentUri.getAuthority(),
                       parentUri.getPath()+"/", null, parentUri.getFragment());
@@ -81,7 +117,7 @@ public class Path implements Comparable {
                resolved.getPath(), resolved.getFragment());
   }
 
-  private void checkPathArg( String path ) {
+  private void checkPathArg( String path ) throws IllegalArgumentException {
     // disallow construction of a Path from an empty string
     if ( path == null ) {
       throw new IllegalArgumentException(
@@ -95,15 +131,16 @@ public class Path implements Comparable {
   
   /** Construct a path from a String.  Path strings are URIs, but with
    * unescaped elements and some additional normalization. */
-  public Path(String pathString) {
+  public Path(String pathString) throws IllegalArgumentException {
     checkPathArg( pathString );
     
     // We can't use 'new URI(String)' directly, since it assumes things are
     // escaped, which we don't require of Paths. 
     
     // add a slash in front of paths with Windows drive letters
-    if (hasWindowsDrive(pathString, false))
-      pathString = "/"+pathString;
+    if (hasWindowsDrive(pathString) && pathString.charAt(0) != '/') {
+      pathString = "/" + pathString;
+    }
 
     // parse uri components
     String scheme = null;
@@ -139,52 +176,117 @@ public class Path implements Comparable {
    * Construct a path from a URI
    */
   public Path(URI aUri) {
-    uri = aUri;
+    uri = aUri.normalize();
   }
   
   /** Construct a Path from components. */
   public Path(String scheme, String authority, String path) {
     checkPathArg( path );
+
+    // add a slash in front of paths with Windows drive letters
+    if (hasWindowsDrive(path) && path.charAt(0) != '/') {
+      path = "/" + path;
+    }
+
+    // add "./" in front of Linux relative paths so that a path containing
+    // a colon e.q. "a:b" will not be interpreted as scheme "a".
+    if (!WINDOWS && path.charAt(0) != '/') {
+      path = "./" + path;
+    }
+
     initialize(scheme, authority, path, null);
   }
 
   private void initialize(String scheme, String authority, String path,
       String fragment) {
     try {
-      this.uri = new URI(scheme, authority, normalizePath(path), null, fragment)
+      this.uri = new URI(scheme, authority, normalizePath(scheme, path), null, fragment)
         .normalize();
     } catch (URISyntaxException e) {
       throw new IllegalArgumentException(e);
     }
   }
 
-  private String normalizePath(String path) {
-    // remove double slashes & backslashes
+  /**
+   * Merge 2 paths such that the second path is appended relative to the first.
+   * The returned path has the scheme and authority of the first path.  On
+   * Windows, the drive specification in the second path is discarded.
+   * 
+   * @param path1 Path first path
+   * @param path2 Path second path, to be appended relative to path1
+   * @return Path merged path
+   */
+  public static Path mergePaths(Path path1, Path path2) {
+    String path2Str = path2.toUri().getPath();
+    path2Str = path2Str.substring(startPositionWithoutWindowsDrive(path2Str));
+    // Add path components explicitly, because simply concatenating two path
+    // string is not safe, for example:
+    // "/" + "/foo" yields "//foo", which will be parsed as authority in Path
+    return new Path(path1.toUri().getScheme(), 
+        path1.toUri().getAuthority(), 
+        path1.toUri().getPath() + path2Str);
+  }
+
+  /**
+   * Normalize a path string to use non-duplicated forward slashes as
+   * the path separator and remove any trailing path separators.
+   * @param scheme Supplies the URI scheme. Used to deduce whether we
+   *               should replace backslashes or not.
+   * @param path Supplies the scheme-specific part
+   * @return Normalized path string.
+   */
+  private static String normalizePath(String scheme, String path) {
+    // Remove double forward slashes.
     path = StringUtils.replace(path, "//", "/");
-    if (Path.WINDOWS) {
+
+    // Remove backslashes if this looks like a Windows path. Avoid
+    // the substitution if it looks like a non-local URI.
+    if (WINDOWS &&
+        (hasWindowsDrive(path) ||
+         (scheme == null) ||
+         (scheme.isEmpty()) ||
+         (scheme.equals("file")))) {
       path = StringUtils.replace(path, "\\", "/");
     }
     
     // trim trailing slash from non-root path (ignoring windows drive)
-    int minLength = hasWindowsDrive(path, true) ? 4 : 1;
-    if (path.length() > minLength && path.endsWith("/")) {
+    int minLength = startPositionWithoutWindowsDrive(path) + 1;
+    if (path.length() > minLength && path.endsWith(SEPARATOR)) {
       path = path.substring(0, path.length()-1);
     }
     
     return path;
   }
 
-  private boolean hasWindowsDrive(String path, boolean slashed) {
-    if (!WINDOWS) return false;
-    int start = slashed ? 1 : 0;
-    return
-      path.length() >= start+2 &&
-      (slashed ? path.charAt(0) == '/' : true) &&
-      path.charAt(start+1) == ':' &&
-      ((path.charAt(start) >= 'A' && path.charAt(start) <= 'Z') ||
-       (path.charAt(start) >= 'a' && path.charAt(start) <= 'z'));
+  private static boolean hasWindowsDrive(String path) {
+    return (WINDOWS && hasDriveLetterSpecifier.matcher(path).find());
   }
 
+  private static int startPositionWithoutWindowsDrive(String path) {
+    if (hasWindowsDrive(path)) {
+      return path.charAt(0) ==  SEPARATOR_CHAR ? 3 : 2;
+    } else {
+      return 0;
+    }
+  }
+  
+  /**
+   * Determine whether a given path string represents an absolute path on
+   * Windows. e.g. "C:/a/b" is an absolute path. "C:a/b" is not.
+   *
+   * @param pathString Supplies the path string to evaluate.
+   * @param slashed true if the given path is prefixed with "/".
+   * @return true if the supplied path looks like an absolute path with a Windows
+   * drive-specifier.
+   */
+  public static boolean isWindowsAbsolutePath(final String pathString,
+                                              final boolean slashed) {
+    int start = startPositionWithoutWindowsDrive(pathString);
+    return start > 0
+        && pathString.length() > start
+        && ((pathString.charAt(start) == SEPARATOR_CHAR) ||
+            (pathString.charAt(start) == '\\'));
+  }
 
   /** Convert this to a URI. */
   public URI toUri() { return uri; }
@@ -207,7 +309,7 @@ public class Path implements Comparable {
    *  True if the path component (i.e. directory) of this URI is absolute.
    */
   public boolean isUriPathAbsolute() {
-    int start = hasWindowsDrive(uri.getPath(), true) ? 3 : 0;
+    int start = startPositionWithoutWindowsDrive(uri.getPath());
     return uri.getPath().startsWith(SEPARATOR, start);
    }
   
@@ -223,6 +325,13 @@ public class Path implements Comparable {
      return isUriPathAbsolute();
   }
 
+  /**
+   * @return true if and only if this path represents the root of a file system
+   */
+  public boolean isRoot() {
+    return getParent() == null;
+  }
+
   /** Returns the final component of this path.*/
   public String getName() {
     String path = uri.getPath();
@@ -234,7 +343,7 @@ public class Path implements Comparable {
   public Path getParent() {
     String path = uri.getPath();
     int lastSlash = path.lastIndexOf('/');
-    int start = hasWindowsDrive(path, true) ? 3 : 0;
+    int start = startPositionWithoutWindowsDrive(path);
     if ((path.length() == start) ||               // empty path
         (lastSlash == start && path.length() == start+1)) { // at root
       return null;
@@ -243,8 +352,7 @@ public class Path implements Comparable {
     if (lastSlash==-1) {
       parent = CUR_DIR;
     } else {
-      int end = hasWindowsDrive(path, true) ? 3 : 0;
-      parent = path.substring(0, lastSlash==end?end+1:lastSlash);
+      parent = path.substring(0, lastSlash==start?start+1:lastSlash);
     }
     return new Path(uri.getScheme(), uri.getAuthority(), parent);
   }
@@ -254,6 +362,7 @@ public class Path implements Comparable {
     return new Path(getParent(), getName()+suffix);
   }
 
+  @Override
   public String toString() {
     // we can't use uri.toString(), which escapes everything, because we want
     // illegal characters unescaped in the string, for glob processing, etc.
@@ -269,7 +378,7 @@ public class Path implements Comparable {
     if (uri.getPath() != null) {
       String path = uri.getPath();
       if (path.indexOf('/')==0 &&
-          hasWindowsDrive(path, true) &&          // has windows drive
+          hasWindowsDrive(path) &&                // has windows drive
           uri.getScheme() == null &&              // but no scheme
           uri.getAuthority() == null)             // or authority
         path = path.substring(1);                 // remove slash before drive
@@ -282,6 +391,7 @@ public class Path implements Comparable {
     return buffer.toString();
   }
 
+  @Override
   public boolean equals(Object o) {
     if (!(o instanceof Path)) {
       return false;
@@ -290,10 +400,12 @@ public class Path implements Comparable {
     return this.uri.equals(that.uri);
   }
 
+  @Override
   public int hashCode() {
     return uri.hashCode();
   }
 
+  @Override
   public int compareTo(Object o) {
     Path that = (Path)o;
     return this.uri.compareTo(that.uri);
@@ -353,7 +465,7 @@ public class Path implements Comparable {
     URI newUri = null;
     try {
       newUri = new URI(scheme, authority , 
-        normalizePath(pathUri.getPath()), null, fragment);
+        normalizePath(scheme, pathUri.getPath()), null, fragment);
     } catch (URISyntaxException e) {
       throw new IllegalArgumentException(e);
     }

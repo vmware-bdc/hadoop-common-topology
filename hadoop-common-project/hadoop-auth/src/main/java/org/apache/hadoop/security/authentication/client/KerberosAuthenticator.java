@@ -19,6 +19,8 @@ import org.ietf.jgss.GSSContext;
 import org.ietf.jgss.GSSManager;
 import org.ietf.jgss.GSSName;
 import org.ietf.jgss.Oid;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.security.auth.Subject;
 import javax.security.auth.login.AppConfigurationEntry;
@@ -26,7 +28,6 @@ import javax.security.auth.login.Configuration;
 import javax.security.auth.login.LoginContext;
 import javax.security.auth.login.LoginException;
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.AccessControlContext;
@@ -35,6 +36,8 @@ import java.security.PrivilegedActionException;
 import java.security.PrivilegedExceptionAction;
 import java.util.HashMap;
 import java.util.Map;
+
+import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
 
 /**
  * The {@link KerberosAuthenticator} implements the Kerberos SPNEGO authentication sequence.
@@ -45,6 +48,9 @@ import java.util.Map;
  * sequence.
  */
 public class KerberosAuthenticator implements Authenticator {
+  
+  private static Logger LOG = LoggerFactory.getLogger(
+      KerberosAuthenticator.class);
 
   /**
    * HTTP header used by the SPNEGO server endpoint during an authentication sequence.
@@ -71,13 +77,29 @@ public class KerberosAuthenticator implements Authenticator {
 
     private static final String OS_LOGIN_MODULE_NAME;
     private static final boolean windows = System.getProperty("os.name").startsWith("Windows");
+    private static final boolean is64Bit = System.getProperty("os.arch").contains("64");
+    private static final boolean aix = System.getProperty("os.name").equals("AIX");
+
+    /* Return the OS login module class name */
+    private static String getOSLoginModuleName() {
+      if (IBM_JAVA) {
+        if (windows) {
+          return is64Bit ? "com.ibm.security.auth.module.Win64LoginModule"
+              : "com.ibm.security.auth.module.NTLoginModule";
+        } else if (aix) {
+          return is64Bit ? "com.ibm.security.auth.module.AIX64LoginModule"
+              : "com.ibm.security.auth.module.AIXLoginModule";
+        } else {
+          return "com.ibm.security.auth.module.LinuxLoginModule";
+        }
+      } else {
+        return windows ? "com.sun.security.auth.module.NTLoginModule"
+            : "com.sun.security.auth.module.UnixLoginModule";
+      }
+    }
 
     static {
-      if (windows) {
-        OS_LOGIN_MODULE_NAME = "com.sun.security.auth.module.NTLoginModule";
-      } else {
-        OS_LOGIN_MODULE_NAME = "com.sun.security.auth.module.UnixLoginModule";
-      }
+      OS_LOGIN_MODULE_NAME = getOSLoginModuleName();
     }
 
     private static final AppConfigurationEntry OS_SPECIFIC_LOGIN =
@@ -88,13 +110,22 @@ public class KerberosAuthenticator implements Authenticator {
     private static final Map<String, String> USER_KERBEROS_OPTIONS = new HashMap<String, String>();
 
     static {
-      USER_KERBEROS_OPTIONS.put("doNotPrompt", "true");
-      USER_KERBEROS_OPTIONS.put("useTicketCache", "true");
-      USER_KERBEROS_OPTIONS.put("renewTGT", "true");
       String ticketCache = System.getenv("KRB5CCNAME");
-      if (ticketCache != null) {
-        USER_KERBEROS_OPTIONS.put("ticketCache", ticketCache);
+      if (IBM_JAVA) {
+        USER_KERBEROS_OPTIONS.put("useDefaultCcache", "true");
+      } else {
+        USER_KERBEROS_OPTIONS.put("doNotPrompt", "true");
+        USER_KERBEROS_OPTIONS.put("useTicketCache", "true");
       }
+      if (ticketCache != null) {
+        if (IBM_JAVA) {
+          // The first value searched when "useDefaultCcache" is used.
+          System.setProperty("KRB5CCNAME", ticketCache);
+        } else {
+          USER_KERBEROS_OPTIONS.put("ticketCache", ticketCache);
+        }
+      }
+      USER_KERBEROS_OPTIONS.put("renewTGT", "true");
     }
 
     private static final AppConfigurationEntry USER_KERBEROS_LOGIN =
@@ -114,6 +145,18 @@ public class KerberosAuthenticator implements Authenticator {
   private URL url;
   private HttpURLConnection conn;
   private Base64 base64;
+  private ConnectionConfigurator connConfigurator;
+
+  /**
+   * Sets a {@link ConnectionConfigurator} instance to use for
+   * configuring connections.
+   *
+   * @param configurator the {@link ConnectionConfigurator} instance.
+   */
+  @Override
+  public void setConnectionConfigurator(ConnectionConfigurator configurator) {
+    connConfigurator = configurator;
+  }
 
   /**
    * Performs SPNEGO authentication against the specified URL.
@@ -136,12 +179,30 @@ public class KerberosAuthenticator implements Authenticator {
       this.url = url;
       base64 = new Base64(0);
       conn = (HttpURLConnection) url.openConnection();
+      if (connConfigurator != null) {
+        conn = connConfigurator.configure(conn);
+      }
       conn.setRequestMethod(AUTH_HTTP_METHOD);
       conn.connect();
-      if (isNegotiate()) {
+      
+      if (conn.getResponseCode() == HttpURLConnection.HTTP_OK) {
+        LOG.debug("JDK performed authentication on our behalf.");
+        // If the JDK already did the SPNEGO back-and-forth for
+        // us, just pull out the token.
+        AuthenticatedURL.extractToken(conn, token);
+        return;
+      } else if (isNegotiate()) {
+        LOG.debug("Performing our own SPNEGO sequence.");
         doSpnegoSequence(token);
       } else {
-        getFallBackAuthenticator().authenticate(url, token);
+        LOG.debug("Using fallback authenticator sequence.");
+        Authenticator auth = getFallBackAuthenticator();
+        // Make sure that the fall back authenticator have the same
+        // ConnectionConfigurator, since the method might be overridden.
+        // Otherwise the fall back authenticator might not have the information
+        // to make the connection (e.g., SSL certificates)
+        auth.setConnectionConfigurator(connConfigurator);
+        auth.authenticate(url, token);
       }
     }
   }
@@ -154,7 +215,11 @@ public class KerberosAuthenticator implements Authenticator {
    * @return the fallback {@link Authenticator}.
    */
   protected Authenticator getFallBackAuthenticator() {
-    return new PseudoAuthenticator();
+    Authenticator auth = new PseudoAuthenticator();
+    if (connConfigurator != null) {
+      auth.setConnectionConfigurator(connConfigurator);
+    }
+    return auth;
   }
 
   /*
@@ -183,10 +248,15 @@ public class KerberosAuthenticator implements Authenticator {
       AccessControlContext context = AccessController.getContext();
       Subject subject = Subject.getSubject(context);
       if (subject == null) {
+        LOG.debug("No subject in context, logging in");
         subject = new Subject();
         LoginContext login = new LoginContext("", subject,
             null, new KerberosConfiguration());
         login.login();
+      }
+
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Using subject: " + subject);
       }
       Subject.doAs(subject, new PrivilegedExceptionAction<Void>() {
 
@@ -195,12 +265,12 @@ public class KerberosAuthenticator implements Authenticator {
           GSSContext gssContext = null;
           try {
             GSSManager gssManager = GSSManager.getInstance();
-            String servicePrincipal = "HTTP/" + KerberosAuthenticator.this.url.getHost();
-            
+            String servicePrincipal = KerberosUtil.getServicePrincipal("HTTP",
+                KerberosAuthenticator.this.url.getHost());
+            Oid oid = KerberosUtil.getOidInstance("NT_GSS_KRB5_PRINCIPAL");
             GSSName serviceName = gssManager.createName(servicePrincipal,
-                                                        GSSName.NT_HOSTBASED_SERVICE);
-            Oid oid = KerberosUtil.getOidClassInstance(servicePrincipal, 
-                gssManager);
+                                                        oid);
+            oid = KerberosUtil.getOidInstance("GSS_KRB5_MECH_OID");
             gssContext = gssManager.createContext(serviceName, oid, null,
                                                   GSSContext.DEFAULT_LIFETIME);
             gssContext.requestCredDeleg(true);
@@ -243,9 +313,12 @@ public class KerberosAuthenticator implements Authenticator {
   /*
   * Sends the Kerberos token to the server.
   */
-  private void sendToken(byte[] outToken) throws IOException, AuthenticationException {
+  private void sendToken(byte[] outToken) throws IOException {
     String token = base64.encodeToString(outToken);
     conn = (HttpURLConnection) url.openConnection();
+    if (connConfigurator != null) {
+      conn = connConfigurator.configure(conn);
+    }
     conn.setRequestMethod(AUTH_HTTP_METHOD);
     conn.setRequestProperty(AUTHORIZATION, NEGOTIATE + " " + token);
     conn.connect();

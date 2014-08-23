@@ -43,6 +43,7 @@ public class TaskInfo {
   protected TaskState state;
   protected String type;
   protected String successfulAttempt;
+  protected String status;
 
   @XmlTransient
   int taskNum;
@@ -59,12 +60,14 @@ public class TaskInfo {
     TaskReport report = task.getReport();
     this.startTime = report.getStartTime();
     this.finishTime = report.getFinishTime();
-    this.elapsedTime = Times.elapsed(this.startTime, this.finishTime, false);
+    this.state = report.getTaskState();
+    this.elapsedTime = Times.elapsed(this.startTime, this.finishTime,
+      this.state == TaskState.RUNNING);
     if (this.elapsedTime == -1) {
       this.elapsedTime = 0;
     }
-    this.state = report.getTaskState();
     this.progress = report.getProgress() * 100;
+    this.status =  report.getStatus();
     this.id = MRApps.toString(task.getID());
     this.taskNum = task.getID().getId();
     this.successful = getSuccessfulAttempt(task);
@@ -120,4 +123,7 @@ public class TaskInfo {
     return null;
   }
 
+  public String getStatus() {
+    return status;
+  }
 }

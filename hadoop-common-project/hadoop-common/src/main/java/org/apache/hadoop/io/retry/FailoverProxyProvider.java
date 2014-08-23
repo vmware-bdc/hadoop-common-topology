@@ -30,6 +30,18 @@ import org.apache.hadoop.classification.InterfaceStability;
  */
 @InterfaceStability.Evolving
 public interface FailoverProxyProvider<T> extends Closeable {
+  public static final class ProxyInfo<T> {
+    public final T proxy;
+    /*
+     * The information (e.g., the IP address) of the current proxy object. It
+     * provides information for debugging purposes.
+     */
+    public final String proxyInfo;
+    public ProxyInfo(T proxy, String proxyInfo) {
+      this.proxy = proxy;
+      this.proxyInfo = proxyInfo;
+    }
+  }
 
   /**
    * Get the proxy object which should be used until the next failover event
@@ -37,22 +49,22 @@ public interface FailoverProxyProvider<T> extends Closeable {
    * 
    * @return the proxy object to invoke methods upon
    */
-  public T getProxy();
+  public ProxyInfo<T> getProxy();
 
   /**
    * Called whenever the associated {@link RetryPolicy} determines that an error
    * warrants failing over.
    * 
-   * @param currentProxy the proxy object which was being used before this
-   *        failover event
+   * @param currentProxy
+   *          the proxy object which was being used before this failover event
    */
   public void performFailover(T currentProxy);
 
   /**
    * Return a reference to the interface this provider's proxy objects actually
    * implement. If any of the methods on this interface are annotated as being
-   * {@link Idempotent}, then this fact will be passed to the
-   * {@link RetryPolicy#shouldRetry(Exception, int, int, boolean)} method on
+   * {@link Idempotent} or {@link AtMostOnce}, then this fact will be passed to
+   * the {@link RetryPolicy#shouldRetry(Exception, int, int, boolean)} method on
    * error, for use in determining whether or not failover should be attempted.
    * 
    * @return the interface implemented by the proxy objects returned by

@@ -20,9 +20,13 @@ package org.apache.hadoop.hdfs.server.common;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.server.namenode.MetaRecoveryContext;
+
+import com.google.common.base.Preconditions;
 
 /************************************
  * Some handy internal HDFS constants
@@ -39,7 +43,35 @@ public final class HdfsServerConstants {
    */
   static public enum NodeType {
     NAME_NODE,
-    DATA_NODE;
+    DATA_NODE,
+    JOURNAL_NODE;
+  }
+
+  /** Startup options for rolling upgrade. */
+  public static enum RollingUpgradeStartupOption{
+    ROLLBACK, DOWNGRADE, STARTED;
+
+    public String getOptionString() {
+      return StartupOption.ROLLINGUPGRADE.getName() + " "
+          + name().toLowerCase();
+    }
+
+    public boolean matches(StartupOption option) {
+      return option == StartupOption.ROLLINGUPGRADE
+          && option.getRollingUpgradeStartupOption() == this;
+    }
+
+    private static final RollingUpgradeStartupOption[] VALUES = values();
+
+    static RollingUpgradeStartupOption fromString(String s) {
+      for(RollingUpgradeStartupOption opt : VALUES) {
+        if (opt.name().equalsIgnoreCase(s)) {
+          return opt;
+        }
+      }
+      throw new IllegalArgumentException("Failed to convert \"" + s
+          + "\" to " + RollingUpgradeStartupOption.class.getSimpleName());
+    }
   }
 
   /** Startup options */
@@ -53,18 +85,28 @@ public final class HdfsServerConstants {
     UPGRADE ("-upgrade"),
     ROLLBACK("-rollback"),
     FINALIZE("-finalize"),
+    ROLLINGUPGRADE("-rollingUpgrade"),
     IMPORT  ("-importCheckpoint"),
     BOOTSTRAPSTANDBY("-bootstrapStandby"),
     INITIALIZESHAREDEDITS("-initializeSharedEdits"),
     RECOVER  ("-recover"),
     FORCE("-force"),
-    NONINTERACTIVE("-nonInteractive");
-    
-    private String name = null;
+    NONINTERACTIVE("-nonInteractive"),
+    RENAMERESERVED("-renameReserved"),
+    METADATAVERSION("-metadataVersion"),
+    UPGRADEONLY("-upgradeOnly");
+
+    private static final Pattern ENUM_WITH_ROLLING_UPGRADE_OPTION = Pattern.compile(
+        "(\\w+)\\((\\w+)\\)");
+
+    private final String name;
     
     // Used only with format and upgrade options
     private String clusterId = null;
     
+    // Used only by rolling upgrade
+    private RollingUpgradeStartupOption rollingUpgradeStartupOption;
+
     // Used only with format option
     private boolean isForceFormat = false;
     private boolean isInteractiveFormat = true;
@@ -91,6 +133,16 @@ public final class HdfsServerConstants {
 
     public String getClusterId() {
       return clusterId;
+    }
+    
+    public void setRollingUpgradeStartupOption(String opt) {
+      Preconditions.checkState(this == ROLLINGUPGRADE);
+      rollingUpgradeStartupOption = RollingUpgradeStartupOption.fromString(opt);
+    }
+    
+    public RollingUpgradeStartupOption getRollingUpgradeStartupOption() {
+      Preconditions.checkState(this == ROLLINGUPGRADE);
+      return rollingUpgradeStartupOption;
     }
 
     public MetaRecoveryContext createRecoveryContext() {
@@ -122,13 +174,34 @@ public final class HdfsServerConstants {
     public void setInteractiveFormat(boolean interactive) {
       isInteractiveFormat = interactive;
     }
+    
+    @Override
+    public String toString() {
+      if (this == ROLLINGUPGRADE) {
+        return new StringBuilder(super.toString())
+            .append("(").append(getRollingUpgradeStartupOption()).append(")")
+            .toString();
+      }
+      return super.toString();
+    }
+
+    static public StartupOption getEnum(String value) {
+      Matcher matcher = ENUM_WITH_ROLLING_UPGRADE_OPTION.matcher(value);
+      if (matcher.matches()) {
+        StartupOption option = StartupOption.valueOf(matcher.group(1));
+        option.setRollingUpgradeStartupOption(matcher.group(2));
+        return option;
+      } else {
+        return StartupOption.valueOf(value);
+      }
+    }
   }
 
   // Timeouts for communicating with DataNode for streaming writes/reads
-  public static int READ_TIMEOUT = 60 * 1000;
-  public static int READ_TIMEOUT_EXTENSION = 5 * 1000;
-  public static int WRITE_TIMEOUT = 8 * 60 * 1000;
-  public static int WRITE_TIMEOUT_EXTENSION = 5 * 1000; //for write pipeline
+  public static final int READ_TIMEOUT = 60 * 1000;
+  public static final int READ_TIMEOUT_EXTENSION = 5 * 1000;
+  public static final int WRITE_TIMEOUT = 8 * 60 * 1000;
+  public static final int WRITE_TIMEOUT_EXTENSION = 5 * 1000; //for write pipeline
 
   /**
    * Defines the NameNode role.
@@ -141,6 +214,7 @@ public final class HdfsServerConstants {
     private String description = null;
     private NamenodeRole(String arg) {this.description = arg;}
   
+    @Override
     public String toString() {
       return description;
     }
@@ -161,7 +235,7 @@ public final class HdfsServerConstants {
     /** Temporary replica: created for replication and relocation only. */
     TEMPORARY(4);
 
-    private int value;
+    private final int value;
 
     private ReplicaState(int v) {
       value = v;
@@ -220,5 +294,10 @@ public final class HdfsServerConstants {
   
   public static final String NAMENODE_LEASE_HOLDER = "HDFS_NameNode";
   public static final long NAMENODE_LEASE_RECHECK_INTERVAL = 2000;
+
+  public static final String CRYPTO_XATTR_ENCRYPTION_ZONE =
+      "raw.hdfs.crypto.encryption.zone";
+  public static final String CRYPTO_XATTR_FILE_ENCRYPTION_INFO =
+      "raw.hdfs.crypto.file.encryption.info";
 }
 

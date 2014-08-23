@@ -30,7 +30,6 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.io.Writable;
-import org.apache.hadoop.ipc.RpcPayloadHeader.RpcKind;
 import org.apache.hadoop.net.NetUtils;
 
 /**
@@ -73,7 +72,7 @@ public class TestIPCServerResponder extends TestCase {
     }
 
     @Override
-    public Writable call(RpcKind rpcKind, String protocol, Writable param,
+    public Writable call(RPC.RpcKind rpcKind, String protocol, Writable param,
         long receiveTime) throws IOException {
       if (sleep) {
         try {
@@ -106,17 +105,18 @@ public class TestIPCServerResponder extends TestCase {
           byte[] bytes = new byte[byteSize];
           System.arraycopy(BYTES, 0, bytes, 0, byteSize);
           Writable param = new BytesWritable(bytes);
-          Writable value = client.call(param, address);
+          client.call(param, address);
           Thread.sleep(RANDOM.nextInt(20));
         } catch (Exception e) {
-          LOG.fatal("Caught: " + e);
+          LOG.fatal("Caught Exception", e);
           failed = true;
         }
       }
     }
   }
 
-  public void testResponseBuffer() throws Exception {
+  public void testResponseBuffer() 
+      throws IOException, InterruptedException {
     Server.INITIAL_RESP_BUF_SIZE = 1;
     conf.setInt(CommonConfigurationKeys.IPC_SERVER_RPC_MAX_RESPONSE_SIZE_KEY,
                 1);
@@ -124,7 +124,8 @@ public class TestIPCServerResponder extends TestCase {
     conf = new Configuration(); // reset configuration
   }
 
-  public void testServerResponder() throws Exception {
+  public void testServerResponder()
+      throws IOException, InterruptedException {
     testServerResponder(10, true, 1, 10, 200);
   }
 
@@ -132,7 +133,8 @@ public class TestIPCServerResponder extends TestCase {
                                   final boolean handlerSleep, 
                                   final int clientCount,
                                   final int callerCount,
-                                  final int callCount) throws Exception {
+                                  final int callCount) throws IOException,
+                                  InterruptedException {
     Server server = new TestServer(handlerCount, handlerSleep);
     server.start();
 

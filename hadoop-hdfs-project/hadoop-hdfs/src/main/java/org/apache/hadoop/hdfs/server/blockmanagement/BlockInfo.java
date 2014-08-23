@@ -22,28 +22,28 @@ import java.util.LinkedList;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
-import org.apache.hadoop.hdfs.server.namenode.INodeFile;
-import org.apache.hadoop.hdfs.util.LightWeightGSet;
+import org.apache.hadoop.util.LightWeightGSet;
 
 /**
  * BlockInfo class maintains for a given block
- * the {@link INodeFile} it is part of and datanodes where the replicas of 
+ * the {@link BlockCollection} it is part of and datanodes where the replicas of 
  * the block are stored.
  */
 @InterfaceAudience.Private
-public class BlockInfo extends Block implements
-    LightWeightGSet.LinkedElement {
-  private INodeFile inode;
+public class BlockInfo extends Block implements LightWeightGSet.LinkedElement {
+  public static final BlockInfo[] EMPTY_ARRAY = {}; 
+
+  private BlockCollection bc;
 
   /** For implementing {@link LightWeightGSet.LinkedElement} interface */
   private LightWeightGSet.LinkedElement nextLinkedElement;
 
   /**
-   * This array contains triplets of references. For each i-th datanode the
-   * block belongs to triplets[3*i] is the reference to the DatanodeDescriptor
-   * and triplets[3*i+1] and triplets[3*i+2] are references to the previous and
-   * the next blocks, respectively, in the list of blocks belonging to this
-   * data-node.
+   * This array contains triplets of references. For each i-th storage, the
+   * block belongs to triplets[3*i] is the reference to the
+   * {@link DatanodeStorageInfo} and triplets[3*i+1] and triplets[3*i+2] are
+   * references to the previous and the next blocks, respectively, in the list
+   * of blocks belonging to this storage.
    * 
    * Using previous and next in Object triplets is done instead of a
    * {@link LinkedList} list to efficiently use memory. With LinkedList the cost
@@ -58,13 +58,13 @@ public class BlockInfo extends Block implements
    */
   public BlockInfo(int replication) {
     this.triplets = new Object[3*replication];
-    this.inode = null;
+    this.bc = null;
   }
   
   public BlockInfo(Block blk, int replication) {
     super(blk);
     this.triplets = new Object[3*replication];
-    this.inode = null;
+    this.bc = null;
   }
 
   /**
@@ -73,26 +73,27 @@ public class BlockInfo extends Block implements
    * @param from BlockInfo to copy from.
    */
   protected BlockInfo(BlockInfo from) {
-    this(from, from.inode.getReplication());
-    this.inode = from.inode;
+    this(from, from.bc.getBlockReplication());
+    this.bc = from.bc;
   }
 
-  public INodeFile getINode() {
-    return inode;
+  public BlockCollection getBlockCollection() {
+    return bc;
   }
 
-  public void setINode(INodeFile inode) {
-    this.inode = inode;
+  public void setBlockCollection(BlockCollection bc) {
+    this.bc = bc;
   }
 
-  DatanodeDescriptor getDatanode(int index) {
+  public DatanodeDescriptor getDatanode(int index) {
+    DatanodeStorageInfo storage = getStorageInfo(index);
+    return storage == null ? null : storage.getDatanodeDescriptor();
+  }
+
+  DatanodeStorageInfo getStorageInfo(int index) {
     assert this.triplets != null : "BlockInfo is not initialized";
     assert index >= 0 && index*3 < triplets.length : "Index is out of bound";
-    DatanodeDescriptor node = (DatanodeDescriptor)triplets[index*3];
-    assert node == null || 
-        DatanodeDescriptor.class.getName().equals(node.getClass().getName()) : 
-              "DatanodeDescriptor is expected at " + index*3;
-    return node;
+    return (DatanodeStorageInfo)triplets[index*3];
   }
 
   private BlockInfo getPrevious(int index) {
@@ -115,14 +116,10 @@ public class BlockInfo extends Block implements
     return info;
   }
 
-  private void setDatanode(int index, DatanodeDescriptor node, BlockInfo previous,
-      BlockInfo next) {
+  private void setStorageInfo(int index, DatanodeStorageInfo storage) {
     assert this.triplets != null : "BlockInfo is not initialized";
-    int i = index * 3;
-    assert index >= 0 && i+2 < triplets.length : "Index is out of bound";
-    triplets[i] = node;
-    triplets[i+1] = previous;
-    triplets[i+2] = next;
+    assert index >= 0 && index*3 < triplets.length : "Index is out of bound";
+    triplets[index*3] = storage;
   }
 
   /**
@@ -157,7 +154,7 @@ public class BlockInfo extends Block implements
     return info;
   }
 
-  int getCapacity() {
+  public int getCapacity() {
     assert this.triplets != null : "BlockInfo is not initialized";
     assert triplets.length % 3 == 0 : "Malformed BlockInfo";
     return triplets.length / 3;
@@ -194,22 +191,22 @@ public class BlockInfo extends Block implements
   }
 
   /**
-   * Add data-node this block belongs to.
+   * Add a {@link DatanodeStorageInfo} location for a block
    */
-  public boolean addNode(DatanodeDescriptor node) {
-    if(findDatanode(node) >= 0) // the node is already there
-      return false;
+  boolean addStorage(DatanodeStorageInfo storage) {
     // find the last null node
     int lastNode = ensureCapacity(1);
-    setDatanode(lastNode, node, null, null);
+    setStorageInfo(lastNode, storage);
+    setNext(lastNode, null);
+    setPrevious(lastNode, null);
     return true;
   }
 
   /**
-   * Remove data-node from the block.
+   * Remove {@link DatanodeStorageInfo} location for a block
    */
-  public boolean removeNode(DatanodeDescriptor node) {
-    int dnIndex = findDatanode(node);
+  boolean removeStorage(DatanodeStorageInfo storage) {
+    int dnIndex = findStorageInfo(storage);
     if(dnIndex < 0) // the node is not found
       return false;
     assert getPrevious(dnIndex) == null && getNext(dnIndex) == null : 
@@ -217,23 +214,58 @@ public class BlockInfo extends Block implements
     // find the last not null node
     int lastNode = numNodes()-1; 
     // replace current node triplet by the lastNode one 
-    setDatanode(dnIndex, getDatanode(lastNode), getPrevious(lastNode),
-        getNext(lastNode));
+    setStorageInfo(dnIndex, getStorageInfo(lastNode));
+    setNext(dnIndex, getNext(lastNode)); 
+    setPrevious(dnIndex, getPrevious(lastNode)); 
     // set the last triplet to null
-    setDatanode(lastNode, null, null, null);
+    setStorageInfo(lastNode, null);
+    setNext(lastNode, null); 
+    setPrevious(lastNode, null); 
     return true;
   }
 
   /**
    * Find specified DatanodeDescriptor.
-   * @param dn
    * @return index or -1 if not found.
    */
-  int findDatanode(DatanodeDescriptor dn) {
+  boolean findDatanode(DatanodeDescriptor dn) {
     int len = getCapacity();
     for(int idx = 0; idx < len; idx++) {
       DatanodeDescriptor cur = getDatanode(idx);
-      if(cur == dn)
+      if(cur == dn) {
+        return true;
+      }
+      if(cur == null) {
+        break;
+      }
+    }
+    return false;
+  }
+  /**
+   * Find specified DatanodeStorageInfo.
+   * @return DatanodeStorageInfo or null if not found.
+   */
+  DatanodeStorageInfo findStorageInfo(DatanodeDescriptor dn) {
+    int len = getCapacity();
+    for(int idx = 0; idx < len; idx++) {
+      DatanodeStorageInfo cur = getStorageInfo(idx);
+      if(cur == null)
+        break;
+      if(cur.getDatanodeDescriptor() == dn)
+        return cur;
+    }
+    return null;
+  }
+  
+  /**
+   * Find specified DatanodeStorageInfo.
+   * @return index or -1 if not found.
+   */
+  int findStorageInfo(DatanodeStorageInfo storageInfo) {
+    int len = getCapacity();
+    for(int idx = 0; idx < len; idx++) {
+      DatanodeStorageInfo cur = getStorageInfo(idx);
+      if(cur == storageInfo)
         return idx;
       if(cur == null)
         break;
@@ -243,34 +275,34 @@ public class BlockInfo extends Block implements
 
   /**
    * Insert this block into the head of the list of blocks 
-   * related to the specified DatanodeDescriptor.
+   * related to the specified DatanodeStorageInfo.
    * If the head is null then form a new list.
    * @return current block as the new head of the list.
    */
-  public BlockInfo listInsert(BlockInfo head, DatanodeDescriptor dn) {
-    int dnIndex = this.findDatanode(dn);
+  BlockInfo listInsert(BlockInfo head, DatanodeStorageInfo storage) {
+    int dnIndex = this.findStorageInfo(storage);
     assert dnIndex >= 0 : "Data node is not found: current";
     assert getPrevious(dnIndex) == null && getNext(dnIndex) == null : 
             "Block is already in the list and cannot be inserted.";
     this.setPrevious(dnIndex, null);
     this.setNext(dnIndex, head);
     if(head != null)
-      head.setPrevious(head.findDatanode(dn), this);
+      head.setPrevious(head.findStorageInfo(storage), this);
     return this;
   }
 
   /**
    * Remove this block from the list of blocks 
-   * related to the specified DatanodeDescriptor.
+   * related to the specified DatanodeStorageInfo.
    * If this block is the head of the list then return the next block as 
    * the new head.
    * @return the new head of the list or null if the list becomes
-   * empty after deletion.
+   * empy after deletion.
    */
-  public BlockInfo listRemove(BlockInfo head, DatanodeDescriptor dn) {
+  BlockInfo listRemove(BlockInfo head, DatanodeStorageInfo storage) {
     if(head == null)
       return null;
-    int dnIndex = this.findDatanode(dn);
+    int dnIndex = this.findStorageInfo(storage);
     if(dnIndex < 0) // this block is not on the data-node list
       return head;
 
@@ -279,9 +311,9 @@ public class BlockInfo extends Block implements
     this.setNext(dnIndex, null);
     this.setPrevious(dnIndex, null);
     if(prev != null)
-      prev.setNext(prev.findDatanode(dn), next);
+      prev.setNext(prev.findStorageInfo(storage), next);
     if(next != null)
-      next.setPrevious(next.findDatanode(dn), prev);
+      next.setPrevious(next.findStorageInfo(storage), prev);
     if(this == head)  // removing the head
       head = next;
     return head;
@@ -293,7 +325,7 @@ public class BlockInfo extends Block implements
    *
    * @return the new head of the list.
    */
-  public BlockInfo moveBlockToHead(BlockInfo head, DatanodeDescriptor dn,
+  public BlockInfo moveBlockToHead(BlockInfo head, DatanodeStorageInfo storage,
       int curIndex, int headIndex) {
     if (head == this) {
       return this;
@@ -302,9 +334,9 @@ public class BlockInfo extends Block implements
     BlockInfo prev = this.setPrevious(curIndex, null);
 
     head.setPrevious(headIndex, this);
-    prev.setNext(prev.findDatanode(dn), next);
+    prev.setNext(prev.findStorageInfo(storage), next);
     if (next != null)
-      next.setPrevious(next.findDatanode(dn), prev);
+      next.setPrevious(next.findStorageInfo(storage), prev);
     return this;
   }
 
@@ -332,10 +364,10 @@ public class BlockInfo extends Block implements
    * @return BlockInfoUnderConstruction -  an under construction block.
    */
   public BlockInfoUnderConstruction convertToBlockUnderConstruction(
-      BlockUCState s, DatanodeDescriptor[] targets) {
+      BlockUCState s, DatanodeStorageInfo[] targets) {
     if(isComplete()) {
-      return new BlockInfoUnderConstruction(
-          this, getINode().getReplication(), s, targets);
+      return new BlockInfoUnderConstruction(this,
+          getBlockCollection().getBlockReplication(), s, targets);
     }
     // the block is already under construction
     BlockInfoUnderConstruction ucBlock = (BlockInfoUnderConstruction)this;

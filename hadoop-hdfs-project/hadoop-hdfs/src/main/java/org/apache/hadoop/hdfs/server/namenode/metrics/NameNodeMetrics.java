@@ -17,17 +17,20 @@
  */
 package org.apache.hadoop.hdfs.server.namenode.metrics;
 
+import static org.apache.hadoop.metrics2.impl.MsInfo.ProcessName;
+import static org.apache.hadoop.metrics2.impl.MsInfo.SessionId;
+
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
 import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.annotation.Metrics;
-import static org.apache.hadoop.metrics2.impl.MsInfo.*;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.lib.MetricsRegistry;
 import org.apache.hadoop.metrics2.lib.MutableCounterLong;
 import org.apache.hadoop.metrics2.lib.MutableGaugeInt;
+import org.apache.hadoop.metrics2.lib.MutableQuantiles;
 import org.apache.hadoop.metrics2.lib.MutableRate;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
 
@@ -54,28 +57,90 @@ public class NameNodeMetrics {
   @Metric MutableCounterLong createSymlinkOps;
   @Metric MutableCounterLong getLinkTargetOps;
   @Metric MutableCounterLong filesInGetListingOps;
+  @Metric("Number of allowSnapshot operations")
+  MutableCounterLong allowSnapshotOps;
+  @Metric("Number of disallowSnapshot operations")
+  MutableCounterLong disallowSnapshotOps;
+  @Metric("Number of createSnapshot operations")
+  MutableCounterLong createSnapshotOps;
+  @Metric("Number of deleteSnapshot operations")
+  MutableCounterLong deleteSnapshotOps;
+  @Metric("Number of renameSnapshot operations")
+  MutableCounterLong renameSnapshotOps;
+  @Metric("Number of listSnapshottableDirectory operations")
+  MutableCounterLong listSnapshottableDirOps;
+  @Metric("Number of snapshotDiffReport operations")
+  MutableCounterLong snapshotDiffReportOps;
+  @Metric("Number of blockReceivedAndDeleted calls")
+  MutableCounterLong blockReceivedAndDeletedOps;
+  @Metric("Number of blockReports from individual storages")
+  MutableCounterLong storageBlockReportOps;
 
   @Metric("Journal transactions") MutableRate transactions;
   @Metric("Journal syncs") MutableRate syncs;
+  final MutableQuantiles[] syncsQuantiles;
   @Metric("Journal transactions batched in sync")
   MutableCounterLong transactionsBatchedInSync;
   @Metric("Block report") MutableRate blockReport;
+  final MutableQuantiles[] blockReportQuantiles;
+  @Metric("Cache report") MutableRate cacheReport;
+  final MutableQuantiles[] cacheReportQuantiles;
 
-  @Metric("Duration in SafeMode at startup") MutableGaugeInt safeModeTime;
-  @Metric("Time loading FS Image at startup") MutableGaugeInt fsImageLoadTime;
+  @Metric("Duration in SafeMode at startup in msec")
+  MutableGaugeInt safeModeTime;
+  @Metric("Time loading FS Image at startup in msec")
+  MutableGaugeInt fsImageLoadTime;
 
-  NameNodeMetrics(String processName, String sessionId) {
+  @Metric("GetImageServlet getEdit")
+  MutableRate getEdit;
+  @Metric("GetImageServlet getImage")
+  MutableRate getImage;
+  @Metric("GetImageServlet putImage")
+  MutableRate putImage;
+
+  JvmMetrics jvmMetrics = null;
+  
+  NameNodeMetrics(String processName, String sessionId, int[] intervals,
+      final JvmMetrics jvmMetrics) {
+    this.jvmMetrics = jvmMetrics;
     registry.tag(ProcessName, processName).tag(SessionId, sessionId);
+    
+    final int len = intervals.length;
+    syncsQuantiles = new MutableQuantiles[len];
+    blockReportQuantiles = new MutableQuantiles[len];
+    cacheReportQuantiles = new MutableQuantiles[len];
+    
+    for (int i = 0; i < len; i++) {
+      int interval = intervals[i];
+      syncsQuantiles[i] = registry.newQuantiles(
+          "syncs" + interval + "s",
+          "Journal syncs", "ops", "latency", interval);
+      blockReportQuantiles[i] = registry.newQuantiles(
+          "blockReport" + interval + "s", 
+          "Block report", "ops", "latency", interval);
+      cacheReportQuantiles[i] = registry.newQuantiles(
+          "cacheReport" + interval + "s",
+          "Cache report", "ops", "latency", interval);
+    }
   }
 
   public static NameNodeMetrics create(Configuration conf, NamenodeRole r) {
     String sessionId = conf.get(DFSConfigKeys.DFS_METRICS_SESSION_ID_KEY);
     String processName = r.toString();
     MetricsSystem ms = DefaultMetricsSystem.instance();
-    JvmMetrics.create(processName, sessionId, ms);
-    return ms.register(new NameNodeMetrics(processName, sessionId));
+    JvmMetrics jm = JvmMetrics.create(processName, sessionId, ms);
+    
+    // Percentile measurement is off by default, by watching no intervals
+    int[] intervals = 
+        conf.getInts(DFSConfigKeys.DFS_METRICS_PERCENTILES_INTERVALS_KEY);
+    return ms.register(new NameNodeMetrics(processName, sessionId,
+        intervals, jm));
   }
 
+  public JvmMetrics getJvmMetrics() {
+    return jvmMetrics;
+  }
+  
   public void shutdown() {
     DefaultMetricsSystem.shutdown();
   }
@@ -108,7 +173,7 @@ public class NameNodeMetrics {
     filesRenamed.incr();
   }
 
-  public void incrFilesDeleted(int delta) {
+  public void incrFilesDeleted(long delta) {
     filesDeleted.incr(delta);
   }
 
@@ -136,6 +201,42 @@ public class NameNodeMetrics {
     getLinkTargetOps.incr();
   }
 
+  public void incrAllowSnapshotOps() {
+    allowSnapshotOps.incr();
+  }
+  
+  public void incrDisAllowSnapshotOps() {
+    disallowSnapshotOps.incr();
+  }
+  
+  public void incrCreateSnapshotOps() {
+    createSnapshotOps.incr();
+  }
+  
+  public void incrDeleteSnapshotOps() {
+    deleteSnapshotOps.incr();
+  }
+  
+  public void incrRenameSnapshotOps() {
+    renameSnapshotOps.incr();
+  }
+  
+  public void incrListSnapshottableDirOps() {
+    listSnapshottableDirOps.incr();
+  }
+  
+  public void incrSnapshotDiffReportOps() {
+    snapshotDiffReportOps.incr();
+  }
+  
+  public void incrBlockReceivedAndDeletedOps() {
+    blockReceivedAndDeletedOps.incr();
+  }
+  
+  public void incrStorageBlockReportOps() {
+    storageBlockReportOps.incr();
+  }
+
   public void addTransaction(long latency) {
     transactions.add(latency);
   }
@@ -146,6 +247,9 @@ public class NameNodeMetrics {
 
   public void addSync(long elapsed) {
     syncs.add(elapsed);
+    for (MutableQuantiles q : syncsQuantiles) {
+      q.add(elapsed);
+    }
   }
 
   public void setFsImageLoadTime(long elapsed) {
@@ -154,9 +258,31 @@ public class NameNodeMetrics {
 
   public void addBlockReport(long latency) {
     blockReport.add(latency);
+    for (MutableQuantiles q : blockReportQuantiles) {
+      q.add(latency);
+    }
+  }
+
+  public void addCacheBlockReport(long latency) {
+    cacheReport.add(latency);
+    for (MutableQuantiles q : cacheReportQuantiles) {
+      q.add(latency);
+    }
   }
 
   public void setSafeModeTime(long elapsed) {
     safeModeTime.set((int) elapsed);
+  }
+
+  public void addGetEdit(long latency) {
+    getEdit.add(latency);
+  }
+
+  public void addGetImage(long latency) {
+    getImage.add(latency);
+  }
+
+  public void addPutImage(long latency) {
+    putImage.add(latency);
   }
 }

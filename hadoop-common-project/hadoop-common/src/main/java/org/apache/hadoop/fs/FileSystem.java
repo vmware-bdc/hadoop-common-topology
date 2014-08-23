@@ -20,7 +20,9 @@ package org.apache.hadoop.fs;
 import java.io.Closeable;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -29,13 +31,14 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.Stack;
 import java.util.TreeSet;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.commons.logging.Log;
@@ -44,16 +47,26 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.fs.Options.ChecksumOpt;
 import org.apache.hadoop.fs.Options.Rename;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.MultipleIOException;
+import org.apache.hadoop.io.Text;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.ShutdownHookManager;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /****************************************************************
  * An abstract base class for a fairly generic filesystem.  It
@@ -83,6 +96,11 @@ public abstract class FileSystem extends Configured implements Closeable {
 
   public static final Log LOG = LogFactory.getLog(FileSystem.class);
 
+  /**
+   * Priority of the FileSystem shutdown hook.
+   */
+  public static final int SHUTDOWN_HOOK_PRIORITY = 10;
+
   /** FileSystem cache */
   static final Cache CACHE = new Cache();
 
@@ -105,6 +123,7 @@ public abstract class FileSystem extends Configured implements Closeable {
    */
   private Set<Path> deleteOnExit = new TreeSet<Path>();
   
+  boolean resolveSymlinks;
   /**
    * This method adds a file system for testing so that we can find it later. It
    * is only for testing.
@@ -130,13 +149,12 @@ public abstract class FileSystem extends Configured implements Closeable {
    */
   public static FileSystem get(final URI uri, final Configuration conf,
         final String user) throws IOException, InterruptedException {
-    UserGroupInformation ugi;
-    if (user == null) {
-      ugi = UserGroupInformation.getCurrentUser();
-    } else {
-      ugi = UserGroupInformation.createRemoteUser(user);
-    }
+    String ticketCachePath =
+      conf.get(CommonConfigurationKeys.KERBEROS_TICKET_CACHE_PATH);
+    UserGroupInformation ugi =
+        UserGroupInformation.getBestUGI(ticketCachePath, user);
     return ugi.doAs(new PrivilegedExceptionAction<FileSystem>() {
+      @Override
       public FileSystem run() throws IOException {
         return get(uri, conf);
       }
@@ -182,18 +200,66 @@ public abstract class FileSystem extends Configured implements Closeable {
    */
   public void initialize(URI name, Configuration conf) throws IOException {
     statistics = getStatistics(name.getScheme(), getClass());    
+    resolveSymlinks = conf.getBoolean(
+        CommonConfigurationKeys.FS_CLIENT_RESOLVE_REMOTE_SYMLINKS_KEY,
+        CommonConfigurationKeys.FS_CLIENT_RESOLVE_REMOTE_SYMLINKS_DEFAULT);
+  }
+
+  /**
+   * Return the protocol scheme for the FileSystem.
+   * <p/>
+   * This implementation throws an <code>UnsupportedOperationException</code>.
+   *
+   * @return the protocol scheme for the FileSystem.
+   */
+  public String getScheme() {
+    throw new UnsupportedOperationException("Not implemented by the " + getClass().getSimpleName() + " FileSystem implementation");
   }
 
   /** Returns a URI whose scheme and authority identify this FileSystem.*/
   public abstract URI getUri();
   
   /**
-   * Resolve the uri's hostname and add the default port if not in the uri
+   * Return a canonicalized form of this FileSystem's URI.
+   * 
+   * The default implementation simply calls {@link #canonicalizeUri(URI)}
+   * on the filesystem's own URI, so subclasses typically only need to
+   * implement that method.
+   *
+   * @see #canonicalizeUri(URI)
+   */
+  protected URI getCanonicalUri() {
+    return canonicalizeUri(getUri());
+  }
+  
+  /**
+   * Canonicalize the given URI.
+   * 
+   * This is filesystem-dependent, but may for example consist of
+   * canonicalizing the hostname using DNS and adding the default
+   * port if not specified.
+   * 
+   * The default implementation simply fills in the default port if
+   * not specified and if the filesystem has a default port.
+   *
    * @return URI
    * @see NetUtils#getCanonicalUri(URI, int)
    */
-  protected URI getCanonicalUri() {
-    return NetUtils.getCanonicalUri(getUri(), getDefaultPort());
+  protected URI canonicalizeUri(URI uri) {
+    if (uri.getPort() == -1 && getDefaultPort() > 0) {
+      // reconstruct the uri with the default port set
+      try {
+        uri = new URI(uri.getScheme(), uri.getUserInfo(),
+            uri.getHost(), getDefaultPort(),
+            uri.getPath(), uri.getQuery(), uri.getFragment());
+      } catch (URISyntaxException e) {
+        // Should never happen!
+        throw new AssertionError("Valid URI became unparseable: " +
+            uri);
+      }
+    }
+    
+    return uri;
   }
   
   /**
@@ -204,17 +270,37 @@ public abstract class FileSystem extends Configured implements Closeable {
     return 0;
   }
 
+  protected static FileSystem getFSofPath(final Path absOrFqPath,
+      final Configuration conf)
+      throws UnsupportedFileSystemException, IOException {
+    absOrFqPath.checkNotSchemeWithRelative();
+    absOrFqPath.checkNotRelative();
+
+    // Uses the default file system if not fully qualified
+    return get(absOrFqPath.toUri(), conf);
+  }
+
   /**
    * Get a canonical service name for this file system.  The token cache is
-   * the only user of this value, and uses it to lookup this filesystem's
-   * service tokens.  The token cache will not attempt to acquire tokens if the
-   * service is null.
+   * the only user of the canonical service name, and uses it to lookup this
+   * filesystem's service tokens.
+   * If file system provides a token of its own then it must have a canonical
+   * name, otherwise canonical name can be null.
+   * 
+   * Default Impl: If the file system has child file systems 
+   * (such as an embedded file system) then it is assumed that the fs has no
+   * tokens of its own and hence returns a null name; otherwise a service
+   * name is built using Uri and port.
+   * 
    * @return a service string that uniquely identifies this file system, null
    *         if the filesystem does not implement tokens
    * @see SecurityUtil#buildDTServiceName(URI, int) 
    */
+  @InterfaceAudience.LimitedPrivate({ "HDFS", "MapReduce" })
   public String getCanonicalServiceName() {
-    return SecurityUtil.buildDTServiceName(getUri(), getDefaultPort());
+    return (getChildFileSystems() == null)
+      ? SecurityUtil.buildDTServiceName(getUri(), getDefaultPort())
+      : null;
   }
 
   /** @deprecated call #getUri() instead.*/
@@ -264,11 +350,11 @@ public abstract class FileSystem extends Configured implements Closeable {
     String scheme = uri.getScheme();
     String authority = uri.getAuthority();
 
-    if (scheme == null) {                       // no scheme: use default FS
+    if (scheme == null && authority == null) {     // use default FS
       return get(conf);
     }
 
-    if (authority == null) {                       // no authority
+    if (scheme != null && authority == null) {     // no authority
       URI defaultUri = getDefaultUri(conf);
       if (scheme.equals(defaultUri.getScheme())    // if scheme matches default
           && defaultUri.getAuthority() != null) {  // & default has authority
@@ -296,13 +382,12 @@ public abstract class FileSystem extends Configured implements Closeable {
    */
   public static FileSystem newInstance(final URI uri, final Configuration conf,
       final String user) throws IOException, InterruptedException {
-    UserGroupInformation ugi;
-    if (user == null) {
-      ugi = UserGroupInformation.getCurrentUser();
-    } else {
-      ugi = UserGroupInformation.createRemoteUser(user);
-    }
+    String ticketCachePath =
+      conf.get(CommonConfigurationKeys.KERBEROS_TICKET_CACHE_PATH);
+    UserGroupInformation ugi =
+        UserGroupInformation.getBestUGI(ticketCachePath, user);
     return ugi.doAs(new PrivilegedExceptionAction<FileSystem>() {
+      @Override
       public FileSystem run() throws IOException {
         return newInstance(uri,conf); 
       }
@@ -382,68 +467,95 @@ public abstract class FileSystem extends Configured implements Closeable {
   }
     
   /**
-   * Deprecated  - use @link {@link #getDelegationTokens(String)}
    * Get a new delegation token for this file system.
+   * This is an internal method that should have been declared protected
+   * but wasn't historically.
+   * Callers should use {@link #addDelegationTokens(String, Credentials)}
+   * 
    * @param renewer the account name that is allowed to renew the token.
    * @return a new delegation token
    * @throws IOException
    */
-  @InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
-  @Deprecated
+  @InterfaceAudience.Private()
   public Token<?> getDelegationToken(String renewer) throws IOException {
     return null;
   }
   
   /**
-   * Get one or more delegation tokens associated with the filesystem. Normally
-   * a file system returns a single delegation token. A file system that manages
-   * multiple file systems underneath, could return set of delegation tokens for
-   * all the file systems it manages.
+   * Obtain all delegation tokens used by this FileSystem that are not
+   * already present in the given Credentials.  Existing tokens will neither
+   * be verified as valid nor having the given renewer.  Missing tokens will
+   * be acquired and added to the given Credentials.
    * 
-   * @param renewer the account name that is allowed to renew the token.
+   * Default Impl: works for simple fs with its own token
+   * and also for an embedded fs whose tokens are those of its
+   * children file system (i.e. the embedded fs has not tokens of its
+   * own).
+   * 
+   * @param renewer the user allowed to renew the delegation tokens
+   * @param credentials cache in which to add new delegation tokens
    * @return list of new delegation tokens
-   *    If delegation tokens not supported then return a list of size zero.
-   * @throws IOException
-   */
-  @InterfaceAudience.LimitedPrivate( { "HDFS", "MapReduce" })
-  public List<Token<?>> getDelegationTokens(String renewer) throws IOException {
-    return new ArrayList<Token<?>>(0);
-  }
-  
-  /**
-   * @see #getDelegationTokens(String)
-   * This is similar to getDelegationTokens, with the added restriction that if
-   * a token is already present in the passed Credentials object - that token
-   * is returned instead of a new delegation token. 
-   * 
-   * If the token is found to be cached in the Credentials object, this API does
-   * not verify the token validity or the passed in renewer. 
-   * 
-   * 
-   * @param renewer the account name that is allowed to renew the token.
-   * @param credentials a Credentials object containing already knowing 
-   *   delegationTokens.
-   * @return a list of delegation tokens.
    * @throws IOException
    */
   @InterfaceAudience.LimitedPrivate({ "HDFS", "MapReduce" })
-  public List<Token<?>> getDelegationTokens(String renewer,
-      Credentials credentials) throws IOException {
-    List<Token<?>> allTokens = getDelegationTokens(renewer);
-    List<Token<?>> newTokens = new ArrayList<Token<?>>();
-    if (allTokens != null) {
-      for (Token<?> token : allTokens) {
-        Token<?> knownToken = credentials.getToken(token.getService());
-        if (knownToken == null) {
-          newTokens.add(token);
-        } else {
-          newTokens.add(knownToken);
+  public Token<?>[] addDelegationTokens(
+      final String renewer, Credentials credentials) throws IOException {
+    if (credentials == null) {
+      credentials = new Credentials();
+    }
+    final List<Token<?>> tokens = new ArrayList<Token<?>>();
+    collectDelegationTokens(renewer, credentials, tokens);
+    return tokens.toArray(new Token<?>[tokens.size()]);
+  }
+  
+  /**
+   * Recursively obtain the tokens for this FileSystem and all descended
+   * FileSystems as determined by getChildFileSystems().
+   * @param renewer the user allowed to renew the delegation tokens
+   * @param credentials cache in which to add the new delegation tokens
+   * @param tokens list in which to add acquired tokens
+   * @throws IOException
+   */
+  private void collectDelegationTokens(final String renewer,
+                                       final Credentials credentials,
+                                       final List<Token<?>> tokens)
+                                           throws IOException {
+    final String serviceName = getCanonicalServiceName();
+    // Collect token of the this filesystem and then of its embedded children
+    if (serviceName != null) { // fs has token, grab it
+      final Text service = new Text(serviceName);
+      Token<?> token = credentials.getToken(service);
+      if (token == null) {
+        token = getDelegationToken(renewer);
+        if (token != null) {
+          tokens.add(token);
+          credentials.addToken(service, token);
         }
       }
     }
-    return newTokens;
+    // Now collect the tokens from the children
+    final FileSystem[] children = getChildFileSystems();
+    if (children != null) {
+      for (final FileSystem fs : children) {
+        fs.collectDelegationTokens(renewer, credentials, tokens);
+      }
+    }
   }
 
+  /**
+   * Get all the immediate child FileSystems embedded in this FileSystem.
+   * It does not recurse and get grand children.  If a FileSystem
+   * has multiple child FileSystems, then it should return a unique list
+   * of those FileSystems.  Default is to return null to signify no children.
+   * 
+   * @return FileSystems used by this FileSystem
+   */
+  @InterfaceAudience.LimitedPrivate({ "HDFS" })
+  @VisibleForTesting
+  public FileSystem[] getChildFileSystems() {
+    return null;
+  }
+  
   /** create a file with the provided permission
    * The permission of the file is set to be the provided permission as in
    * setPermission, not permission&~umask
@@ -522,7 +634,7 @@ public abstract class FileSystem extends Configured implements Closeable {
       }
       if (uri != null) {
         // canonicalize uri before comparing with this fs
-        uri = NetUtils.getCanonicalUri(uri, getDefaultPort());
+        uri = canonicalizeUri(uri);
         thatAuthority = uri.getAuthority();
         if (thisAuthority == thatAuthority ||       // authorities match
             (thisAuthority != null &&
@@ -558,7 +670,7 @@ public abstract class FileSystem extends Configured implements Closeable {
       throw new IllegalArgumentException("Invalid start or len parameter");
     }
 
-    if (file.getLen() < start) {
+    if (file.getLen() <= start) {
       return new BlockLocation[0];
 
     }
@@ -597,14 +709,22 @@ public abstract class FileSystem extends Configured implements Closeable {
    * Return a set of server default configuration values
    * @return server default configuration values
    * @throws IOException
+   * @deprecated use {@link #getServerDefaults(Path)} instead
    */
+  @Deprecated
   public FsServerDefaults getServerDefaults() throws IOException {
     Configuration conf = getConf();
+    // CRC32 is chosen as default as it is available in all 
+    // releases that support checksum.
+    // The client trash configuration is ignored.
     return new FsServerDefaults(getDefaultBlockSize(), 
         conf.getInt("io.bytes.per.checksum", 512), 
         64 * 1024, 
         getDefaultReplication(),
-        conf.getInt("io.file.buffer.size", 4096));
+        conf.getInt("io.file.buffer.size", 4096),
+        false,
+        CommonConfigurationKeysPublic.FS_TRASH_INTERVAL_DEFAULT,
+        DataChecksum.Type.CRC32);
   }
 
   /**
@@ -709,7 +829,9 @@ public abstract class FileSystem extends Configured implements Closeable {
   public FSDataOutputStream create(Path f, short replication, 
       Progressable progress) throws IOException {
     return create(f, true, 
-                  getConf().getInt("io.file.buffer.size", 4096),
+                  getConf().getInt(
+                      CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_KEY,
+                      CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_DEFAULT),
                   replication,
                   getDefaultBlockSize(f), progress);
   }
@@ -783,7 +905,7 @@ public abstract class FileSystem extends Configured implements Closeable {
                                             long blockSize,
                                             Progressable progress
                                             ) throws IOException {
-    return this.create(f, FsPermission.getDefault().applyUMask(
+    return this.create(f, FsPermission.getFileDefault().applyUMask(
         FsPermission.getUMask(getConf())), overwrite, bufferSize,
         replication, blockSize, progress);
   }
@@ -810,7 +932,60 @@ public abstract class FileSystem extends Configured implements Closeable {
       long blockSize,
       Progressable progress) throws IOException;
   
+  /**
+   * Create an FSDataOutputStream at the indicated Path with write-progress
+   * reporting.
+   * @param f the file name to open
+   * @param permission
+   * @param flags {@link CreateFlag}s to use for this stream.
+   * @param bufferSize the size of the buffer to be used.
+   * @param replication required block replication for the file.
+   * @param blockSize
+   * @param progress
+   * @throws IOException
+   * @see #setPermission(Path, FsPermission)
+   */
+  public FSDataOutputStream create(Path f,
+      FsPermission permission,
+      EnumSet<CreateFlag> flags,
+      int bufferSize,
+      short replication,
+      long blockSize,
+      Progressable progress) throws IOException {
+    return create(f, permission, flags, bufferSize, replication,
+        blockSize, progress, null);
+  }
   
+  /**
+   * Create an FSDataOutputStream at the indicated Path with a custom
+   * checksum option
+   * @param f the file name to open
+   * @param permission
+   * @param flags {@link CreateFlag}s to use for this stream.
+   * @param bufferSize the size of the buffer to be used.
+   * @param replication required block replication for the file.
+   * @param blockSize
+   * @param progress
+   * @param checksumOpt checksum parameter. If null, the values
+   *        found in conf will be used.
+   * @throws IOException
+   * @see #setPermission(Path, FsPermission)
+   */
+  public FSDataOutputStream create(Path f,
+      FsPermission permission,
+      EnumSet<CreateFlag> flags,
+      int bufferSize,
+      short replication,
+      long blockSize,
+      Progressable progress,
+      ChecksumOpt checksumOpt) throws IOException {
+    // Checksum options are ignored by default. The file systems that
+    // implement checksum need to override this method. The full
+    // support is currently only available in DFS.
+    return create(f, permission, flags.contains(CreateFlag.OVERWRITE), 
+        bufferSize, replication, blockSize, progress);
+  }
+
   /*.
    * This create has been added to support the FileContext that processes
    * the permission
@@ -822,7 +997,7 @@ public abstract class FileSystem extends Configured implements Closeable {
   protected FSDataOutputStream primitiveCreate(Path f,
      FsPermission absolutePermission, EnumSet<CreateFlag> flag, int bufferSize,
      short replication, long blockSize, Progressable progress,
-     int bytesPerChecksum) throws IOException {
+     ChecksumOpt checksumOpt) throws IOException {
 
     boolean pathExists = exists(f);
     CreateFlag.validate(f, pathExists, flag);
@@ -910,7 +1085,7 @@ public abstract class FileSystem extends Configured implements Closeable {
       boolean overwrite,
       int bufferSize, short replication, long blockSize,
       Progressable progress) throws IOException {
-    return this.createNonRecursive(f, FsPermission.getDefault(),
+    return this.createNonRecursive(f, FsPermission.getFileDefault(),
         overwrite, bufferSize, replication, blockSize, progress);
   }
 
@@ -934,9 +1109,34 @@ public abstract class FileSystem extends Configured implements Closeable {
    public FSDataOutputStream createNonRecursive(Path f, FsPermission permission,
        boolean overwrite, int bufferSize, short replication, long blockSize,
        Progressable progress) throws IOException {
-     throw new IOException("createNonRecursive unsupported for this filesystem "
-         + this.getClass());
+     return createNonRecursive(f, permission,
+         overwrite ? EnumSet.of(CreateFlag.CREATE, CreateFlag.OVERWRITE)
+             : EnumSet.of(CreateFlag.CREATE), bufferSize,
+             replication, blockSize, progress);
    }
+
+   /**
+    * Opens an FSDataOutputStream at the indicated Path with write-progress
+    * reporting. Same as create(), except fails if parent directory doesn't
+    * already exist.
+    * @param f the file name to open
+    * @param permission
+    * @param flags {@link CreateFlag}s to use for this stream.
+    * @param bufferSize the size of the buffer to be used.
+    * @param replication required block replication for the file.
+    * @param blockSize
+    * @param progress
+    * @throws IOException
+    * @see #setPermission(Path, FsPermission)
+    * @deprecated API only for 0.20-append
+    */
+    @Deprecated
+    public FSDataOutputStream createNonRecursive(Path f, FsPermission permission,
+        EnumSet<CreateFlag> flags, int bufferSize, short replication, long blockSize,
+        Progressable progress) throws IOException {
+      throw new IOException("createNonRecursive unsupported for this filesystem "
+          + this.getClass());
+    }
 
   /**
    * Creates the given Path as a brand-new zero-length file.  If
@@ -982,6 +1182,17 @@ public abstract class FileSystem extends Configured implements Closeable {
    */
   public abstract FSDataOutputStream append(Path f, int bufferSize,
       Progressable progress) throws IOException;
+
+  /**
+   * Concat existing files together.
+   * @param trg the path to the target destination.
+   * @param psrcs the paths to the sources to use for the concatenation.
+   * @throws IOException
+   */
+  public void concat(final Path trg, final Path [] psrcs) throws IOException {
+    throw new UnsupportedOperationException("Not implemented by the " + 
+        getClass().getSimpleName() + " FileSystem implementation");
+  }
 
  /**
    * Get replication.
@@ -1052,7 +1263,7 @@ public abstract class FileSystem extends Configured implements Closeable {
   protected void rename(final Path src, final Path dst,
       final Rename... options) throws IOException {
     // Default implementation
-    final FileStatus srcStatus = getFileStatus(src);
+    final FileStatus srcStatus = getFileLinkStatus(src);
     if (srcStatus == null) {
       throw new FileNotFoundException("rename source " + src + " not found.");
     }
@@ -1068,7 +1279,7 @@ public abstract class FileSystem extends Configured implements Closeable {
 
     FileStatus dstStatus;
     try {
-      dstStatus = getFileStatus(dst);
+      dstStatus = getFileLinkStatus(dst);
     } catch (IOException e) {
       dstStatus = null;
     }
@@ -1149,6 +1360,16 @@ public abstract class FileSystem extends Configured implements Closeable {
     }
     return true;
   }
+  
+  /**
+   * Cancel the deletion of the path when the FileSystem is closed
+   * @param f the path to cancel deletion
+   */
+  public boolean cancelDeleteOnExit(Path f) {
+    synchronized (deleteOnExit) {
+      return deleteOnExit.remove(f);
+    }
+  }
 
   /**
    * Delete all files that were marked as delete-on-exit. This recursively
@@ -1159,7 +1380,9 @@ public abstract class FileSystem extends Configured implements Closeable {
       for (Iterator<Path> iter = deleteOnExit.iterator(); iter.hasNext();) {
         Path path = iter.next();
         try {
-          delete(path, true);
+          if (exists(path)) {
+            delete(path, true);
+          }
         }
         catch (IOException e) {
           LOG.info("Ignoring failure to deleteOnExit for path " + path);
@@ -1235,10 +1458,11 @@ public abstract class FileSystem extends Configured implements Closeable {
   }
 
   final private static PathFilter DEFAULT_FILTER = new PathFilter() {
-      public boolean accept(Path file) {
-        return true;
-      }     
-    };
+    @Override
+    public boolean accept(Path file) {
+      return true;
+    }
+  };
     
   /**
    * List the statuses of the files/directories in the given path if the path is
@@ -1398,144 +1622,25 @@ public abstract class FileSystem extends Configured implements Closeable {
    * @throws IOException
    */
   public FileStatus[] globStatus(Path pathPattern) throws IOException {
-    return globStatus(pathPattern, DEFAULT_FILTER);
+    return new Globber(this, pathPattern, DEFAULT_FILTER).glob();
   }
   
   /**
-   * Return an array of FileStatus objects whose path names match pathPattern
-   * and is accepted by the user-supplied path filter. Results are sorted by
-   * their path names.
-   * Return null if pathPattern has no glob and the path does not exist.
-   * Return an empty array if pathPattern has a glob and no path matches it. 
+   * Return an array of FileStatus objects whose path names match
+   * {@code pathPattern} and is accepted by the user-supplied path filter.
+   * Results are sorted by their path names.
    * 
-   * @param pathPattern
-   *          a regular expression specifying the path pattern
-   * @param filter
-   *          a user-supplied path filter
-   * @return an array of FileStatus objects
+   * @param pathPattern a regular expression specifying the path pattern
+   * @param filter a user-supplied path filter
+   * @return null if {@code pathPattern} has no glob and the path does not exist
+   *         an empty array if {@code pathPattern} has a glob and no path
+   *         matches it else an array of {@link FileStatus} objects matching the
+   *         pattern
    * @throws IOException if any I/O error occurs when fetching file status
    */
   public FileStatus[] globStatus(Path pathPattern, PathFilter filter)
       throws IOException {
-    String filename = pathPattern.toUri().getPath();
-    List<String> filePatterns = GlobExpander.expand(filename);
-    if (filePatterns.size() == 1) {
-      return globStatusInternal(pathPattern, filter);
-    } else {
-      List<FileStatus> results = new ArrayList<FileStatus>();
-      for (String filePattern : filePatterns) {
-        FileStatus[] files = globStatusInternal(new Path(filePattern), filter);
-        for (FileStatus file : files) {
-          results.add(file);
-        }
-      }
-      return results.toArray(new FileStatus[results.size()]);
-    }
-  }
-
-  private FileStatus[] globStatusInternal(Path pathPattern, PathFilter filter)
-      throws IOException {
-    Path[] parents = new Path[1];
-    int level = 0;
-    String filename = pathPattern.toUri().getPath();
-    
-    // path has only zero component
-    if ("".equals(filename) || Path.SEPARATOR.equals(filename)) {
-      return getFileStatus(new Path[]{pathPattern});
-    }
-
-    // path has at least one component
-    String[] components = filename.split(Path.SEPARATOR);
-    // get the first component
-    if (pathPattern.isAbsolute()) {
-      parents[0] = new Path(Path.SEPARATOR);
-      level = 1;
-    } else {
-      parents[0] = new Path(Path.CUR_DIR);
-    }
-
-    // glob the paths that match the parent path, i.e., [0, components.length-1]
-    boolean[] hasGlob = new boolean[]{false};
-    Path[] parentPaths = globPathsLevel(parents, components, level, hasGlob);
-    FileStatus[] results;
-    if (parentPaths == null || parentPaths.length == 0) {
-      results = null;
-    } else {
-      // Now work on the last component of the path
-      GlobFilter fp = new GlobFilter(components[components.length - 1], filter);
-      if (fp.hasPattern()) { // last component has a pattern
-        // list parent directories and then glob the results
-        results = listStatus(parentPaths, fp);
-        hasGlob[0] = true;
-      } else { // last component does not have a pattern
-        // remove the quoting of metachars in a non-regexp expansion
-        String name = unquotePathComponent(components[components.length - 1]);
-        // get all the path names
-        ArrayList<Path> filteredPaths = new ArrayList<Path>(parentPaths.length);
-        for (int i = 0; i < parentPaths.length; i++) {
-          parentPaths[i] = new Path(parentPaths[i], name);
-          if (fp.accept(parentPaths[i])) {
-            filteredPaths.add(parentPaths[i]);
-          }
-        }
-        // get all their statuses
-        results = getFileStatus(
-            filteredPaths.toArray(new Path[filteredPaths.size()]));
-      }
-    }
-
-    // Decide if the pathPattern contains a glob or not
-    if (results == null) {
-      if (hasGlob[0]) {
-        results = new FileStatus[0];
-      }
-    } else {
-      if (results.length == 0 ) {
-        if (!hasGlob[0]) {
-          results = null;
-        }
-      } else {
-        Arrays.sort(results);
-      }
-    }
-    return results;
-  }
-
-  /*
-   * For a path of N components, return a list of paths that match the
-   * components [<code>level</code>, <code>N-1</code>].
-   */
-  private Path[] globPathsLevel(Path[] parents, String[] filePattern,
-      int level, boolean[] hasGlob) throws IOException {
-    if (level == filePattern.length - 1)
-      return parents;
-    if (parents == null || parents.length == 0) {
-      return null;
-    }
-    GlobFilter fp = new GlobFilter(filePattern[level]);
-    if (fp.hasPattern()) {
-      parents = FileUtil.stat2Paths(listStatus(parents, fp));
-      hasGlob[0] = true;
-    } else { // the component does not have a pattern
-      // remove the quoting of metachars in a non-regexp expansion
-      String name = unquotePathComponent(filePattern[level]);
-      for (int i = 0; i < parents.length; i++) {
-        parents[i] = new Path(parents[i], name);
-      }
-    }
-    return globPathsLevel(parents, filePattern, level + 1, hasGlob);
-  }
-
-  /**
-   * The glob filter builds a regexp per path component.  If the component
-   * does not contain a shell metachar, then it falls back to appending the
-   * raw string to the list of built up paths.  This raw path needs to have
-   * the quoting removed.  Ie. convert all occurances of "\X" to "X"
-   * @param name of the path component
-   * @return the unquoted path component
-   */
-  private String unquotePathComponent(String name) {
-    return name.replaceAll("\\\\(.)", "$1");
+    return new Globber(this, pathPattern, filter).glob();
   }
   
   /**
@@ -1695,7 +1800,7 @@ public abstract class FileSystem extends Configured implements Closeable {
    * 
    * Some file systems like LocalFileSystem have an initial workingDir
    * that we use as the starting workingDir. For other file systems
-   * like HDFS there is no built in notion of an inital workingDir.
+   * like HDFS there is no built in notion of an initial workingDir.
    * 
    * @return if there is built in notion of workingDir then it
    * is returned; else a null is returned.
@@ -1708,7 +1813,7 @@ public abstract class FileSystem extends Configured implements Closeable {
    * Call {@link #mkdirs(Path, FsPermission)} with default permission.
    */
   public boolean mkdirs(Path f) throws IOException {
-    return mkdirs(f, FsPermission.getDefault());
+    return mkdirs(f, FsPermission.getDirDefault());
   }
 
   /**
@@ -1894,6 +1999,7 @@ public abstract class FileSystem extends Configured implements Closeable {
    * No more filesystem operations are needed.  Will
    * release any held locks.
    */
+  @Override
   public void close() throws IOException {
     // delete all files that were marked as delete-on-exit.
     processDeleteOnExit();
@@ -1921,8 +2027,12 @@ public abstract class FileSystem extends Configured implements Closeable {
     return getFileStatus(f).getBlockSize();
   }
 
-  /** Return the number of bytes that large input files should be optimally
-   * be split into to minimize i/o time. */
+  /**
+   * Return the number of bytes that large input files should be optimally
+   * be split into to minimize i/o time.
+   * @deprecated use {@link #getDefaultBlockSize(Path)} instead
+   */
+  @Deprecated
   public long getDefaultBlockSize() {
     // default to 32MB: large enough to minimize the impact of seeks
     return getConf().getLong("fs.local.block.size", 32 * 1024 * 1024);
@@ -1940,7 +2050,9 @@ public abstract class FileSystem extends Configured implements Closeable {
 
   /**
    * Get the default replication.
+   * @deprecated use {@link #getDefaultReplication(Path)} instead
    */
+  @Deprecated
   public short getDefaultReplication() { return 1; }
 
   /**
@@ -1963,6 +2075,130 @@ public abstract class FileSystem extends Configured implements Closeable {
   public abstract FileStatus getFileStatus(Path f) throws IOException;
 
   /**
+   * Checks if the user can access a path.  The mode specifies which access
+   * checks to perform.  If the requested permissions are granted, then the
+   * method returns normally.  If access is denied, then the method throws an
+   * {@link AccessControlException}.
+   * <p/>
+   * The default implementation of this method calls {@link #getFileStatus(Path)}
+   * and checks the returned permissions against the requested permissions.
+   * Note that the getFileStatus call will be subject to authorization checks.
+   * Typically, this requires search (execute) permissions on each directory in
+   * the path's prefix, but this is implementation-defined.  Any file system
+   * that provides a richer authorization model (such as ACLs) may override the
+   * default implementation so that it checks against that model instead.
+   * <p>
+   * In general, applications should avoid using this method, due to the risk of
+   * time-of-check/time-of-use race conditions.  The permissions on a file may
+   * change immediately after the access call returns.  Most applications should
+   * prefer running specific file system actions as the desired user represented
+   * by a {@link UserGroupInformation}.
+   *
+   * @param path Path to check
+   * @param mode type of access to check
+   * @throws AccessControlException if access is denied
+   * @throws FileNotFoundException if the path does not exist
+   * @throws IOException see specific implementation
+   */
+  @InterfaceAudience.LimitedPrivate({"HDFS", "Hive"})
+  public void access(Path path, FsAction mode) throws AccessControlException,
+      FileNotFoundException, IOException {
+    checkAccessPermissions(this.getFileStatus(path), mode);
+  }
+
+  /**
+   * This method provides the default implementation of
+   * {@link #access(Path, FsAction)}.
+   *
+   * @param stat FileStatus to check
+   * @param mode type of access to check
+   * @throws IOException for any error
+   */
+  @InterfaceAudience.Private
+  static void checkAccessPermissions(FileStatus stat, FsAction mode)
+      throws IOException {
+    FsPermission perm = stat.getPermission();
+    UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
+    String user = ugi.getShortUserName();
+    List<String> groups = Arrays.asList(ugi.getGroupNames());
+    if (user.equals(stat.getOwner())) {
+      if (perm.getUserAction().implies(mode)) {
+        return;
+      }
+    } else if (groups.contains(stat.getGroup())) {
+      if (perm.getGroupAction().implies(mode)) {
+        return;
+      }
+    } else {
+      if (perm.getOtherAction().implies(mode)) {
+        return;
+      }
+    }
+    throw new AccessControlException(String.format(
+      "Permission denied: user=%s, path=\"%s\":%s:%s:%s%s", user, stat.getPath(),
+      stat.getOwner(), stat.getGroup(), stat.isDirectory() ? "d" : "-", perm));
+  }
+
+  /**
+   * See {@link FileContext#fixRelativePart}
+   */
+  protected Path fixRelativePart(Path p) {
+    if (p.isUriPathAbsolute()) {
+      return p;
+    } else {
+      return new Path(getWorkingDirectory(), p);
+    }
+  }
+
+  /**
+   * See {@link FileContext#createSymlink(Path, Path, boolean)}
+   */
+  public void createSymlink(final Path target, final Path link,
+      final boolean createParent) throws AccessControlException,
+      FileAlreadyExistsException, FileNotFoundException,
+      ParentNotDirectoryException, UnsupportedFileSystemException, 
+      IOException {
+    // Supporting filesystems should override this method
+    throw new UnsupportedOperationException(
+        "Filesystem does not support symlinks!");
+  }
+
+  /**
+   * See {@link FileContext#getFileLinkStatus(Path)}
+   */
+  public FileStatus getFileLinkStatus(final Path f)
+      throws AccessControlException, FileNotFoundException,
+      UnsupportedFileSystemException, IOException {
+    // Supporting filesystems should override this method
+    return getFileStatus(f);
+  }
+
+  /**
+   * See {@link AbstractFileSystem#supportsSymlinks()}
+   */
+  public boolean supportsSymlinks() {
+    return false;
+  }
+
+  /**
+   * See {@link FileContext#getLinkTarget(Path)}
+   */
+  public Path getLinkTarget(Path f) throws IOException {
+    // Supporting filesystems should override this method
+    throw new UnsupportedOperationException(
+        "Filesystem does not support symlinks!");
+  }
+
+  /**
+   * See {@link AbstractFileSystem#getLinkTarget(Path)}
+   */
+  protected Path resolveLink(Path f) throws IOException {
+    // Supporting filesystems should override this method
+    throw new UnsupportedOperationException(
+        "Filesystem does not support symlinks!");
+  }
+
+  /**
    * Get the checksum of a file.
    *
    * @param f The file path
@@ -1971,9 +2207,21 @@ public abstract class FileSystem extends Configured implements Closeable {
    *  in the corresponding FileSystem.
    */
   public FileChecksum getFileChecksum(Path f) throws IOException {
+    return getFileChecksum(f, Long.MAX_VALUE);
+  }
+
+  /**
+   * Get the checksum of a file, from the beginning of the file till the
+   * specific length.
+   * @param f The file path
+   * @param length The length of the file range for checksum calculation
+   * @return The file checksum.
+   */
+  public FileChecksum getFileChecksum(Path f, final long length)
+      throws IOException {
     return null;
   }
-  
+
   /**
    * Set the verify checksum flag. This is only applicable if the 
    * corresponding FileSystem supports checksum. By default doesn't do anything.
@@ -1992,30 +2240,6 @@ public abstract class FileSystem extends Configured implements Closeable {
     //doesn't do anything
   }
 
-  /**
-   * Return a list of file status objects that corresponds to the list of paths
-   * excluding those non-existent paths.
-   * 
-   * @param paths
-   *          the list of paths we want information from
-   * @return a list of FileStatus objects
-   * @throws IOException
-   *           see specific implementation
-   */
-  private FileStatus[] getFileStatus(Path[] paths) throws IOException {
-    if (paths == null) {
-      return null;
-    }
-    ArrayList<FileStatus> results = new ArrayList<FileStatus>(paths.length);
-    for (int i = 0; i < paths.length; i++) {
-      try {
-        results.add(getFileStatus(paths[i]));
-      } catch (FileNotFoundException e) { // do nothing
-      }
-    }
-    return results.toArray(new FileStatus[results.size()]);
-  }
-  
   /**
    * Returns a status object describing the use and capacity of the
    * file system. If the file system has multiple partitions, the
@@ -2078,9 +2302,292 @@ public abstract class FileSystem extends Configured implements Closeable {
       ) throws IOException {
   }
 
+  /**
+   * Create a snapshot with a default name.
+   * @param path The directory where snapshots will be taken.
+   * @return the snapshot path.
+   */
+  public final Path createSnapshot(Path path) throws IOException {
+    return createSnapshot(path, null);
+  }
+
+  /**
+   * Create a snapshot
+   * @param path The directory where snapshots will be taken.
+   * @param snapshotName The name of the snapshot
+   * @return the snapshot path.
+   */
+  public Path createSnapshot(Path path, String snapshotName)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support createSnapshot");
+  }
+  
+  /**
+   * Rename a snapshot
+   * @param path The directory path where the snapshot was taken
+   * @param snapshotOldName Old name of the snapshot
+   * @param snapshotNewName New name of the snapshot
+   * @throws IOException
+   */
+  public void renameSnapshot(Path path, String snapshotOldName,
+      String snapshotNewName) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support renameSnapshot");
+  }
+  
+  /**
+   * Delete a snapshot of a directory
+   * @param path  The directory that the to-be-deleted snapshot belongs to
+   * @param snapshotName The name of the snapshot
+   */
+  public void deleteSnapshot(Path path, String snapshotName)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support deleteSnapshot");
+  }
+  
+  /**
+   * Modifies ACL entries of files and directories.  This method can add new ACL
+   * entries or modify the permissions on existing ACL entries.  All existing
+   * ACL entries that are not specified in this call are retained without
+   * changes.  (Modifications are merged into the current ACL.)
+   *
+   * @param path Path to modify
+   * @param aclSpec List<AclEntry> describing modifications
+   * @throws IOException if an ACL could not be modified
+   */
+  public void modifyAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support modifyAclEntries");
+  }
+
+  /**
+   * Removes ACL entries from files and directories.  Other ACL entries are
+   * retained.
+   *
+   * @param path Path to modify
+   * @param aclSpec List<AclEntry> describing entries to remove
+   * @throws IOException if an ACL could not be modified
+   */
+  public void removeAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support removeAclEntries");
+  }
+
+  /**
+   * Removes all default ACL entries from files and directories.
+   *
+   * @param path Path to modify
+   * @throws IOException if an ACL could not be modified
+   */
+  public void removeDefaultAcl(Path path)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support removeDefaultAcl");
+  }
+
+  /**
+   * Removes all but the base ACL entries of files and directories.  The entries
+   * for user, group, and others are retained for compatibility with permission
+   * bits.
+   *
+   * @param path Path to modify
+   * @throws IOException if an ACL could not be removed
+   */
+  public void removeAcl(Path path)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support removeAcl");
+  }
+
+  /**
+   * Fully replaces ACL of files and directories, discarding all existing
+   * entries.
+   *
+   * @param path Path to modify
+   * @param aclSpec List<AclEntry> describing modifications, must include entries
+   *   for user, group, and others for compatibility with permission bits.
+   * @throws IOException if an ACL could not be modified
+   */
+  public void setAcl(Path path, List<AclEntry> aclSpec) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support setAcl");
+  }
+
+  /**
+   * Gets the ACL of a file or directory.
+   *
+   * @param path Path to get
+   * @return AclStatus describing the ACL of the file or directory
+   * @throws IOException if an ACL could not be read
+   */
+  public AclStatus getAclStatus(Path path) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support getAclStatus");
+  }
+
+  /**
+   * Set an xattr of a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to modify
+   * @param name xattr name.
+   * @param value xattr value.
+   * @throws IOException
+   */
+  public void setXAttr(Path path, String name, byte[] value)
+      throws IOException {
+    setXAttr(path, name, value, EnumSet.of(XAttrSetFlag.CREATE,
+        XAttrSetFlag.REPLACE));
+  }
+
+  /**
+   * Set an xattr of a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to modify
+   * @param name xattr name.
+   * @param value xattr value.
+   * @param flag xattr set flag
+   * @throws IOException
+   */
+  public void setXAttr(Path path, String name, byte[] value,
+      EnumSet<XAttrSetFlag> flag) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support setXAttr");
+  }
+
+  /**
+   * Get an xattr name and value for a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attribute
+   * @param name xattr name.
+   * @return byte[] xattr value.
+   * @throws IOException
+   */
+  public byte[] getXAttr(Path path, String name) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support getXAttr");
+  }
+
+  /**
+   * Get all of the xattr name/value pairs for a file or directory.
+   * Only those xattrs which the logged-in user has permissions to view
+   * are returned.
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attributes
+   * @return Map<String, byte[]> describing the XAttrs of the file or directory
+   * @throws IOException
+   */
+  public Map<String, byte[]> getXAttrs(Path path) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support getXAttrs");
+  }
+
+  /**
+   * Get all of the xattrs name/value pairs for a file or directory.
+   * Only those xattrs which the logged-in user has permissions to view
+   * are returned.
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attributes
+   * @param names XAttr names.
+   * @return Map<String, byte[]> describing the XAttrs of the file or directory
+   * @throws IOException
+   */
+  public Map<String, byte[]> getXAttrs(Path path, List<String> names)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support getXAttrs");
+  }
+
+  /**
+   * Get all of the xattr names for a file or directory.
+   * Only those xattr names which the logged-in user has permissions to view
+   * are returned.
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attributes
+   * @return List<String> of the XAttr names of the file or directory
+   * @throws IOException
+   */
+  public List<String> listXAttrs(Path path) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+            + " doesn't support listXAttrs");
+  }
+
+  /**
+   * Remove an xattr of a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to remove extended attribute
+   * @param name xattr name
+   * @throws IOException
+   */
+  public void removeXAttr(Path path, String name) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support removeXAttr");
+  }
+
+  // making it volatile to be able to do a double checked locking
+  private volatile static boolean FILE_SYSTEMS_LOADED = false;
+
+  private static final Map<String, Class<? extends FileSystem>>
+    SERVICE_FILE_SYSTEMS = new HashMap<String, Class<? extends FileSystem>>();
+
+  private static void loadFileSystems() {
+    synchronized (FileSystem.class) {
+      if (!FILE_SYSTEMS_LOADED) {
+        ServiceLoader<FileSystem> serviceLoader = ServiceLoader.load(FileSystem.class);
+        for (FileSystem fs : serviceLoader) {
+          SERVICE_FILE_SYSTEMS.put(fs.getScheme(), fs.getClass());
+        }
+        FILE_SYSTEMS_LOADED = true;
+      }
+    }
+  }
+
+  public static Class<? extends FileSystem> getFileSystemClass(String scheme,
+      Configuration conf) throws IOException {
+    if (!FILE_SYSTEMS_LOADED) {
+      loadFileSystems();
+    }
+    Class<? extends FileSystem> clazz = null;
+    if (conf != null) {
+      clazz = (Class<? extends FileSystem>) conf.getClass("fs." + scheme + ".impl", null);
+    }
+    if (clazz == null) {
+      clazz = SERVICE_FILE_SYSTEMS.get(scheme);
+    }
+    if (clazz == null) {
+      throw new IOException("No FileSystem for scheme: " + scheme);
+    }
+    return clazz;
+  }
+
   private static FileSystem createFileSystem(URI uri, Configuration conf
       ) throws IOException {
-    Class<?> clazz = conf.getClass("fs." + uri.getScheme() + ".impl", null);
+    Class<?> clazz = getFileSystemClass(uri.getScheme(), conf);
     if (clazz == null) {
       throw new IOException("No FileSystem for scheme: " + uri.getScheme());
     }
@@ -2128,8 +2635,9 @@ public abstract class FileSystem extends Configured implements Closeable {
         }
         
         // now insert the new file system into the map
-        if (map.isEmpty() && !clientFinalizer.isAlive()) {
-          Runtime.getRuntime().addShutdownHook(clientFinalizer);
+        if (map.isEmpty()
+                && !ShutdownHookManager.get().isShutdownInProgress()) {
+          ShutdownHookManager.get().addShutdownHook(clientFinalizer, SHUTDOWN_HOOK_PRIORITY);
         }
         fs.key = key;
         map.put(key, fs);
@@ -2144,13 +2652,7 @@ public abstract class FileSystem extends Configured implements Closeable {
       if (map.containsKey(key) && fs == map.get(key)) {
         map.remove(key);
         toAutoClose.remove(key);
-        if (map.isEmpty() && !clientFinalizer.isAlive()) {
-          if (!Runtime.getRuntime().removeShutdownHook(clientFinalizer)) {
-            LOG.info("Could not cancel cleanup thread, though no " +
-                     "FileSystems are open");
-          }
         }
-      }
     }
 
     synchronized void closeAll() throws IOException {
@@ -2194,7 +2696,8 @@ public abstract class FileSystem extends Configured implements Closeable {
       }
     }
 
-    private class ClientFinalizer extends Thread {
+    private class ClientFinalizer implements Runnable {
+      @Override
       public synchronized void run() {
         try {
           closeAll(true);
@@ -2249,7 +2752,7 @@ public abstract class FileSystem extends Configured implements Closeable {
         this.ugi = UserGroupInformation.getCurrentUser();
       }
 
-      /** {@inheritDoc} */
+      @Override
       public int hashCode() {
         return (scheme + authority).hashCode() + ugi.hashCode() + (int)unique;
       }
@@ -2258,7 +2761,7 @@ public abstract class FileSystem extends Configured implements Closeable {
         return a == b || (a != null && a.equals(b));        
       }
 
-      /** {@inheritDoc} */
+      @Override
       public boolean equals(Object obj) {
         if (obj == this) {
           return true;
@@ -2273,35 +2776,176 @@ public abstract class FileSystem extends Configured implements Closeable {
         return false;        
       }
 
-      /** {@inheritDoc} */
+      @Override
       public String toString() {
         return "("+ugi.toString() + ")@" + scheme + "://" + authority;        
       }
     }
   }
   
+  /**
+   * Tracks statistics about how many reads, writes, and so forth have been
+   * done in a FileSystem.
+   * 
+   * Since there is only one of these objects per FileSystem, there will 
+   * typically be many threads writing to this object.  Almost every operation
+   * on an open file will involve a write to this object.  In contrast, reading
+   * statistics is done infrequently by most programs, and not at all by others.
+   * Hence, this is optimized for writes.
+   * 
+   * Each thread writes to its own thread-local area of memory.  This removes 
+   * contention and allows us to scale up to many, many threads.  To read
+   * statistics, the reader thread totals up the contents of all of the 
+   * thread-local data areas.
+   */
   public static final class Statistics {
+    /**
+     * Statistics data.
+     * 
+     * There is only a single writer to thread-local StatisticsData objects.
+     * Hence, volatile is adequate here-- we do not need AtomicLong or similar
+     * to prevent lost updates.
+     * The Java specification guarantees that updates to volatile longs will
+     * be perceived as atomic with respect to other threads, which is all we
+     * need.
+     */
+    public static class StatisticsData {
+      volatile long bytesRead;
+      volatile long bytesWritten;
+      volatile int readOps;
+      volatile int largeReadOps;
+      volatile int writeOps;
+      /**
+       * Stores a weak reference to the thread owning this StatisticsData.
+       * This allows us to remove StatisticsData objects that pertain to
+       * threads that no longer exist.
+       */
+      final WeakReference<Thread> owner;
+
+      StatisticsData(WeakReference<Thread> owner) {
+        this.owner = owner;
+      }
+
+      /**
+       * Add another StatisticsData object to this one.
+       */
+      void add(StatisticsData other) {
+        this.bytesRead += other.bytesRead;
+        this.bytesWritten += other.bytesWritten;
+        this.readOps += other.readOps;
+        this.largeReadOps += other.largeReadOps;
+        this.writeOps += other.writeOps;
+      }
+
+      /**
+       * Negate the values of all statistics.
+       */
+      void negate() {
+        this.bytesRead = -this.bytesRead;
+        this.bytesWritten = -this.bytesWritten;
+        this.readOps = -this.readOps;
+        this.largeReadOps = -this.largeReadOps;
+        this.writeOps = -this.writeOps;
+      }
+
+      @Override
+      public String toString() {
+        return bytesRead + " bytes read, " + bytesWritten + " bytes written, "
+            + readOps + " read ops, " + largeReadOps + " large read ops, "
+            + writeOps + " write ops";
+      }
+      
+      public long getBytesRead() {
+        return bytesRead;
+      }
+      
+      public long getBytesWritten() {
+        return bytesWritten;
+      }
+      
+      public int getReadOps() {
+        return readOps;
+      }
+      
+      public int getLargeReadOps() {
+        return largeReadOps;
+      }
+      
+      public int getWriteOps() {
+        return writeOps;
+      }
+    }
+
+    private interface StatisticsAggregator<T> {
+      void accept(StatisticsData data);
+      T aggregate();
+    }
+
     private final String scheme;
-    private AtomicLong bytesRead = new AtomicLong();
-    private AtomicLong bytesWritten = new AtomicLong();
-    private AtomicInteger readOps = new AtomicInteger();
-    private AtomicInteger largeReadOps = new AtomicInteger();
-    private AtomicInteger writeOps = new AtomicInteger();
+
+    /**
+     * rootData is data that doesn't belong to any thread, but will be added
+     * to the totals.  This is useful for making copies of Statistics objects,
+     * and for storing data that pertains to threads that have been garbage
+     * collected.  Protected by the Statistics lock.
+     */
+    private final StatisticsData rootData;
+
+    /**
+     * Thread-local data.
+     */
+    private final ThreadLocal<StatisticsData> threadData;
     
+    /**
+     * List of all thread-local data areas.  Protected by the Statistics lock.
+     */
+    private LinkedList<StatisticsData> allData;
+
     public Statistics(String scheme) {
       this.scheme = scheme;
+      this.rootData = new StatisticsData(null);
+      this.threadData = new ThreadLocal<StatisticsData>();
+      this.allData = null;
     }
 
     /**
      * Copy constructor.
      * 
-     * @param st
-     *          The input Statistics object which is cloned.
+     * @param other    The input Statistics object which is cloned.
      */
-    public Statistics(Statistics st) {
-      this.scheme = st.scheme;
-      this.bytesRead = new AtomicLong(st.bytesRead.longValue());
-      this.bytesWritten = new AtomicLong(st.bytesWritten.longValue());
+    public Statistics(Statistics other) {
+      this.scheme = other.scheme;
+      this.rootData = new StatisticsData(null);
+      other.visitAll(new StatisticsAggregator<Void>() {
+        @Override
+        public void accept(StatisticsData data) {
+          rootData.add(data);
+        }
+
+        public Void aggregate() {
+          return null;
+        }
+      });
+      this.threadData = new ThreadLocal<StatisticsData>();
+    }
+
+    /**
+     * Get or create the thread-local data associated with the current thread.
+     */
+    public StatisticsData getThreadStatistics() {
+      StatisticsData data = threadData.get();
+      if (data == null) {
+        data = new StatisticsData(
+            new WeakReference<Thread>(Thread.currentThread()));
+        threadData.set(data);
+        synchronized(this) {
+          if (allData == null) {
+            allData = new LinkedList<StatisticsData>();
+          }
+          allData.add(data);
+        }
+      }
+      return data;
     }
 
     /**
@@ -2309,7 +2953,7 @@ public abstract class FileSystem extends Configured implements Closeable {
      * @param newBytes the additional bytes read
      */
     public void incrementBytesRead(long newBytes) {
-      bytesRead.getAndAdd(newBytes);
+      getThreadStatistics().bytesRead += newBytes;
     }
     
     /**
@@ -2317,7 +2961,7 @@ public abstract class FileSystem extends Configured implements Closeable {
      * @param newBytes the additional bytes written
      */
     public void incrementBytesWritten(long newBytes) {
-      bytesWritten.getAndAdd(newBytes);
+      getThreadStatistics().bytesWritten += newBytes;
     }
     
     /**
@@ -2325,7 +2969,7 @@ public abstract class FileSystem extends Configured implements Closeable {
      * @param count number of read operations
      */
     public void incrementReadOps(int count) {
-      readOps.getAndAdd(count);
+      getThreadStatistics().readOps += count;
     }
 
     /**
@@ -2333,7 +2977,7 @@ public abstract class FileSystem extends Configured implements Closeable {
      * @param count number of large read operations
      */
     public void incrementLargeReadOps(int count) {
-      largeReadOps.getAndAdd(count);
+      getThreadStatistics().largeReadOps += count;
     }
 
     /**
@@ -2341,7 +2985,38 @@ public abstract class FileSystem extends Configured implements Closeable {
      * @param count number of write operations
      */
     public void incrementWriteOps(int count) {
-      writeOps.getAndAdd(count);
+      getThreadStatistics().writeOps += count;
+    }
+
+    /**
+     * Apply the given aggregator to all StatisticsData objects associated with
+     * this Statistics object.
+     *
+     * For each StatisticsData object, we will call accept on the visitor.
+     * Finally, at the end, we will call aggregate to get the final total. 
+     *
+     * @param         The visitor to use.
+     * @return        The total.
+     */
+    private synchronized <T> T visitAll(StatisticsAggregator<T> visitor) {
+      visitor.accept(rootData);
+      if (allData != null) {
+        for (Iterator<StatisticsData> iter = allData.iterator();
+            iter.hasNext(); ) {
+          StatisticsData data = iter.next();
+          visitor.accept(data);
+          if (data.owner.get() == null) {
+            /*
+             * If the thread that created this thread-local data no
+             * longer exists, remove the StatisticsData from our list
+             * and fold the values into rootData.
+             */
+            rootData.add(data);
+            iter.remove();
+          }
+        }
+      }
+      return visitor.aggregate();
     }
 
     /**
@@ -2349,7 +3024,18 @@ public abstract class FileSystem extends Configured implements Closeable {
      * @return the number of bytes
      */
     public long getBytesRead() {
-      return bytesRead.get();
+      return visitAll(new StatisticsAggregator<Long>() {
+        private long bytesRead = 0;
+
+        @Override
+        public void accept(StatisticsData data) {
+          bytesRead += data.bytesRead;
+        }
+
+        public Long aggregate() {
+          return bytesRead;
+        }
+      });
     }
     
     /**
@@ -2357,7 +3043,18 @@ public abstract class FileSystem extends Configured implements Closeable {
      * @return the number of bytes
      */
     public long getBytesWritten() {
-      return bytesWritten.get();
+      return visitAll(new StatisticsAggregator<Long>() {
+        private long bytesWritten = 0;
+
+        @Override
+        public void accept(StatisticsData data) {
+          bytesWritten += data.bytesWritten;
+        }
+
+        public Long aggregate() {
+          return bytesWritten;
+        }
+      });
     }
     
     /**
@@ -2365,7 +3062,19 @@ public abstract class FileSystem extends Configured implements Closeable {
      * @return number of read operations
      */
     public int getReadOps() {
-      return readOps.get() + largeReadOps.get();
+      return visitAll(new StatisticsAggregator<Integer>() {
+        private int readOps = 0;
+
+        @Override
+        public void accept(StatisticsData data) {
+          readOps += data.readOps;
+          readOps += data.largeReadOps;
+        }
+
+        public Integer aggregate() {
+          return readOps;
+        }
+      });
     }
 
     /**
@@ -2374,7 +3083,18 @@ public abstract class FileSystem extends Configured implements Closeable {
      * @return number of large read operations
      */
     public int getLargeReadOps() {
-      return largeReadOps.get();
+      return visitAll(new StatisticsAggregator<Integer>() {
+        private int largeReadOps = 0;
+
+        @Override
+        public void accept(StatisticsData data) {
+          largeReadOps += data.largeReadOps;
+        }
+
+        public Integer aggregate() {
+          return largeReadOps;
+        }
+      });
     }
 
     /**
@@ -2383,21 +3103,70 @@ public abstract class FileSystem extends Configured implements Closeable {
      * @return number of write operations
      */
     public int getWriteOps() {
-      return writeOps.get();
+      return visitAll(new StatisticsAggregator<Integer>() {
+        private int writeOps = 0;
+
+        @Override
+        public void accept(StatisticsData data) {
+          writeOps += data.writeOps;
+        }
+
+        public Integer aggregate() {
+          return writeOps;
+        }
+      });
     }
 
+
+    @Override
     public String toString() {
-      return bytesRead + " bytes read, " + bytesWritten + " bytes written, "
-          + readOps + " read ops, " + largeReadOps + " large read ops, "
-          + writeOps + " write ops";
+      return visitAll(new StatisticsAggregator<String>() {
+        private StatisticsData total = new StatisticsData(null);
+
+        @Override
+        public void accept(StatisticsData data) {
+          total.add(data);
+        }
+
+        public String aggregate() {
+          return total.toString();
+        }
+      });
     }
-    
+
     /**
-     * Reset the counts of bytes to 0.
+     * Resets all statistics to 0.
+     *
+     * In order to reset, we add up all the thread-local statistics data, and
+     * set rootData to the negative of that.
+     *
+     * This may seem like a counterintuitive way to reset the statsitics.  Why
+     * can't we just zero out all the thread-local data?  Well, thread-local
+     * data can only be modified by the thread that owns it.  If we tried to
+     * modify the thread-local data from this thread, our modification might get
+     * interleaved with a read-modify-write operation done by the thread that
+     * owns the data.  That would result in our update getting lost.
+     *
+     * The approach used here avoids this problem because it only ever reads
+     * (not writes) the thread-local data.  Both reads and writes to rootData
+     * are done under the lock, so we're free to modify rootData from any thread
+     * that holds the lock.
      */
     public void reset() {
-      bytesWritten.set(0);
-      bytesRead.set(0);
+      visitAll(new StatisticsAggregator<Void>() {
+        private StatisticsData total = new StatisticsData(null);
+
+        @Override
+        public void accept(StatisticsData data) {
+          total.add(data);
+        }
+
+        public Void aggregate() {
+          total.negate();
+          rootData.add(total);
+          return null;
+        }
+      });
     }
     
     /**

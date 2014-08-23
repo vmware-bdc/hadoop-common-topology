@@ -21,12 +21,14 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Options.ChecksumOpt;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.security.token.Token;
@@ -61,7 +63,7 @@ public abstract class DelegateToFileSystem extends AbstractFileSystem {
   public FSDataOutputStream createInternal (Path f,
       EnumSet<CreateFlag> flag, FsPermission absolutePermission, int bufferSize,
       short replication, long blockSize, Progressable progress,
-      int bytesPerChecksum, boolean createParent) throws IOException {
+      ChecksumOpt checksumOpt, boolean createParent) throws IOException {
     checkPath(f);
     
     // Default impl assumes that permissions do not matter
@@ -80,8 +82,8 @@ public abstract class DelegateToFileSystem extends AbstractFileSystem {
       }
       // parent does exist - go ahead with create of file.
     }
-    return fsImpl.primitiveCreate(f, absolutePermission, flag, 
-        bufferSize, replication, blockSize, progress, bytesPerChecksum);
+    return fsImpl.primitiveCreate(f, absolutePermission, flag,
+        bufferSize, replication, blockSize, progress, checksumOpt);
   }
 
   @Override
@@ -111,7 +113,14 @@ public abstract class DelegateToFileSystem extends AbstractFileSystem {
 
   @Override
   public FileStatus getFileLinkStatus(final Path f) throws IOException {
-    return getFileStatus(f);
+    FileStatus status = fsImpl.getFileLinkStatus(f);
+    // FileSystem#getFileLinkStatus qualifies the link target
+    // AbstractFileSystem needs to return it plain since it's qualified
+    // in FileContext, so re-get and set the plain target
+    if (status.isSymlink()) {
+      status.setSymlink(fsImpl.getLinkTarget(f));
+    }
+    return status;
   }
 
   @Override
@@ -122,6 +131,11 @@ public abstract class DelegateToFileSystem extends AbstractFileSystem {
   @Override
   public FsServerDefaults getServerDefaults() throws IOException {
     return fsImpl.getServerDefaults();
+  }
+  
+  @Override
+  public Path getHomeDirectory() {
+    return fsImpl.getHomeDirectory();
   }
 
   @Override
@@ -192,22 +206,18 @@ public abstract class DelegateToFileSystem extends AbstractFileSystem {
 
   @Override
   public boolean supportsSymlinks() {
-    return false;
+    return fsImpl.supportsSymlinks();
   }  
   
   @Override
   public void createSymlink(Path target, Path link, boolean createParent) 
       throws IOException { 
-    throw new IOException("File system does not support symlinks");
+    fsImpl.createSymlink(target, link, createParent);
   } 
   
   @Override
   public Path getLinkTarget(final Path f) throws IOException {
-    /* We should never get here. Any file system that threw an 
-     * UnresolvedLinkException, causing this function to be called,
-     * should override getLinkTarget. 
-     */
-    throw new AssertionError();
+    return fsImpl.getLinkTarget(f);
   }
 
   @Override //AbstractFileSystem
@@ -217,6 +227,6 @@ public abstract class DelegateToFileSystem extends AbstractFileSystem {
   
   @Override //AbstractFileSystem
   public List<Token<?>> getDelegationTokens(String renewer) throws IOException {
-    return fsImpl.getDelegationTokens(renewer);
+    return Arrays.asList(fsImpl.addDelegationTokens(renewer, null));
   }
 }

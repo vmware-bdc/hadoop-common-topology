@@ -17,15 +17,18 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
 
 /** Manage name-to-serial-number maps for users and groups. */
 class SerialNumberManager {
   /** This is the only instance of {@link SerialNumberManager}.*/
   static final SerialNumberManager INSTANCE = new SerialNumberManager();
 
-  private SerialNumberMap<String> usermap = new SerialNumberMap<String>();
-  private SerialNumberMap<String> groupmap = new SerialNumberMap<String>();
+  private final SerialNumberMap<String> usermap = new SerialNumberMap<String>();
+  private final SerialNumberMap<String> groupmap = new SerialNumberMap<String>();
 
   private SerialNumberManager() {}
 
@@ -40,28 +43,36 @@ class SerialNumberManager {
   }
 
   private static class SerialNumberMap<T> {
-    private int max = 0;
-    private int nextSerialNumber() {return max++;}
+    private final AtomicInteger max = new AtomicInteger(1);
+    private final ConcurrentMap<T, Integer> t2i = new ConcurrentHashMap<T, Integer>();
+    private final ConcurrentMap<Integer, T> i2t = new ConcurrentHashMap<Integer, T>();
 
-    private Map<T, Integer> t2i = new HashMap<T, Integer>();
-    private Map<Integer, T> i2t = new HashMap<Integer, T>();
-
-    synchronized int get(T t) {
+    int get(T t) {
+      if (t == null) {
+        return 0;
+      }
       Integer sn = t2i.get(t);
       if (sn == null) {
-        sn = nextSerialNumber();
-        t2i.put(t, sn);
+        sn = max.getAndIncrement();
+        Integer old = t2i.putIfAbsent(t, sn);
+        if (old != null) {
+          return old;
+        }
         i2t.put(sn, t);
       }
       return sn;
     }
 
-    synchronized T get(int i) {
-      if (!i2t.containsKey(i)) {
+    T get(int i) {
+      if (i == 0) {
+        return null;
+      }
+      T t = i2t.get(i);
+      if (t == null) {
         throw new IllegalStateException("!i2t.containsKey(" + i
             + "), this=" + this);
       }
-      return i2t.get(i);
+      return t;
     }
 
     @Override

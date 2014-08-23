@@ -21,10 +21,9 @@ package org.apache.hadoop.mapreduce.v2.hs;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.Set;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -36,21 +35,23 @@ import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.JobState;
+import org.apache.hadoop.mapreduce.v2.app.ClusterInfo;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
-import org.apache.hadoop.mapreduce.v2.hs.HistoryFileManager.MetaInfo;
+import org.apache.hadoop.mapreduce.v2.hs.HistoryFileManager.HistoryFileInfo;
 import org.apache.hadoop.mapreduce.v2.hs.webapp.dao.JobsInfo;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JHAdminConfig;
+import org.apache.hadoop.service.AbstractService;
+import org.apache.hadoop.service.Service;
 import org.apache.hadoop.util.ReflectionUtils;
-import org.apache.hadoop.yarn.Clock;
-import org.apache.hadoop.yarn.ClusterInfo;
-import org.apache.hadoop.yarn.YarnException;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.event.EventHandler;
+import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
-import org.apache.hadoop.yarn.service.AbstractService;
-import org.apache.hadoop.yarn.service.Service;
+import org.apache.hadoop.yarn.security.client.ClientToAMTokenSecretManager;
+import org.apache.hadoop.yarn.util.Clock;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
@@ -66,107 +67,89 @@ public class JobHistory extends AbstractService implements HistoryContext {
   // Time interval for the move thread.
   private long moveThreadInterval;
 
-  // Number of move threads.
-  private int numMoveThreads;
-
   private Configuration conf;
 
-  private Thread moveIntermediateToDoneThread = null;
-  private MoveIntermediateToDoneRunnable moveIntermediateToDoneRunnable = null;
-
-  private ScheduledThreadPoolExecutor cleanerScheduledExecutor = null;
+  private ScheduledThreadPoolExecutor scheduledExecutor = null;
 
   private HistoryStorage storage = null;
   private HistoryFileManager hsManager = null;
-
+  ScheduledFuture<?> futureHistoryCleaner = null;
+  
+  //History job cleaner interval
+  private long cleanerInterval;
+  
   @Override
-  public void init(Configuration conf) throws YarnException {
+  protected void serviceInit(Configuration conf) throws Exception {
     LOG.info("JobHistory Init");
     this.conf = conf;
-    this.appID = RecordFactoryProvider.getRecordFactory(conf)
-        .newRecordInstance(ApplicationId.class);
+    this.appID = ApplicationId.newInstance(0, 0);
     this.appAttemptID = RecordFactoryProvider.getRecordFactory(conf)
         .newRecordInstance(ApplicationAttemptId.class);
 
     moveThreadInterval = conf.getLong(
         JHAdminConfig.MR_HISTORY_MOVE_INTERVAL_MS,
         JHAdminConfig.DEFAULT_MR_HISTORY_MOVE_INTERVAL_MS);
-    numMoveThreads = conf.getInt(JHAdminConfig.MR_HISTORY_MOVE_THREAD_COUNT,
-        JHAdminConfig.DEFAULT_MR_HISTORY_MOVE_THREAD_COUNT);
 
-    hsManager = new HistoryFileManager();
+    hsManager = createHistoryFileManager();
     hsManager.init(conf);
     try {
       hsManager.initExisting();
     } catch (IOException e) {
-      throw new YarnException("Failed to intialize existing directories", e);
+      throw new YarnRuntimeException("Failed to intialize existing directories", e);
     }
 
-    storage = ReflectionUtils.newInstance(conf.getClass(
-        JHAdminConfig.MR_HISTORY_STORAGE, CachedHistoryStorage.class,
-        HistoryStorage.class), conf);
+    storage = createHistoryStorage();
+    
     if (storage instanceof Service) {
       ((Service) storage).init(conf);
     }
     storage.setHistoryFileManager(hsManager);
 
-    super.init(conf);
+    super.serviceInit(conf);
+  }
+
+  protected HistoryStorage createHistoryStorage() {
+    return ReflectionUtils.newInstance(conf.getClass(
+        JHAdminConfig.MR_HISTORY_STORAGE, CachedHistoryStorage.class,
+        HistoryStorage.class), conf);
+  }
+  
+  protected HistoryFileManager createHistoryFileManager() {
+    return new HistoryFileManager();
   }
 
   @Override
-  public void start() {
+  protected void serviceStart() throws Exception {
     hsManager.start();
     if (storage instanceof Service) {
       ((Service) storage).start();
     }
 
-    // Start moveIntermediatToDoneThread
-    moveIntermediateToDoneRunnable = new MoveIntermediateToDoneRunnable(
-        moveThreadInterval, numMoveThreads);
-    moveIntermediateToDoneThread = new Thread(moveIntermediateToDoneRunnable);
-    moveIntermediateToDoneThread.setName("MoveIntermediateToDoneScanner");
-    moveIntermediateToDoneThread.start();
+    scheduledExecutor = new ScheduledThreadPoolExecutor(2,
+        new ThreadFactoryBuilder().setNameFormat("Log Scanner/Cleaner #%d")
+            .build());
+
+    scheduledExecutor.scheduleAtFixedRate(new MoveIntermediateToDoneRunnable(),
+        moveThreadInterval, moveThreadInterval, TimeUnit.MILLISECONDS);
 
     // Start historyCleaner
-    boolean startCleanerService = conf.getBoolean(
-        JHAdminConfig.MR_HISTORY_CLEANER_ENABLE, true);
-    if (startCleanerService) {
-      long maxAgeOfHistoryFiles = conf.getLong(
-          JHAdminConfig.MR_HISTORY_MAX_AGE_MS,
-          JHAdminConfig.DEFAULT_MR_HISTORY_MAX_AGE);
-      cleanerScheduledExecutor = new ScheduledThreadPoolExecutor(1,
-          new ThreadFactoryBuilder().setNameFormat("LogCleaner").build());
-      long runInterval = conf.getLong(
-          JHAdminConfig.MR_HISTORY_CLEANER_INTERVAL_MS,
-          JHAdminConfig.DEFAULT_MR_HISTORY_CLEANER_INTERVAL_MS);
-      cleanerScheduledExecutor
-          .scheduleAtFixedRate(new HistoryCleaner(maxAgeOfHistoryFiles),
-              30 * 1000l, runInterval, TimeUnit.MILLISECONDS);
-    }
-    super.start();
+    scheduleHistoryCleaner();
+    super.serviceStart();
   }
 
+  protected int getInitDelaySecs() {
+    return 30;
+  }
+  
   @Override
-  public void stop() {
+  protected void serviceStop() throws Exception {
     LOG.info("Stopping JobHistory");
-    if (moveIntermediateToDoneThread != null) {
-      LOG.info("Stopping move thread");
-      moveIntermediateToDoneRunnable.stop();
-      moveIntermediateToDoneThread.interrupt();
-      try {
-        LOG.info("Joining on move thread");
-        moveIntermediateToDoneThread.join();
-      } catch (InterruptedException e) {
-        LOG.info("Interrupted while stopping move thread");
-      }
-    }
-
-    if (cleanerScheduledExecutor != null) {
-      LOG.info("Stopping History Cleaner");
-      cleanerScheduledExecutor.shutdown();
+    if (scheduledExecutor != null) {
+      LOG.info("Stopping History Cleaner/Move To Done");
+      scheduledExecutor.shutdown();
       boolean interrupted = false;
       long currentTime = System.currentTimeMillis();
-      while (!cleanerScheduledExecutor.isShutdown()
+      while (!scheduledExecutor.isShutdown()
           && System.currentTimeMillis() > currentTime + 1000l && !interrupted) {
         try {
           Thread.sleep(20);
@@ -174,15 +157,19 @@ public class JobHistory extends AbstractService implements HistoryContext {
           interrupted = true;
         }
       }
-      if (!cleanerScheduledExecutor.isShutdown()) {
-        LOG.warn("HistoryCleanerService shutdown may not have succeeded");
+      if (!scheduledExecutor.isShutdown()) {
+        LOG.warn("HistoryCleanerService/move to done shutdown may not have " +
+        		"succeeded, Forcing a shutdown");
+        scheduledExecutor.shutdownNow();
       }
     }
-    if (storage instanceof Service) {
+    if (storage != null && storage instanceof Service) {
       ((Service) storage).stop();
     }
-    hsManager.stop();
-    super.stop();
+    if (hsManager != null) {
+      hsManager.stop();
+    }
+    super.serviceStop();
   }
 
   public JobHistory() {
@@ -195,68 +182,34 @@ public class JobHistory extends AbstractService implements HistoryContext {
   }
 
   private class MoveIntermediateToDoneRunnable implements Runnable {
-
-    private long sleepTime;
-    private ThreadPoolExecutor moveToDoneExecutor = null;
-    private boolean running = false;
-
-    public synchronized void stop() {
-      running = false;
-      notify();
-    }
-
-    MoveIntermediateToDoneRunnable(long sleepTime, int numMoveThreads) {
-      this.sleepTime = sleepTime;
-      ThreadFactory tf = new ThreadFactoryBuilder().setNameFormat(
-          "MoveIntermediateToDone Thread #%d").build();
-      moveToDoneExecutor = new ThreadPoolExecutor(1, numMoveThreads, 1,
-          TimeUnit.HOURS, new LinkedBlockingQueue<Runnable>(), tf);
-      running = true;
-    }
-
     @Override
     public void run() {
-      Thread.currentThread().setName("IntermediateHistoryScanner");
       try {
-        while (true) {
-          LOG.info("Starting scan to move intermediate done files");
-          for (final MetaInfo metaInfo : hsManager.getIntermediateMetaInfos()) {
-            moveToDoneExecutor.execute(new Runnable() {
-              @Override
-              public void run() {
-                try {
-                  hsManager.moveToDone(metaInfo);
-                } catch (IOException e) {
-                  LOG.info(
-                      "Failed to process metaInfo for job: "
-                          + metaInfo.getJobId(), e);
-                }
-              }
-            });
-          }
-          synchronized (this) {
-            try {
-              this.wait(sleepTime);
-            } catch (InterruptedException e) {
-              LOG.info("IntermediateHistoryScannerThread interrupted");
-            }
-            if (!running) {
-              break;
-            }
-          }
-        }
+        LOG.info("Starting scan to move intermediate done files");
+        hsManager.scanIntermediateDirectory();
       } catch (IOException e) {
-        LOG.warn("Unable to get a list of intermediate files to be moved");
-        // TODO Shut down the entire process!!!!
+        LOG.error("Error while scanning intermediate done dir ", e);
       }
+    }
+  }
+  
+  private class HistoryCleaner implements Runnable {
+    public void run() {
+      LOG.info("History Cleaner started");
+      try {
+        hsManager.clean();
+      } catch (IOException e) {
+        LOG.warn("Error trying to clean up ", e);
+      }
+      LOG.info("History Cleaner complete");
     }
   }
 
   /**
    * Helper method for test cases.
    */
-  MetaInfo getJobMetaInfo(JobId jobId) throws IOException {
-    return hsManager.getMetaInfo(jobId);
+  HistoryFileInfo getJobFileInfo(JobId jobId) throws IOException {
+    return hsManager.getFileInfo(jobId);
   }
 
   @Override
@@ -282,6 +235,25 @@ public class JobHistory extends AbstractService implements HistoryContext {
     return storage.getAllPartialJobs();
   }
 
+  public void refreshLoadedJobCache() {
+    if (getServiceState() == STATE.STARTED) {
+      if (storage instanceof CachedHistoryStorage) {
+        ((CachedHistoryStorage) storage).refreshLoadedJobCache();
+      } else {
+        throw new UnsupportedOperationException(storage.getClass().getName()
+            + " is expected to be an instance of "
+            + CachedHistoryStorage.class.getName());
+      }
+    } else {
+      LOG.warn("Failed to execute refreshLoadedJobCache: JobHistory service is not started");
+    }
+  }
+
+  @VisibleForTesting
+  HistoryStorage getHistoryStorage() {
+    return storage;
+  }
+  
   /**
    * Look for a set of partial jobs.
    * 
@@ -313,25 +285,43 @@ public class JobHistory extends AbstractService implements HistoryContext {
         fBegin, fEnd, jobState);
   }
 
-  public class HistoryCleaner implements Runnable {
-    long maxAgeMillis;
-
-    public HistoryCleaner(long maxAge) {
-      this.maxAgeMillis = maxAge;
-    }
-
-    public void run() {
-      LOG.info("History Cleaner started");
-      long cutoff = System.currentTimeMillis() - maxAgeMillis;
-      try {
-        hsManager.clean(cutoff, storage);
-      } catch (IOException e) {
-        LOG.warn("Error trying to clean up ", e);
+  public void refreshJobRetentionSettings() {
+    if (getServiceState() == STATE.STARTED) {
+      conf = createConf();
+      long maxHistoryAge = conf.getLong(JHAdminConfig.MR_HISTORY_MAX_AGE_MS,
+          JHAdminConfig.DEFAULT_MR_HISTORY_MAX_AGE);
+      hsManager.setMaxHistoryAge(maxHistoryAge);
+      if (futureHistoryCleaner != null) {
+        futureHistoryCleaner.cancel(false);
       }
-      LOG.info("History Cleaner complete");
+      futureHistoryCleaner = null;
+      scheduleHistoryCleaner();
+    } else {
+      LOG.warn("Failed to execute refreshJobRetentionSettings : Job History service is not started");
     }
   }
 
+  private void scheduleHistoryCleaner() {
+    boolean startCleanerService = conf.getBoolean(
+        JHAdminConfig.MR_HISTORY_CLEANER_ENABLE, true);
+    if (startCleanerService) {
+      cleanerInterval = conf.getLong(
+          JHAdminConfig.MR_HISTORY_CLEANER_INTERVAL_MS,
+          JHAdminConfig.DEFAULT_MR_HISTORY_CLEANER_INTERVAL_MS);
+
+      futureHistoryCleaner = scheduledExecutor.scheduleAtFixedRate(
+          new HistoryCleaner(), getInitDelaySecs() * 1000l, cleanerInterval,
+          TimeUnit.MILLISECONDS);
+    }
+  }
+
+  protected Configuration createConf() {
+    return new Configuration();
+  }
+  
+  public long getCleanerInterval() {
+    return cleanerInterval;
+  }
   // TODO AppContext - Not Required
   private ApplicationAttemptId appAttemptID;
 
@@ -377,6 +367,36 @@ public class JobHistory extends AbstractService implements HistoryContext {
   // TODO AppContext - Not Required
   @Override
   public ClusterInfo getClusterInfo() {
+    return null;
+  }
+
+  // TODO AppContext - Not Required
+  @Override
+  public Set<String> getBlacklistedNodes() {
+    // Not Implemented
+    return null;
+  }
+  @Override
+  public ClientToAMTokenSecretManager getClientToAMTokenSecretManager() {
+    // Not implemented.
+    return null;
+  }
+
+  @Override
+  public boolean isLastAMRetry() {
+    // bogus - Not Required
+    return false;
+  }
+
+  @Override
+  public boolean hasSuccessfullyUnregistered() {
+    // bogus - Not Required
+    return true;
+  }
+
+  @Override
+  public String getNMHostname() {
+    // bogus - Not Required
     return null;
   }
 }

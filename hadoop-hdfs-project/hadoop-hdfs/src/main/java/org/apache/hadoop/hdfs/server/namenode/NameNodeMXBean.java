@@ -17,8 +17,11 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import java.util.Map;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 
 /**
  * This is the JMX management interface for namenode information
@@ -33,7 +36,13 @@ public interface NameNodeMXBean {
    * @return the version
    */
   public String getVersion();
-  
+
+  /**
+   * Get the version of software running on the Namenode
+   * @return a string representing the version
+   */
+  public String getSoftwareVersion();
+
   /**
    * Gets the used space by data nodes.
    * 
@@ -70,7 +79,14 @@ public interface NameNodeMXBean {
    * @return true, if upgrade is finalized
    */
   public boolean isUpgradeFinalized();
-  
+
+  /**
+   * Gets the RollingUpgrade information
+   *
+   * @return Rolling upgrade information
+   */
+  public RollingUpgradeInfo.Bean getRollingUpgradeStatus();
+
   /**
    * Gets total used space by data nodes for non DFS purposes such as storing
    * temporary files on the local file system
@@ -93,6 +109,16 @@ public interface NameNodeMXBean {
    * @return the percentage of the remaining space on the cluster
    */
   public float getPercentRemaining();
+
+  /**
+   * Returns the amount of cache used by the datanode (in bytes).
+   */
+  public long getCacheUsed();
+
+  /**
+   * Returns the total cache capacity of the datanode (in bytes).
+   */
+  public long getCacheCapacity();
   
   /**
    * Get the total space used by the block pools of this namenode
@@ -174,4 +200,60 @@ public interface NameNodeMXBean {
    * @return the name dir status information, as a JSON string.
    */
   public String getNameDirStatuses();
+
+  /**
+   * Get Max, Median, Min and Standard Deviation of DataNodes usage.
+   *
+   * @return the DataNode usage information, as a JSON string.
+   */
+  public String getNodeUsage();
+
+  /**
+   * Get status information about the journals of the NN.
+   *
+   * @return the name journal status information, as a JSON string.
+   */
+  public String getNameJournalStatus();
+  
+  /**
+   * Get information about the transaction ID, including the last applied 
+   * transaction ID and the most recent checkpoint's transaction ID
+   */
+  public String getJournalTransactionInfo();
+
+  /**
+   * Gets the NN start time
+   *
+   * @return the NN start time
+   */
+  public String getNNStarted();
+
+  /**
+   * Get the compilation information which contains date, user and branch
+   *
+   * @return the compilation information, as a JSON string.
+   */
+  public String getCompileInfo();
+
+  /**
+   * Get the list of corrupt files
+   *
+   * @return the list of corrupt files, as a JSON string.
+   */
+  public String getCorruptFiles();
+
+  /**
+   * Get the number of distinct versions of live datanodes
+   * 
+   * @return the number of distinct versions of live datanodes
+   */
+  public int getDistinctVersionCount();
+
+  /**
+   * Get the number of live datanodes for each distinct versions
+   * 
+   * @return the number of live datanodes for each distinct versions
+   */
+  public Map<String, Integer> getDistinctVersions();
+  
 }

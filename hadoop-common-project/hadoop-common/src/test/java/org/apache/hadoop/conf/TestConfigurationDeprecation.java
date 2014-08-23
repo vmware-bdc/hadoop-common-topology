@@ -19,8 +19,6 @@
 package org.apache.hadoop.conf;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -28,21 +26,35 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.ByteArrayOutputStream;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.junit.Assert;
 
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.conf.Configuration.DeprecationDelta;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.google.common.util.concurrent.Uninterruptibles;
+
  
 public class TestConfigurationDeprecation {
   private Configuration conf;
-  final static String CONFIG = new File("./test-config.xml").getAbsolutePath();
-  final static String CONFIG2 = 
-    new File("./test-config2.xml").getAbsolutePath();
-  final static String CONFIG3 = 
-    new File("./test-config3.xml").getAbsolutePath();
+  final static String CONFIG = new File("./test-config-TestConfigurationDeprecation.xml").getAbsolutePath();
+  final static String CONFIG2 = new File("./test-config2-TestConfigurationDeprecation.xml").getAbsolutePath();
+  final static String CONFIG3 = new File("./test-config3-TestConfigurationDeprecation.xml").getAbsolutePath();
   BufferedWriter out;
   
   static {
@@ -164,7 +176,7 @@ public class TestConfigurationDeprecation {
     conf.set("Y", "y");
     conf.set("Z", "z");
     // get old key
-    assertEquals("y", conf.get("X"));
+    assertEquals("z", conf.get("X"));
   }
 
   /**
@@ -305,7 +317,7 @@ public class TestConfigurationDeprecation {
     assertTrue("deprecated Key not found", dKFound);
     assertTrue("new Key not found", nKFound);
   }
-
+  
   @Test
   public void testUnsetWithDeprecatedKeys() {
     Configuration conf = new Configuration();
@@ -324,4 +336,94 @@ public class TestConfigurationDeprecation {
     assertNull(conf.get("nK"));
   }
 
+  private static String getTestKeyName(int threadIndex, int testIndex) {
+    return "testConcurrentDeprecateAndManipulate.testKey." +
+                  threadIndex + "." + testIndex;
+  }
+  
+  /**
+   * Run a set of threads making changes to the deprecations
+   * concurrently with another set of threads calling get()
+   * and set() on Configuration objects.
+   */
+  @SuppressWarnings("deprecation")
+  @Test(timeout=60000)
+  public void testConcurrentDeprecateAndManipulate() throws Exception {
+    final int NUM_THREAD_IDS = 10;
+    final int NUM_KEYS_PER_THREAD = 1000;
+    ScheduledThreadPoolExecutor executor =
+      new ScheduledThreadPoolExecutor(2 * NUM_THREAD_IDS,
+      new ThreadFactoryBuilder().setDaemon(true).
+      setNameFormat("testConcurrentDeprecateAndManipulate modification thread %d").
+      build());
+    final CountDownLatch latch = new CountDownLatch(1);
+    final AtomicInteger highestModificationThreadId = new AtomicInteger(1);
+    List<Future<Void>> futures = new LinkedList<Future<Void>>();
+    for (int i = 0; i < NUM_THREAD_IDS; i++) {
+      futures.add(executor.schedule(new Callable<Void>() {
+        @Override
+        public Void call() throws Exception {
+          latch.await();
+          int threadIndex = highestModificationThreadId.addAndGet(1);
+          for (int i = 0; i < NUM_KEYS_PER_THREAD; i++) {
+            String testKey = getTestKeyName(threadIndex, i);
+            String testNewKey = testKey + ".new";
+            Configuration.addDeprecations(
+              new DeprecationDelta[] {
+                new DeprecationDelta(testKey, testNewKey)
+              });
+          }
+          return null;
+        }
+      }, 0, TimeUnit.SECONDS));
+    }
+    final AtomicInteger highestAccessThreadId = new AtomicInteger(1);
+    for (int i = 0; i < NUM_THREAD_IDS; i++) {
+      futures.add(executor.schedule(new Callable<Void>() {
+        @Override
+        public Void call() throws Exception {
+          Configuration conf = new Configuration();
+          latch.await();
+          int threadIndex = highestAccessThreadId.addAndGet(1);
+          for (int i = 0; i < NUM_KEYS_PER_THREAD; i++) {
+            String testNewKey = getTestKeyName(threadIndex, i) + ".new";
+            String value = "value." + threadIndex + "." + i;
+            conf.set(testNewKey, value);
+            Assert.assertEquals(value, conf.get(testNewKey));
+          }
+          return null;
+        }
+      }, 0, TimeUnit.SECONDS));
+    }
+    latch.countDown(); // allow all threads to proceed
+    for (Future<Void> future : futures) {
+      Uninterruptibles.getUninterruptibly(future);
+    }
+  }
+
+  @Test
+  public void testNoFalseDeprecationWarning() throws IOException {
+    Configuration conf = new Configuration();
+    Configuration.addDeprecation("AA", "BB");
+    conf.set("BB", "bb");
+    conf.get("BB");
+    conf.writeXml(new ByteArrayOutputStream());
+    assertEquals(false, Configuration.hasWarnedDeprecation("AA"));
+    conf.set("AA", "aa");
+    assertEquals(true, Configuration.hasWarnedDeprecation("AA"));
+  }
+  
+  @Test
+  public void testDeprecationSetUnset() throws IOException {
+    addDeprecationToConfiguration();
+    Configuration conf = new Configuration();
+    //"X" is deprecated by "Y" and "Z"
+    conf.set("Y", "y");
+    assertEquals("y", conf.get("Z"));
+    conf.set("X", "x");
+    assertEquals("x", conf.get("Z"));
+    conf.unset("Y");
+    assertEquals(null, conf.get("Z"));
+    assertEquals(null, conf.get("X"));
+  }
 }

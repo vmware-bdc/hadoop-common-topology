@@ -78,6 +78,21 @@ public class MiniDFSNNTopology {
   }
 
   /**
+   * Set up federated cluster with the given nameservices, each
+   * of which has only a single NameNode.
+   */
+  public static MiniDFSNNTopology simpleFederatedTopology(String nameservicesIds) {
+    MiniDFSNNTopology topology = new MiniDFSNNTopology();
+    String nsIds[] = nameservicesIds.split(",");
+    for (String nsId : nsIds) {
+      topology.addNameservice(new MiniDFSNNTopology.NSConf(nsId)
+        .addNN(new MiniDFSNNTopology.NNConf(null)));
+    }
+    topology.setFederation(true);
+    return topology;
+  }
+
+  /**
    * Set up federated cluster with the given number of nameservices, each
    * of which has two NameNodes.
    */
@@ -193,9 +208,10 @@ public class MiniDFSNNTopology {
   }
   
   public static class NNConf {
-    private String nnId;
+    private final String nnId;
     private int httpPort;
     private int ipcPort;
+    private String clusterId;
     
     public NNConf(String nnId) {
       this.nnId = nnId;
@@ -213,6 +229,10 @@ public class MiniDFSNNTopology {
       return httpPort;
     }
 
+    String getClusterId() {
+      return clusterId;
+    }
+
     public NNConf setHttpPort(int httpPort) {
       this.httpPort = httpPort;
       return this;
@@ -220,6 +240,11 @@ public class MiniDFSNNTopology {
 
     public NNConf setIpcPort(int ipcPort) {
       this.ipcPort = ipcPort;
+      return this;
+    }
+
+    public NNConf setClusterId(String clusterId) {
+      this.clusterId = clusterId;
       return this;
     }
   }

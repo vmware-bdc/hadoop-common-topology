@@ -17,10 +17,13 @@
 
 package org.apache.hadoop.hdfs.server.namenode;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.fail;
+
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
 
-import junit.framework.Assert;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FileSystem;
@@ -55,7 +58,7 @@ public class TestSecureNameNode {
       Configuration conf = new HdfsConfiguration();
       conf.set(CommonConfigurationKeys.HADOOP_SECURITY_AUTHENTICATION,
           "kerberos");
-      conf.set(DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY,
+      conf.set(DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY,
           "nn1/localhost@EXAMPLE.COM");
       conf.set(DFSConfigKeys.DFS_NAMENODE_KEYTAB_FILE_KEY, nn1KeytabPath);
 
@@ -79,14 +82,14 @@ public class TestSecureNameNode {
       try {
         Path p = new Path("/users");
         fs.mkdirs(p);
-        Assert.fail("user1 must not be allowed to write in /");
+        fail("user1 must not be allowed to write in /");
       } catch (IOException expected) {
       }
 
       Path p = new Path("/tmp/alpha");
       fs.mkdirs(p);
-      Assert.assertNotNull(fs.listStatus(p));
-      Assert.assertEquals(AuthenticationMethod.KERBEROS,
+      assertNotNull(fs.listStatus(p));
+      assertEquals(AuthenticationMethod.KERBEROS,
           ugi.getAuthenticationMethod());
     } finally {
       if (cluster != null) {

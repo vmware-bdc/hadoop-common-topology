@@ -56,7 +56,7 @@ public class TestBlockUnderConstruction {
     Configuration conf = new HdfsConfiguration();
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(3).build();
     cluster.waitActive();
-    hdfs = (DistributedFileSystem)cluster.getFileSystem();
+    hdfs = cluster.getFileSystem();
   }
 
   @AfterClass
@@ -83,8 +83,7 @@ public class TestBlockUnderConstruction {
   private void verifyFileBlocks(String file,
                                 boolean isFileOpen) throws IOException {
     FSNamesystem ns = cluster.getNamesystem();
-    INodeFile inode = ns.dir.getFileINode(file);
-    assertTrue("File does not exist: " + inode.toString(), inode != null);
+    final INodeFile inode = INodeFile.valueOf(ns.dir.getINode(file), file);
     assertTrue("File " + inode.toString() +
         " isUnderConstruction = " + inode.isUnderConstruction() +
         " expected to be " + isFileOpen,

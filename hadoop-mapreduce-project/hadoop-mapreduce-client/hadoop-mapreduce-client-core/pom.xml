@@ -12,7 +12,10 @@
   See the License for the specific language governing permissions and
   limitations under the License. See accompanying LICENSE file.
 -->
-<project>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                      http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <parent>
     <artifactId>hadoop-mapreduce-client</artifactId>
     <groupId>org.apache.hadoop</groupId>
@@ -37,6 +40,7 @@
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-hdfs</artifactId>
+      <scope>test</scope>
     </dependency>
   </dependencies>
 
@@ -47,7 +51,7 @@
         <artifactId>maven-surefire-plugin</artifactId>
 	<configuration>
           <systemPropertyVariables>
-            <log4j.configuration>file:///${project.parent.basedir}/../src/test/log4j.properties</log4j.configuration>
+            <log4j.configuration>file:///${project.basedir}/src/test/resources/log4j.properties</log4j.configuration>
           </systemPropertyVariables>
         </configuration>
       </plugin>
@@ -80,6 +84,16 @@
             </configuration>
           </execution>
         </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.rat</groupId>
+        <artifactId>apache-rat-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>src/test/resources/recordSpanningMultipleSplits.txt</exclude>
+            <exclude>src/test/resources/testBOM.txt</exclude>
+          </excludes>
+        </configuration>
       </plugin>
     </plugins>
   </build>

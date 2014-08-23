@@ -18,15 +18,20 @@
 package org.apache.hadoop.mapred;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.text.ParseException;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Random;
+
+import org.junit.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.mapred.Counters.Counter;
+import org.apache.hadoop.mapred.Counters.CountersExceededException;
 import org.apache.hadoop.mapred.Counters.Group;
 import org.apache.hadoop.mapreduce.FileSystemCounter;
 import org.apache.hadoop.mapreduce.JobCounter;
@@ -41,6 +46,12 @@ public class TestCounters {
   private static final long MAX_VALUE = 10;
   private static final Log LOG = LogFactory.getLog(TestCounters.class);
   
+  static final Enum<?> FRAMEWORK_COUNTER = TaskCounter.CPU_MILLISECONDS;
+  static final long FRAMEWORK_COUNTER_VALUE = 8;
+  static final String FS_SCHEME = "HDFS";
+  static final FileSystemCounter FS_COUNTER = FileSystemCounter.BYTES_READ;
+  static final long FS_COUNTER_VALUE = 10;
+
   // Generates enum based counters
   private Counters getEnumCounters(Enum[] keys) {
     Counters counters = new Counters();
@@ -150,7 +161,7 @@ public class TestCounters {
     Counters counters = new Counters();
     counters.incrCounter(Task.Counter.MAP_INPUT_RECORDS, 1);
     counters.incrCounter(JobInProgress.Counter.DATA_LOCAL_MAPS, 1);
-    counters.findCounter("FileSystemCounter", "FILE_BYTES_READ").increment(1);
+    counters.findCounter("FileSystemCounters", "FILE_BYTES_READ").increment(1);
     
     checkLegacyNames(counters);
   }
@@ -178,7 +189,7 @@ public class TestCounters {
     assertEquals("New name and method", 1, counters.findCounter("file",
         FileSystemCounter.BYTES_READ).getValue());
     assertEquals("Legacy name", 1, counters.findCounter(
-        "FileSystemCounter",
+        "FileSystemCounters",
         "FILE_BYTES_READ").getValue());
   }
   
@@ -203,7 +214,110 @@ public class TestCounters {
     counters.incrCounter("group1", "counter2", 1);
     iterator.next();
   }
+
+  @Test
+  public void testFileSystemGroupIteratorConcurrency() {
+    Counters counters = new Counters();
+    // create 2 filesystem counter groups
+    counters.findCounter("fs1", FileSystemCounter.BYTES_READ).increment(1);
+    counters.findCounter("fs2", FileSystemCounter.BYTES_READ).increment(1);
+    
+    // Iterate over the counters in this group while updating counters in
+    // the group
+    Group group = counters.getGroup(FileSystemCounter.class.getName());
+    Iterator<Counter> iterator = group.iterator();
+    counters.findCounter("fs3", FileSystemCounter.BYTES_READ).increment(1);
+    assertTrue(iterator.hasNext());
+    iterator.next();
+    counters.findCounter("fs3", FileSystemCounter.BYTES_READ).increment(1);
+    assertTrue(iterator.hasNext());
+    iterator.next();
+  }
   
+  @Test
+  public void testLegacyGetGroupNames() {
+    Counters counters = new Counters();
+    // create 2 filesystem counter groups
+    counters.findCounter("fs1", FileSystemCounter.BYTES_READ).increment(1);
+    counters.findCounter("fs2", FileSystemCounter.BYTES_READ).increment(1);
+    counters.incrCounter("group1", "counter1", 1);
+    
+    HashSet<String> groups = new HashSet<String>(counters.getGroupNames());
+    HashSet<String> expectedGroups = new HashSet<String>();
+    expectedGroups.add("group1");
+    expectedGroups.add("FileSystemCounters"); //Legacy Name
+    expectedGroups.add("org.apache.hadoop.mapreduce.FileSystemCounter");
+
+    assertEquals(expectedGroups, groups);
+  }
+  
+  @Test
+  public void testMakeCompactString() {
+    final String GC1 = "group1.counter1:1";
+    final String GC2 = "group2.counter2:3";
+    Counters counters = new Counters();
+    counters.incrCounter("group1", "counter1", 1);
+    assertEquals("group1.counter1:1", counters.makeCompactString());
+    counters.incrCounter("group2", "counter2", 3);
+    String cs = counters.makeCompactString();
+    assertTrue("Bad compact string",
+        cs.equals(GC1 + ',' + GC2) || cs.equals(GC2 + ',' + GC1));
+  }
+  
+  @Test
+  public void testCounterLimits() {
+    testMaxCountersLimits(new Counters());
+    testMaxGroupsLimits(new Counters());
+  }
+
+  private void testMaxCountersLimits(final Counters counters) {
+    for (int i = 0; i < org.apache.hadoop.mapred.Counters.MAX_COUNTER_LIMIT; ++i) {
+      counters.findCounter("test", "test" + i);
+    }
+    setExpected(counters);
+    shouldThrow(CountersExceededException.class, new Runnable() {
+      public void run() {
+        counters.findCounter("test", "bad");
+      }
+    });
+    checkExpected(counters);
+  }
+
+  private void testMaxGroupsLimits(final Counters counters) {
+    for (int i = 0; i < org.apache.hadoop.mapred.Counters.MAX_GROUP_LIMIT; ++i) {
+      // assuming COUNTERS_MAX > GROUPS_MAX
+      counters.findCounter("test" + i, "test");
+    }
+    setExpected(counters);
+    shouldThrow(CountersExceededException.class, new Runnable() {
+      public void run() {
+        counters.findCounter("bad", "test");
+      }
+    });
+    checkExpected(counters);
+  }
+
+  private void setExpected(Counters counters) {
+    counters.findCounter(FRAMEWORK_COUNTER).setValue(FRAMEWORK_COUNTER_VALUE);
+    counters.findCounter(FS_SCHEME, FS_COUNTER).setValue(FS_COUNTER_VALUE);
+  }
+
+  private void checkExpected(Counters counters) {
+    assertEquals(FRAMEWORK_COUNTER_VALUE,
+      counters.findCounter(FRAMEWORK_COUNTER).getValue());
+    assertEquals(FS_COUNTER_VALUE, counters.findCounter(FS_SCHEME, FS_COUNTER)
+      .getValue());
+  }
+
+  private void shouldThrow(Class<? extends Exception> ecls, Runnable runnable) {
+    try {
+      runnable.run();
+    } catch (CountersExceededException e) {
+      return;
+    }
+    Assert.fail("Should've thrown " + ecls.getSimpleName());
+  }
+
   public static void main(String[] args) throws IOException {
     new TestCounters().testCounters();
   }

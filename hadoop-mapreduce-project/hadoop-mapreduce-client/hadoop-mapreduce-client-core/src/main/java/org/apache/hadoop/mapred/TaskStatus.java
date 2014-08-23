@@ -29,6 +29,7 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableUtils;
+import org.apache.hadoop.util.StringInterner;
 import org.apache.hadoop.util.StringUtils;
 /**************************************************
  * Describes the current status of a task.  This is
@@ -50,7 +51,7 @@ public abstract class TaskStatus implements Writable, Cloneable {
   @InterfaceAudience.Private
   @InterfaceStability.Unstable
   public static enum State {RUNNING, SUCCEEDED, FAILED, UNASSIGNED, KILLED, 
-                            COMMIT_PENDING, FAILED_UNCLEAN, KILLED_UNCLEAN}
+                            COMMIT_PENDING, FAILED_UNCLEAN, KILLED_UNCLEAN, PREEMPTED}
     
   private final TaskAttemptID taskid;
   private float progress;
@@ -477,8 +478,8 @@ public abstract class TaskStatus implements Writable, Cloneable {
     setProgress(in.readFloat());
     this.numSlots = in.readInt();
     this.runState = WritableUtils.readEnum(in, State.class);
-    setDiagnosticInfo(Text.readString(in));
-    setStateString(Text.readString(in));
+    setDiagnosticInfo(StringInterner.weakIntern(Text.readString(in)));
+    setStateString(StringInterner.weakIntern(Text.readString(in)));
     this.phase = WritableUtils.readEnum(in, Phase.class); 
     this.startTime = in.readLong(); 
     this.finishTime = in.readLong(); 
@@ -522,17 +523,5 @@ public abstract class TaskStatus implements Writable, Cloneable {
     return (isMap) ? new MapTaskStatus() : new ReduceTaskStatus();
   }
 
-  static TaskStatus readTaskStatus(DataInput in) throws IOException {
-    boolean isMap = in.readBoolean();
-    TaskStatus taskStatus = createTaskStatus(isMap);
-    taskStatus.readFields(in);
-    return taskStatus;
-  }
-  
-  static void writeTaskStatus(DataOutput out, TaskStatus taskStatus) 
-  throws IOException {
-    out.writeBoolean(taskStatus.getIsMap());
-    taskStatus.write(out);
-  }
 }
 

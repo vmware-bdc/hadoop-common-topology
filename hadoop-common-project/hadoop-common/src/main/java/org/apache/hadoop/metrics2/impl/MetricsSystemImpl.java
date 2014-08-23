@@ -32,13 +32,14 @@ import javax.management.ObjectName;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.annotations.VisibleForTesting;
 import java.util.Locale;
 import static com.google.common.base.Preconditions.*;
 
 import org.apache.commons.configuration.PropertiesConfiguration;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.math.util.MathUtils;
+import org.apache.commons.math3.util.ArithmeticUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.metrics2.MetricsInfo;
 import org.apache.hadoop.metrics2.MetricsCollector;
@@ -60,6 +61,7 @@ import org.apache.hadoop.metrics2.lib.MetricsRegistry;
 import org.apache.hadoop.metrics2.lib.MetricsSourceBuilder;
 import org.apache.hadoop.metrics2.lib.MutableStat;
 import org.apache.hadoop.metrics2.util.MBeans;
+import org.apache.hadoop.util.Time;
 
 /**
  * A base class for metrics system singletons
@@ -230,15 +232,24 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
     return source;
   }
 
+  @Override public synchronized
+  void unregisterSource(String name) {
+    if (sources.containsKey(name)) {
+      sources.get(name).stop();
+      sources.remove(name);
+    }
+    if (allSources.containsKey(name)) {
+      allSources.remove(name);
+    }
+  }
+
   synchronized
   void registerSource(String name, String desc, MetricsSource source) {
     checkNotNull(config, "config");
     MetricsConfig conf = sourceConfigs.get(name);
-    MetricsSourceAdapter sa = conf != null
-        ? new MetricsSourceAdapter(prefix, name, desc, source,
-                                   injectedTags, period, conf)
-        : new MetricsSourceAdapter(prefix, name, desc, source,
-          injectedTags, period, config.subset(SOURCE_KEY));
+    MetricsSourceAdapter sa = new MetricsSourceAdapter(prefix, name, desc,
+        source, injectedTags, period, conf != null ? conf
+            : config.subset(SOURCE_KEY));
     sources.put(name, sa);
     sa.start();
     LOG.debug("Registered source "+ name);
@@ -286,8 +297,7 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
               throws Throwable {
             try {
               return method.invoke(callback, args);
-            }
-            catch (Exception e) {
+            } catch (Exception e) {
               // These are not considered fatal.
               LOG.warn("Caught exception in callback "+ method.getName(), e);
             }
@@ -331,11 +341,11 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
     long millis = period * 1000;
     timer = new Timer("Timer for '"+ prefix +"' metrics system", true);
     timer.scheduleAtFixedRate(new TimerTask() {
+          @Override
           public void run() {
             try {
               onTimerEvent();
-            }
-            catch (Exception e) {
+            } catch (Exception e) {
               LOG.warn(e);
             }
           }
@@ -346,8 +356,18 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
   synchronized void onTimerEvent() {
     logicalTime += period;
     if (sinks.size() > 0) {
-      publishMetrics(sampleMetrics());
+      publishMetrics(sampleMetrics(), false);
     }
+  }
+  
+  /**
+   * Requests an immediate publish of all metrics from sources to sinks.
+   */
+  @Override
+  public void publishMetricsNow() {
+    if (sinks.size() > 0) {
+      publishMetrics(sampleMetrics(), true);
+    }    
   }
 
   /**
@@ -372,23 +392,31 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
 
   private void snapshotMetrics(MetricsSourceAdapter sa,
                                MetricsBufferBuilder bufferBuilder) {
-    long startTime = System.currentTimeMillis();
-    bufferBuilder.add(sa.name(), sa.getMetrics(collector, false));
+    long startTime = Time.now();
+    bufferBuilder.add(sa.name(), sa.getMetrics(collector, true));
     collector.clear();
-    snapshotStat.add(System.currentTimeMillis() - startTime);
+    snapshotStat.add(Time.now() - startTime);
     LOG.debug("Snapshotted source "+ sa.name());
   }
 
   /**
    * Publish a metrics snapshot to all the sinks
    * @param buffer  the metrics snapshot to publish
+   * @param immediate  indicates that we should publish metrics immediately
+   *                   instead of using a separate thread.
    */
-  synchronized void publishMetrics(MetricsBuffer buffer) {
+  synchronized void publishMetrics(MetricsBuffer buffer, boolean immediate) {
     int dropped = 0;
     for (MetricsSinkAdapter sa : sinks.values()) {
-      long startTime = System.currentTimeMillis();
-      dropped += sa.putMetrics(buffer, logicalTime) ? 0 : 1;
-      publishStat.add(System.currentTimeMillis() - startTime);
+      long startTime = Time.now();
+      boolean result;
+      if (immediate) {
+        result = sa.putMetricsImmediate(buffer); 
+      } else {
+        result = sa.putMetrics(buffer, logicalTime);
+      }
+      dropped += result ? 0 : 1;
+      publishStat.add(Time.now() - startTime);
     }
     droppedPubAll.incr(dropped);
   }
@@ -441,7 +469,7 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
       MetricsConfig conf = entry.getValue();
       int sinkPeriod = conf.getInt(PERIOD_KEY, PERIOD_DEFAULT);
       confPeriod = confPeriod == 0 ? sinkPeriod
-                                   : MathUtils.gcd(confPeriod, sinkPeriod);
+                                   : ArithmeticUtils.gcd(confPeriod, sinkPeriod);
       String clsName = conf.getClassName("");
       if (clsName == null) continue;  // sink can be registered later on
       String sinkName = entry.getKey();
@@ -450,8 +478,7 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
             conf.getString(DESC_KEY, sinkName), conf);
         sa.start();
         sinks.put(sinkName, sa);
-      }
-      catch (Exception e) {
+      } catch (Exception e) {
         LOG.warn("Error creating sink '"+ sinkName +"'", e);
       }
     }
@@ -493,8 +520,7 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
   static String getHostname() {
     try {
       return InetAddress.getLocalHost().getHostName();
-    }
-    catch (Exception e) {
+    } catch (Exception e) {
       LOG.error("Error getting localhost name. Using 'localhost'...", e);
     }
     return "localhost";
@@ -554,8 +580,14 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
     return true;
   }
 
+  @Override
   public MetricsSource getSource(String name) {
     return allSources.get(name);
+  }
+
+  @VisibleForTesting
+  MetricsSourceAdapter getSourceAdapter(String name) {
+    return sources.get(name);
   }
 
   private InitMode initMode() {

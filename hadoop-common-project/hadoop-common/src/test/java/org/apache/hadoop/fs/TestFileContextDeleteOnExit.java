@@ -20,7 +20,8 @@ package org.apache.hadoop.fs;
 import java.io.IOException;
 import java.util.Set;
 
-import junit.framework.Assert;
+import org.junit.Assert;
+import org.apache.hadoop.util.ShutdownHookManager;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -34,6 +35,7 @@ public class TestFileContextDeleteOnExit {
   private static int blockSize = 1024;
   private static int numBlocks = 2;
   
+  private final FileContextTestHelper helper = new FileContextTestHelper();
   private FileContext fc;
   
   @Before
@@ -43,7 +45,7 @@ public class TestFileContextDeleteOnExit {
   
   @After
   public void tearDown() throws IOException {
-    fc.delete(getTestRootPath(fc), true);
+    fc.delete(helper.getTestRootPath(fc), true);
   }
   
   
@@ -59,28 +61,27 @@ public class TestFileContextDeleteOnExit {
   @Test
   public void testDeleteOnExit() throws Exception {
     // Create deleteOnExit entries
-    Path file1 = getTestRootPath(fc, "file1");
+    Path file1 = helper.getTestRootPath(fc, "file1");
     createFile(fc, file1, numBlocks, blockSize);
     fc.deleteOnExit(file1);
     checkDeleteOnExitData(1, fc, file1);
     
     // Ensure shutdown hook is added
-    Assert.assertTrue(Runtime.getRuntime().removeShutdownHook(FileContext.FINALIZER));
+    Assert.assertTrue(ShutdownHookManager.get().hasShutdownHook(FileContext.FINALIZER));
     
-    Path file2 = getTestRootPath(fc, "dir1/file2");
+    Path file2 = helper.getTestRootPath(fc, "dir1/file2");
     createFile(fc, file2, numBlocks, blockSize);
     fc.deleteOnExit(file2);
     checkDeleteOnExitData(1, fc, file1, file2);
     
-    Path dir = getTestRootPath(fc, "dir3/dir4/dir5/dir6");
+    Path dir = helper.getTestRootPath(fc, "dir3/dir4/dir5/dir6");
     createFile(fc, dir, numBlocks, blockSize);
     fc.deleteOnExit(dir);
     checkDeleteOnExitData(1, fc, file1, file2, dir);
     
     // trigger deleteOnExit and ensure the registered
     // paths are cleaned up
-    FileContext.FINALIZER.start();
-    FileContext.FINALIZER.join();
+    FileContext.FINALIZER.run();
     checkDeleteOnExitData(0, fc, new Path[0]);
     Assert.assertFalse(exists(fc, file1));
     Assert.assertFalse(exists(fc, file2));

@@ -26,7 +26,6 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 
@@ -46,7 +45,7 @@ import org.apache.hadoop.fs.CommonConfigurationKeys;
  */
 @InterfaceAudience.Public
 @InterfaceStability.Evolving
-public final class ScriptBasedMapping extends CachedDNSToSwitchMapping {
+public class ScriptBasedMapping extends CachedDNSToSwitchMapping {
 
   /**
    * Minimum number of arguments: {@value}
@@ -64,6 +63,7 @@ public final class ScriptBasedMapping extends CachedDNSToSwitchMapping {
    */
   static final String SCRIPT_FILENAME_KEY = 
                      CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_FILE_NAME_KEY ;
+
   /**
    * key to the argument count that the script supports
    * {@value}
@@ -85,7 +85,15 @@ public final class ScriptBasedMapping extends CachedDNSToSwitchMapping {
    *
    */
   public ScriptBasedMapping() {
-    super(new RawScriptBasedMapping());
+    this(new RawScriptBasedMapping());
+  }
+
+  /**
+   * Create an instance from the given raw mapping
+   * @param rawMap raw DNSTOSwithMapping
+   */
+  public ScriptBasedMapping(DNSToSwitchMapping rawMap) {
+    super(rawMap);
   }
 
   /**
@@ -133,7 +141,7 @@ public final class ScriptBasedMapping extends CachedDNSToSwitchMapping {
    * This is the uncached script mapping that is fed into the cache managed
    * by the superclass {@link CachedDNSToSwitchMapping}
    */
-  private static final class RawScriptBasedMapping
+  protected static class RawScriptBasedMapping
       extends AbstractDNSToSwitchMapping {
     private String scriptName;
     private int maxArgs; //max hostnames per call of the script
@@ -177,7 +185,7 @@ public final class ScriptBasedMapping extends CachedDNSToSwitchMapping {
         return m;
       }
 
-      String output = runResolveCommand(names);
+      String output = runResolveCommand(names, scriptName);
       if (output != null) {
         StringTokenizer allSwitchInfo = new StringTokenizer(output);
         while (allSwitchInfo.hasMoreTokens()) {
@@ -209,7 +217,8 @@ public final class ScriptBasedMapping extends CachedDNSToSwitchMapping {
      * @return null if the number of arguments is out of range,
      * or the output of the command.
      */
-    private String runResolveCommand(List<String> args) {
+    protected String runResolveCommand(List<String> args, 
+        String commandScriptName) {
       int loopCount = 0;
       if (args.size() == 0) {
         return null;
@@ -226,7 +235,7 @@ public final class ScriptBasedMapping extends CachedDNSToSwitchMapping {
       while (numProcessed != args.size()) {
         int start = maxArgs * loopCount;
         List<String> cmdList = new ArrayList<String>();
-        cmdList.add(scriptName);
+        cmdList.add(commandScriptName);
         for (numProcessed = start; numProcessed < (start + maxArgs) &&
             numProcessed < args.size(); numProcessed++) {
           cmdList.add(args.get(numProcessed));
@@ -263,6 +272,18 @@ public final class ScriptBasedMapping extends CachedDNSToSwitchMapping {
     @Override
     public String toString() {
       return scriptName != null ? ("script " + scriptName) : NO_SCRIPT;
+    }
+
+    @Override
+    public void reloadCachedMappings() {
+      // Nothing to do here, since RawScriptBasedMapping has no cache, and
+      // does not inherit from CachedDNSToSwitchMapping
+    }
+
+    @Override
+    public void reloadCachedMappings(List<String> names) {
+      // Nothing to do here, since RawScriptBasedMapping has no cache, and
+      // does not inherit from CachedDNSToSwitchMapping
     }
   }
 }

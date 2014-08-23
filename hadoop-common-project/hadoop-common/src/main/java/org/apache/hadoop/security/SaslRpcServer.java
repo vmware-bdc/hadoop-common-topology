@@ -23,8 +23,13 @@ import java.io.DataInput;
 import java.io.DataInputStream;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.security.PrivilegedExceptionAction;
+import java.security.Security;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 
 import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.CallbackHandler;
@@ -34,6 +39,9 @@ import javax.security.auth.callback.UnsupportedCallbackException;
 import javax.security.sasl.AuthorizeCallback;
 import javax.security.sasl.RealmCallback;
 import javax.security.sasl.Sasl;
+import javax.security.sasl.SaslException;
+import javax.security.sasl.SaslServer;
+import javax.security.sasl.SaslServerFactory;
 
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.logging.Log;
@@ -41,11 +49,13 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.ipc.RetriableException;
 import org.apache.hadoop.ipc.Server;
-import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
+import org.apache.hadoop.ipc.Server.Connection;
+import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.security.token.SecretManager;
-import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
+import org.apache.hadoop.security.token.TokenIdentifier;
 
 /**
  * A utility class for dealing with SASL on RPC server
@@ -55,10 +65,7 @@ import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 public class SaslRpcServer {
   public static final Log LOG = LogFactory.getLog(SaslRpcServer.class);
   public static final String SASL_DEFAULT_REALM = "default";
-  public static final Map<String, String> SASL_PROPS = 
-      new TreeMap<String, String>();
-
-  public static final int SWITCH_TO_SIMPLE_AUTH = -88;
+  private static SaslServerFactory saslFactory;
 
   public static enum QualityOfProtection {
     AUTHENTICATION("auth"),
@@ -75,21 +82,105 @@ public class SaslRpcServer {
       return saslQop;
     }
   }
+
+  @InterfaceAudience.Private
+  @InterfaceStability.Unstable
+  public AuthMethod authMethod;
+  public String mechanism;
+  public String protocol;
+  public String serverId;
   
-  public static void init(Configuration conf) {
-    QualityOfProtection saslQOP = QualityOfProtection.AUTHENTICATION;
-    String rpcProtection = conf.get("hadoop.rpc.protection",
-        QualityOfProtection.AUTHENTICATION.name().toLowerCase());
-    if (QualityOfProtection.INTEGRITY.name().toLowerCase()
-        .equals(rpcProtection)) {
-      saslQOP = QualityOfProtection.INTEGRITY;
-    } else if (QualityOfProtection.PRIVACY.name().toLowerCase().equals(
-        rpcProtection)) {
-      saslQOP = QualityOfProtection.PRIVACY;
+  @InterfaceAudience.Private
+  @InterfaceStability.Unstable
+  public SaslRpcServer(AuthMethod authMethod) throws IOException {
+    this.authMethod = authMethod;
+    mechanism = authMethod.getMechanismName();    
+    switch (authMethod) {
+      case SIMPLE: {
+        return; // no sasl for simple
+      }
+      case TOKEN: {
+        protocol = "";
+        serverId = SaslRpcServer.SASL_DEFAULT_REALM;
+        break;
+      }
+      case KERBEROS: {
+        String fullName = UserGroupInformation.getCurrentUser().getUserName();
+        if (LOG.isDebugEnabled())
+          LOG.debug("Kerberos principal name is " + fullName);
+        // don't use KerberosName because we don't want auth_to_local
+        String[] parts = fullName.split("[/@]", 3);
+        protocol = parts[0];
+        // should verify service host is present here rather than in create()
+        // but lazy tests are using a UGI that isn't a SPN...
+        serverId = (parts.length < 2) ? "" : parts[1];
+        break;
+      }
+      default:
+        // we should never be able to get here
+        throw new AccessControlException(
+            "Server does not support SASL " + authMethod);
+    }
+  }
+  
+  @InterfaceAudience.Private
+  @InterfaceStability.Unstable
+  public SaslServer create(final Connection connection,
+                           final Map<String,?> saslProperties,
+                           SecretManager<TokenIdentifier> secretManager
+      ) throws IOException, InterruptedException {
+    UserGroupInformation ugi = null;
+    final CallbackHandler callback;
+    switch (authMethod) {
+      case TOKEN: {
+        callback = new SaslDigestCallbackHandler(secretManager, connection);
+        break;
+      }
+      case KERBEROS: {
+        ugi = UserGroupInformation.getCurrentUser();
+        if (serverId.isEmpty()) {
+          throw new AccessControlException(
+              "Kerberos principal name does NOT have the expected "
+                  + "hostname part: " + ugi.getUserName());
+        }
+        callback = new SaslGssCallbackHandler();
+        break;
+      }
+      default:
+        // we should never be able to get here
+        throw new AccessControlException(
+            "Server does not support SASL " + authMethod);
     }
     
-    SASL_PROPS.put(Sasl.QOP, saslQOP.getSaslQop());
-    SASL_PROPS.put(Sasl.SERVER_AUTH, "true");
+    final SaslServer saslServer;
+    if (ugi != null) {
+      saslServer = ugi.doAs(
+        new PrivilegedExceptionAction<SaslServer>() {
+          @Override
+          public SaslServer run() throws SaslException  {
+            return saslFactory.createSaslServer(mechanism, protocol, serverId,
+                saslProperties, callback);
+          }
+        });
+    } else {
+      saslServer = saslFactory.createSaslServer(mechanism, protocol, serverId,
+          saslProperties, callback);
+    }
+    if (saslServer == null) {
+      throw new AccessControlException(
+          "Unable to find SASL server implementation for " + mechanism);
+    }
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Created SASL server with mechanism = " + mechanism);
+    }
+    return saslServer;
+  }
+
+  public static void init(Configuration conf) {
+    Security.addProvider(new SaslPlainServer.SecurityProvider());
+    // passing null so factory is populated with all possibilities.  the
+    // properties passed when instantiating a server are what really matter
+    saslFactory = new FastSaslServerFactory(null);
   }
   
   static String encodeIdentifier(byte[] identifier) {
@@ -123,34 +214,23 @@ public class SaslRpcServer {
     return fullName.split("[/@]");
   }
 
-  @InterfaceStability.Evolving
-  public enum SaslStatus {
-    SUCCESS (0),
-    ERROR (1);
-    
-    public final int state;
-    private SaslStatus(int state) {
-      this.state = state;
-    }
-  }
-  
   /** Authentication method */
   @InterfaceStability.Evolving
   public static enum AuthMethod {
-    SIMPLE((byte) 80, "", AuthenticationMethod.SIMPLE),
-    KERBEROS((byte) 81, "GSSAPI", AuthenticationMethod.KERBEROS),
-    DIGEST((byte) 82, "DIGEST-MD5", AuthenticationMethod.TOKEN);
+    SIMPLE((byte) 80, ""),
+    KERBEROS((byte) 81, "GSSAPI"),
+    @Deprecated
+    DIGEST((byte) 82, "DIGEST-MD5"),
+    TOKEN((byte) 82, "DIGEST-MD5"),
+    PLAIN((byte) 83, "PLAIN");
 
     /** The code for this method. */
     public final byte code;
     public final String mechanismName;
-    public final AuthenticationMethod authenticationMethod;
 
-    private AuthMethod(byte code, String mechanismName, 
-                       AuthenticationMethod authMethod) {
+    private AuthMethod(byte code, String mechanismName) { 
       this.code = code;
       this.mechanismName = mechanismName;
-      this.authenticationMethod = authMethod;
     }
 
     private static final int FIRST_CODE = values()[0].code;
@@ -190,14 +270,15 @@ public class SaslRpcServer {
       this.connection = connection;
     }
 
-    private char[] getPassword(TokenIdentifier tokenid) throws InvalidToken {
-      return encodePassword(secretManager.retrievePassword(tokenid));
+    private char[] getPassword(TokenIdentifier tokenid) throws InvalidToken,
+        StandbyException, RetriableException, IOException {
+      return encodePassword(secretManager.retriableRetrievePassword(tokenid));
     }
 
-    /** {@inheritDoc} */
     @Override
     public void handle(Callback[] callbacks) throws InvalidToken,
-        UnsupportedCallbackException {
+        UnsupportedCallbackException, StandbyException, RetriableException,
+        IOException {
       NameCallback nc = null;
       PasswordCallback pc = null;
       AuthorizeCallback ac = null;
@@ -216,7 +297,8 @@ public class SaslRpcServer {
         }
       }
       if (pc != null) {
-        TokenIdentifier tokenIdentifier = getIdentifier(nc.getDefaultName(), secretManager);
+        TokenIdentifier tokenIdentifier = getIdentifier(nc.getDefaultName(),
+            secretManager);
         char[] password = getPassword(tokenIdentifier);
         UserGroupInformation user = null;
         user = tokenIdentifier.getUser(); // may throw exception
@@ -253,7 +335,6 @@ public class SaslRpcServer {
   @InterfaceStability.Evolving
   public static class SaslGssCallbackHandler implements CallbackHandler {
 
-    /** {@inheritDoc} */
     @Override
     public void handle(Callback[] callbacks) throws
         UnsupportedCallbackException {
@@ -281,6 +362,49 @@ public class SaslRpcServer {
           ac.setAuthorizedID(authzid);
         }
       }
+    }
+  }
+  
+  // Sasl.createSaslServer is 100-200X slower than caching the factories!
+  private static class FastSaslServerFactory implements SaslServerFactory {
+    private final Map<String,List<SaslServerFactory>> factoryCache =
+        new HashMap<String,List<SaslServerFactory>>();
+
+    FastSaslServerFactory(Map<String,?> props) {
+      final Enumeration<SaslServerFactory> factories =
+          Sasl.getSaslServerFactories();
+      while (factories.hasMoreElements()) {
+        SaslServerFactory factory = factories.nextElement();
+        for (String mech : factory.getMechanismNames(props)) {
+          if (!factoryCache.containsKey(mech)) {
+            factoryCache.put(mech, new ArrayList<SaslServerFactory>());
+          }
+          factoryCache.get(mech).add(factory);
+        }
+      }
+    }
+
+    @Override
+    public SaslServer createSaslServer(String mechanism, String protocol,
+        String serverName, Map<String,?> props, CallbackHandler cbh)
+        throws SaslException {
+      SaslServer saslServer = null;
+      List<SaslServerFactory> factories = factoryCache.get(mechanism);
+      if (factories != null) {
+        for (SaslServerFactory factory : factories) {
+          saslServer = factory.createSaslServer(
+              mechanism, protocol, serverName, props, cbh);
+          if (saslServer != null) {
+            break;
+          }
+        }
+      }
+      return saslServer;
+    }
+
+    @Override
+    public String[] getMechanismNames(Map<String, ?> props) {
+      return factoryCache.keySet().toArray(new String[0]);
     }
   }
 }

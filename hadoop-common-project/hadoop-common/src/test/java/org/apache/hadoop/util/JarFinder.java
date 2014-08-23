@@ -15,6 +15,7 @@ package org.apache.hadoop.util;
 
 import com.google.common.base.Preconditions;
 
+import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -24,6 +25,7 @@ import java.net.URL;
 import java.net.URLDecoder;
 import java.text.MessageFormat;
 import java.util.Enumeration;
+import java.util.jar.JarFile;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 import java.util.zip.ZipEntry;
@@ -37,10 +39,43 @@ import java.util.zip.ZipOutputStream;
  */
 public class JarFinder {
 
-  private static void zipDir(File dir, String relativePath, ZipOutputStream zos)
+  private static void copyToZipStream(File file, ZipEntry entry,
+                              ZipOutputStream zos) throws IOException {
+    InputStream is = new FileInputStream(file);
+    try {
+      zos.putNextEntry(entry);
+      byte[] arr = new byte[4096];
+      int read = is.read(arr);
+      while (read > -1) {
+        zos.write(arr, 0, read);
+        read = is.read(arr);
+      }
+    } finally {
+      try {
+        is.close();
+      } finally {
+        zos.closeEntry();
+      }
+    }
+  }
+
+  public static void jarDir(File dir, String relativePath, ZipOutputStream zos)
     throws IOException {
     Preconditions.checkNotNull(relativePath, "relativePath");
     Preconditions.checkNotNull(zos, "zos");
+
+    // by JAR spec, if there is a manifest, it must be the first entry in the
+    // ZIP.
+    File manifestFile = new File(dir, JarFile.MANIFEST_NAME);
+    ZipEntry manifestEntry = new ZipEntry(JarFile.MANIFEST_NAME);
+    if (!manifestFile.exists()) {
+      zos.putNextEntry(manifestEntry);
+      new Manifest().write(new BufferedOutputStream(zos));
+      zos.closeEntry();
+    } else {
+      copyToZipStream(manifestFile, manifestEntry, zos);
+    }
+    zos.closeEntry();
     zipDir(dir, relativePath, zos, true);
     zos.close();
   }
@@ -62,17 +97,11 @@ public class JarFinder {
           zipDir(file, relativePath + f.getName() + "/", zos, false);
         }
         else {
-          ZipEntry anEntry = new ZipEntry(relativePath + f.getName());
-          zos.putNextEntry(anEntry);
-          InputStream is = new FileInputStream(f);
-          byte[] arr = new byte[4096];
-          int read = is.read(arr);
-          while (read > -1) {
-            zos.write(arr, 0, read);
-            read = is.read(arr);
+          String path = relativePath + f.getName();
+          if (!path.equals(JarFile.MANIFEST_NAME)) {
+            ZipEntry anEntry = new ZipEntry(path);
+            copyToZipStream(f, anEntry, zos);
           }
-          is.close();
-          zos.closeEntry();
         }
       }
     }
@@ -88,9 +117,8 @@ public class JarFinder {
                                                    jarDir));
       }
     }
-    JarOutputStream zos = new JarOutputStream(new FileOutputStream(jarFile),
-                                              new Manifest());
-    zipDir(dir, "", zos);
+    JarOutputStream zos = new JarOutputStream(new FileOutputStream(jarFile));
+    jarDir(dir, "", zos);
   }
 
   /**
@@ -142,5 +170,4 @@ public class JarFinder {
     }
     return null;
   }
-
 }

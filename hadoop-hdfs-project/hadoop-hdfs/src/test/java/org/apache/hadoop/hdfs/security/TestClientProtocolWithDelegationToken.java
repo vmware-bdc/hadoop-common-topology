@@ -41,6 +41,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.SaslInputStream;
 import org.apache.hadoop.security.SaslRpcClient;
 import org.apache.hadoop.security.SaslRpcServer;
+import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.log4j.Level;
@@ -53,7 +54,7 @@ public class TestClientProtocolWithDelegationToken {
   public static final Log LOG = LogFactory
       .getLog(TestClientProtocolWithDelegationToken.class);
 
-  private static Configuration conf;
+  private static final Configuration conf;
   static {
     conf = new Configuration();
     conf.set(HADOOP_SECURITY_AUTHENTICATION, "kerberos");
@@ -79,9 +80,11 @@ public class TestClientProtocolWithDelegationToken {
         DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_MAX_LIFETIME_DEFAULT,
         3600000, mockNameSys);
     sm.startThreads();
-    final Server server = RPC.getServer(ClientProtocol.class, mockNN, ADDRESS,
-        0, 5, true, conf, sm);
-
+    final Server server = new RPC.Builder(conf)
+        .setProtocol(ClientProtocol.class).setInstance(mockNN)
+        .setBindAddress(ADDRESS).setPort(0).setNumHandlers(5).setVerbose(true)
+        .setSecretManager(sm).build();
+    
     server.start();
 
     final UserGroupInformation current = UserGroupInformation.getCurrentUser();
@@ -91,17 +94,15 @@ public class TestClientProtocolWithDelegationToken {
     DelegationTokenIdentifier dtId = new DelegationTokenIdentifier(owner, owner, null);
     Token<DelegationTokenIdentifier> token = new Token<DelegationTokenIdentifier>(
         dtId, sm);
-    Text host = new Text(addr.getAddress().getHostAddress() + ":"
-        + addr.getPort());
-    token.setService(host);
-    LOG.info("Service IP address for token is " + host);
+    SecurityUtil.setTokenService(token, addr);
+    LOG.info("Service for token is " + token.getService());
     current.addToken(token);
     current.doAs(new PrivilegedExceptionAction<Object>() {
       @Override
       public Object run() throws Exception {
         ClientProtocol proxy = null;
         try {
-          proxy = (ClientProtocol) RPC.getProxy(ClientProtocol.class,
+          proxy = RPC.getProxy(ClientProtocol.class,
               ClientProtocol.versionID, addr, conf);
           proxy.getServerDefaults();
         } finally {

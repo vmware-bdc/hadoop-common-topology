@@ -18,6 +18,8 @@
 package org.apache.hadoop.mapreduce;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceAudience.Public;
+import org.apache.hadoop.classification.InterfaceStability.Unstable;
 
 /**
  * Place holder for cluster level configuration keys.
@@ -55,8 +57,8 @@ public interface MRConfig {
   public static final long    DELEGATION_TOKEN_MAX_LIFETIME_DEFAULT = 
     7*24*60*60*1000; // 7 days
   
-  public static final String RESOURCE_CALCULATOR_PLUGIN = 
-    "mapreduce.job.resourcecalculatorplugin";
+  public static final String RESOURCE_CALCULATOR_PROCESS_TREE =
+    "mapreduce.job.process-tree.class";
   public static final String STATIC_RESOLUTIONS = 
     "mapreduce.job.net.static.resolutions";
 
@@ -71,4 +73,56 @@ public interface MRConfig {
 
   public static final String TASK_LOCAL_OUTPUT_CLASS =
   "mapreduce.task.local.output.class";
+
+  public static final String PROGRESS_STATUS_LEN_LIMIT_KEY =
+    "mapreduce.task.max.status.length";
+  public static final int PROGRESS_STATUS_LEN_LIMIT_DEFAULT = 512;
+
+  public static final int MAX_BLOCK_LOCATIONS_DEFAULT = 10;
+  public static final String MAX_BLOCK_LOCATIONS_KEY =
+    "mapreduce.job.max.split.locations";
+
+  public static final String SHUFFLE_SSL_ENABLED_KEY =
+    "mapreduce.shuffle.ssl.enabled";
+
+  public static final boolean SHUFFLE_SSL_ENABLED_DEFAULT = false;
+
+  public static final String SHUFFLE_CONSUMER_PLUGIN =
+    "mapreduce.job.reduce.shuffle.consumer.plugin.class";
+
+  /**
+   * Configuration key to enable/disable IFile readahead.
+   */
+  public static final String MAPRED_IFILE_READAHEAD =
+    "mapreduce.ifile.readahead";
+
+  public static final boolean DEFAULT_MAPRED_IFILE_READAHEAD = true;
+
+  /**
+   * Configuration key to set the IFile readahead length in bytes.
+   */
+  public static final String MAPRED_IFILE_READAHEAD_BYTES =
+    "mapreduce.ifile.readahead.bytes";
+
+  public static final int DEFAULT_MAPRED_IFILE_READAHEAD_BYTES =
+    4 * 1024 * 1024;
+
+  /**
+   * Whether users are explicitly trying to control resource monitoring
+   * configuration for the MiniMRCluster. Disabled by default.
+   */
+  public static final String MAPREDUCE_MINICLUSTER_CONTROL_RESOURCE_MONITORING
+      = "mapreduce.minicluster.control-resource-monitoring";
+  public static final boolean
+      DEFAULT_MAPREDUCE_MINICLUSTER_CONTROL_RESOURCE_MONITORING = false;
+
+  @Public
+  @Unstable
+  public static final String MAPREDUCE_APP_SUBMISSION_CROSS_PLATFORM =
+      "mapreduce.app-submission.cross-platform";
+  @Public
+  @Unstable
+  public static final boolean DEFAULT_MAPREDUCE_APP_SUBMISSION_CROSS_PLATFORM =
+      false;
 }
+  

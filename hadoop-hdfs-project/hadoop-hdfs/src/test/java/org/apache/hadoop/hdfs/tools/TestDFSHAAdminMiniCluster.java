@@ -17,26 +17,28 @@
  */
 package org.apache.hadoop.hdfs.tools;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
 
-import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.ha.HAAdmin;
+import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
-import org.apache.hadoop.ha.HAAdmin;
-import org.apache.hadoop.ha.NodeFencer;
+import org.apache.hadoop.util.Shell;
 import org.apache.log4j.Level;
-
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -58,7 +60,7 @@ public class TestDFSHAAdminMiniCluster {
   private MiniDFSCluster cluster;
   private Configuration conf; 
   private DFSHAAdmin tool;
-  private ByteArrayOutputStream errOutBytes = new ByteArrayOutputStream();
+  private final ByteArrayOutputStream errOutBytes = new ByteArrayOutputStream();
 
   private String errOutput;
 
@@ -114,7 +116,8 @@ public class TestDFSHAAdminMiniCluster {
   
   @Test
   public void testTryFailoverToSafeMode() throws Exception {
-    conf.set(DFSConfigKeys.DFS_HA_FENCE_METHODS_KEY, "shell(true)");
+    conf.set(DFSConfigKeys.DFS_HA_FENCE_METHODS_KEY, 
+             TestDFSHAAdmin.getFencerTrueCommand());
     tool.setConf(conf);
 
     NameNodeAdapter.enterSafeMode(cluster.getNameNode(0), false);
@@ -136,10 +139,17 @@ public class TestDFSHAAdminMiniCluster {
     // tmp file, so we can verify that the args were substituted right
     File tmpFile = File.createTempFile("testFencer", ".txt");
     tmpFile.deleteOnExit();
-    conf.set(DFSConfigKeys.DFS_HA_FENCE_METHODS_KEY,
-        "shell(echo -n $target_nameserviceid.$target_namenodeid " +
-        "$target_port $dfs_ha_namenode_id > " +
-        tmpFile.getAbsolutePath() + ")");
+    if (Shell.WINDOWS) {
+      conf.set(DFSConfigKeys.DFS_HA_FENCE_METHODS_KEY,
+          "shell(echo %target_nameserviceid%.%target_namenodeid% " +
+              "%target_port% %dfs_ha_namenode_id% > " +
+              tmpFile.getAbsolutePath() + ")");
+    } else {
+      conf.set(DFSConfigKeys.DFS_HA_FENCE_METHODS_KEY,
+          "shell(echo -n $target_nameserviceid.$target_namenodeid " +
+          "$target_port $dfs_ha_namenode_id > " +
+          tmpFile.getAbsolutePath() + ")");
+    }
 
     // Test failover with fencer
     tool.setConf(conf);
@@ -156,9 +166,11 @@ public class TestDFSHAAdminMiniCluster {
     assertEquals(0, runTool("-failover", "nn1", "nn2", "--forcefence"));
     
     // The fence script should run with the configuration from the target
-    // node, rather than the configuration from the fencing node
-    assertEquals("minidfs-ns.nn1 " + nn1Port + " nn1",
-        Files.toString(tmpFile, Charsets.UTF_8));
+    // node, rather than the configuration from the fencing node. Strip
+    // out any trailing spaces and CR/LFs which may be present on Windows.
+    String fenceCommandOutput =Files.toString(tmpFile, Charsets.UTF_8).
+            replaceAll(" *[\r\n]+", "");
+    assertEquals("minidfs-ns.nn1 " + nn1Port + " nn1", fenceCommandOutput);
     tmpFile.delete();
     
     // Test failover with forceactive option
@@ -181,7 +193,8 @@ public class TestDFSHAAdminMiniCluster {
     assertFalse(tmpFile.exists());
 
     // Test failover with force fence listed before the other arguments
-    conf.set(DFSConfigKeys.DFS_HA_FENCE_METHODS_KEY, "shell(true)");
+    conf.set(DFSConfigKeys.DFS_HA_FENCE_METHODS_KEY, 
+             TestDFSHAAdmin.getFencerTrueCommand());
     tool.setConf(conf);
     assertEquals(0, runTool("-failover", "--forcefence", "nn1", "nn2"));
   }
@@ -190,6 +203,70 @@ public class TestDFSHAAdminMiniCluster {
   public void testCheckHealth() throws Exception {
     assertEquals(0, runTool("-checkHealth", "nn1"));
     assertEquals(0, runTool("-checkHealth", "nn2"));
+  }
+  
+  /**
+   * Test case to check whether both the name node is active or not
+   * @throws Exception
+   */
+  @Test
+  public void testTransitionToActiveWhenOtherNamenodeisActive() 
+      throws Exception {
+    NameNode nn1 = cluster.getNameNode(0);
+    NameNode nn2 = cluster.getNameNode(1);
+    if(nn1.getState() != null && !nn1.getState().
+        equals(HAServiceState.STANDBY.name()) ) {
+      cluster.transitionToStandby(0);
+    }
+    if(nn2.getState() != null && !nn2.getState().
+        equals(HAServiceState.STANDBY.name()) ) {
+      cluster.transitionToStandby(1);
+    }
+    //Making sure both the namenode are in standby state
+    assertTrue(nn1.isStandbyState());
+    assertTrue(nn2.isStandbyState());
+    // Triggering the transition for both namenode to Active
+    runTool("-transitionToActive", "nn1");
+    runTool("-transitionToActive", "nn2");
+
+    assertFalse("Both namenodes cannot be active", nn1.isActiveState() 
+        && nn2.isActiveState());
+   
+    /*  This test case doesn't allow nn2 to transition to Active even with
+        forceActive switch since nn1 is already active  */
+    if(nn1.getState() != null && !nn1.getState().
+        equals(HAServiceState.STANDBY.name()) ) {
+      cluster.transitionToStandby(0);
+    }
+    if(nn2.getState() != null && !nn2.getState().
+        equals(HAServiceState.STANDBY.name()) ) {
+      cluster.transitionToStandby(1);
+    }
+    //Making sure both the namenode are in standby state
+    assertTrue(nn1.isStandbyState());
+    assertTrue(nn2.isStandbyState());
+    
+    runTool("-transitionToActive", "nn1");
+    runTool("-transitionToActive", "nn2","--forceactive");
+    
+    assertFalse("Both namenodes cannot be active even though with forceActive",
+        nn1.isActiveState() && nn2.isActiveState());
+
+    /*  In this test case, we have deliberately shut down nn1 and this will
+        cause HAAAdmin#isOtherTargetNodeActive to throw an Exception 
+        and transitionToActive for nn2 with  forceActive switch will succeed 
+        even with Exception  */
+    cluster.shutdownNameNode(0);
+    if(nn2.getState() != null && !nn2.getState().
+        equals(HAServiceState.STANDBY.name()) ) {
+      cluster.transitionToStandby(1);
+    }
+    //Making sure both the namenode (nn2) is in standby state
+    assertTrue(nn2.isStandbyState());
+    assertFalse(cluster.isNameNodeUp(0));
+    
+    runTool("-transitionToActive", "nn2", "--forceactive");
+    assertTrue("Namenode nn2 should be active", nn2.isActiveState());
   }
   
   private int runTool(String ... args) throws Exception {

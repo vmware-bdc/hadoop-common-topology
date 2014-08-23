@@ -22,8 +22,9 @@ import java.io.BufferedReader;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.PrintWriter;
-import java.io.StringWriter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 import org.junit.Test;
 import static org.junit.Assert.*;
@@ -36,7 +37,7 @@ import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.MiniMRCluster;
 import org.apache.hadoop.mapred.Utils;
-import org.apache.hadoop.mapreduce.server.jobtracker.JTConfig;
+
 /**
  * This test case tests the symlink creation
  * utility provided by distributed caching 
@@ -48,8 +49,8 @@ public class TestMultipleCachefiles
   String CACHE_FILE = "/testing-streaming/cache.txt";
   String CACHE_FILE_2 = "/testing-streaming/cache2.txt";
   String input = "check to see if we can read this none reduce";
-  String map = "xargs cat ";
-  String reduce = "cat";
+  String map = TestStreaming.XARGS_CAT;
+  String reduce = TestStreaming.CAT;
   String mapString = "testlink";
   String mapString2 = "testlink2";
   String cacheString = "This is just the cache string";
@@ -68,20 +69,23 @@ public class TestMultipleCachefiles
     MiniDFSCluster dfs = null; 
     try{
       Configuration conf = new Configuration();
-      dfs = new MiniDFSCluster(conf, 1, true, null);
+      dfs = new MiniDFSCluster.Builder(conf).build();
       FileSystem fileSys = dfs.getFileSystem();
       String namenode = fileSys.getUri().toString();
 
       mr  = new MiniMRCluster(1, namenode, 3);
-      String strJobtracker = JTConfig.JT_IPC_ADDRESS + "=localhost:" + mr.createJobConf().get(JTConfig.JT_IPC_ADDRESS);
-      String strNamenode = "fs.default.name=" + mr.createJobConf().get("fs.default.name");
+
+      List<String> args = new ArrayList<String>();
+      for (Map.Entry<String, String> entry : mr.createJobConf()) {
+        args.add("-jobconf");
+        args.add(entry.getKey() + "=" + entry.getValue());
+      }
+
       String argv[] = new String[] {
         "-input", INPUT_FILE,
         "-output", OUTPUT_DIR,
         "-mapper", map,
         "-reducer", reduce,
-        "-jobconf", strNamenode,
-        "-jobconf", strJobtracker,
         "-jobconf", "stream.tmpdir="+System.getProperty("test.build.data","/tmp"),
         "-jobconf", 
           JobConf.MAPRED_MAP_TASK_JAVA_OPTS + "=" +
@@ -98,9 +102,13 @@ public class TestMultipleCachefiles
         "-cacheFile", fileSys.getUri() + CACHE_FILE + "#" + mapString,
         "-cacheFile", fileSys.getUri() + CACHE_FILE_2 + "#" + mapString2,
         "-jobconf", "mapred.jar=" + TestStreaming.STREAMING_JAR,
-        "-jobconf", "mapreduce.framework.name=yarn"
       };
 
+      for (String arg : argv) {
+        args.add(arg);
+      }
+      argv = args.toArray(new String[args.size()]);
+      
       fileSys.delete(new Path(OUTPUT_DIR), true);
       
       DataOutputStream file = fileSys.create(new Path(INPUT_FILE));

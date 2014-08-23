@@ -55,8 +55,12 @@ import java.net.URI;
  * Archives (zip, tar and tgz/tar.gz files) are un-archived at the slave nodes. 
  * Jars may be optionally added to the classpath of the tasks, a rudimentary 
  * software distribution mechanism.  Files have execution permissions.
- * Optionally users can also direct it to symlink the distributed cache file(s)
- * into the working directory of the task.</p>
+ * In older version of Hadoop Map/Reduce users could optionally ask for symlinks
+ * to be created in the working directory of the child task.  In the current 
+ * version symlinks are always created.  If the URL does not have a fragment 
+ * the name of the file or directory will be used. If multiple files or 
+ * directories map to the same link name, the last one added, will be used.  All
+ * others will not even be downloaded.</p>
  * 
  * <p><code>DistributedCache</code> tracks modification timestamps of the cache 
  * files. Clearly the cache files should not be modified by the application 
@@ -98,8 +102,7 @@ import java.net.URI;
  *       
  *       public void configure(JobConf job) {
  *         // Get the cached archives/files
- *         localArchives = DistributedCache.getLocalCacheArchives(job);
- *         localFiles = DistributedCache.getLocalCacheFiles(job);
+ *         File f = new File("./map.zip/some/file/in/zip.txt");
  *       }
  *       
  *       public void map(K key, V value, 
@@ -212,16 +215,33 @@ public class DistributedCache {
   }
 
   /**
+   * Parse a list of strings into longs.
+   * @param strs the list of strings to parse
+   * @return a list of longs that were parsed. same length as strs.
+   */
+  private static long[] parseTimestamps(String[] strs) {
+    if (strs == null) {
+      return null;
+    }
+    long[] result = new long[strs.length];
+    for(int i=0; i < strs.length; ++i) {
+      result[i] = Long.parseLong(strs[i]);
+    }
+    return result;
+  }
+
+  /**
    * Get the timestamps of the archives.  Used by internal
    * DistributedCache and MapReduce code.
    * @param conf The configuration which stored the timestamps
-   * @return a string array of timestamps 
+   * @return a long array of timestamps
    * @throws IOException
    * @deprecated Use {@link JobContext#getArchiveTimestamps()} instead
    */
   @Deprecated
-  public static String[] getArchiveTimestamps(Configuration conf) {
-    return conf.getStrings(MRJobConfig.CACHE_ARCHIVES_TIMESTAMPS);
+  public static long[] getArchiveTimestamps(Configuration conf) {
+    return parseTimestamps(
+        conf.getStrings(MRJobConfig.CACHE_ARCHIVES_TIMESTAMPS));
   }
 
 
@@ -229,13 +249,14 @@ public class DistributedCache {
    * Get the timestamps of the files.  Used by internal
    * DistributedCache and MapReduce code.
    * @param conf The configuration which stored the timestamps
-   * @return a string array of timestamps 
+   * @return a long array of timestamps
    * @throws IOException
    * @deprecated Use {@link JobContext#getFileTimestamps()} instead
    */
   @Deprecated
-  public static String[] getFileTimestamps(Configuration conf) {
-    return conf.getStrings(MRJobConfig.CACHE_FILE_TIMESTAMPS);
+  public static long[] getFileTimestamps(Configuration conf) {
+    return parseTimestamps(
+        conf.getStrings(MRJobConfig.CACHE_FILE_TIMESTAMPS));
   }
 
   /**
@@ -375,32 +396,26 @@ public class DistributedCache {
   }
 
   /**
-   * This method allows you to create symlinks in the current working directory
-   * of the task to all the cache files/archives.
-   * Intended to be used by user code.
+   * Originally intended to enable symlinks, but currently symlinks cannot be
+   * disabled. This is a NO-OP.
    * @param conf the jobconf
-   * @deprecated Use {@link Job#createSymlink()} instead  
+   * @deprecated This is a NO-OP. 
    */
   @Deprecated
   public static void createSymlink(Configuration conf){
-    conf.set(MRJobConfig.CACHE_SYMLINK, "yes");
+    //NOOP
   }
   
   /**
-   * This method checks to see if symlinks are to be create for the 
-   * localized cache files in the current working directory 
-   * Used by internal DistributedCache code.
+   * Originally intended to check if symlinks should be used, but currently
+   * symlinks cannot be disabled.
    * @param conf the jobconf
-   * @return true if symlinks are to be created- else return false
-   * @deprecated Use {@link JobContext#getSymlink()} instead
+   * @return true
+   * @deprecated symlinks are always created.
    */
   @Deprecated
   public static boolean getSymlink(Configuration conf){
-    String result = conf.get(MRJobConfig.CACHE_SYMLINK);
-    if ("yes".equals(result)){
-      return true;
-    }
-    return false;
+    return true;
   }
 
   private static boolean[] parseBooleans(String[] strs) {

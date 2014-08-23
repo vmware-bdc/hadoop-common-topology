@@ -17,17 +17,15 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import java.io.BufferedReader;
 import java.io.Closeable;
 import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.io.OutputStream;
 import java.net.URI;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -35,28 +33,26 @@ import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
-import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.InconsistentFSStateException;
 import org.apache.hadoop.hdfs.server.common.Storage;
-import org.apache.hadoop.hdfs.server.common.UpgradeManager;
+import org.apache.hadoop.hdfs.server.common.StorageErrorReporter;
 import org.apache.hadoop.hdfs.server.common.Util;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
-import org.apache.hadoop.hdfs.util.AtomicFileOutputStream;
-
+import org.apache.hadoop.hdfs.util.PersistentLongFile;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.DNS;
+import org.apache.hadoop.util.Time;
 
-import com.google.common.base.Preconditions;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 
 /**
@@ -64,27 +60,30 @@ import com.google.common.collect.Lists;
  * the NameNode.
  */
 @InterfaceAudience.Private
-public class NNStorage extends Storage implements Closeable {
-  private static final Log LOG = LogFactory.getLog(NNStorage.class.getName());
-
+public class NNStorage extends Storage implements Closeable,
+    StorageErrorReporter {
   static final String DEPRECATED_MESSAGE_DIGEST_PROPERTY = "imageMD5Digest";
   static final String LOCAL_URI_SCHEME = "file";
 
   //
   // The filenames used for storing the images
   //
-  enum NameNodeFile {
+  public enum NameNodeFile {
     IMAGE     ("fsimage"),
     TIME      ("fstime"), // from "old" pre-HDFS-1073 format
     SEEN_TXID ("seen_txid"),
     EDITS     ("edits"),
     IMAGE_NEW ("fsimage.ckpt"),
+    IMAGE_ROLLBACK("fsimage_rollback"),
     EDITS_NEW ("edits.new"), // from "old" pre-HDFS-1073 format
-    EDITS_INPROGRESS ("edits_inprogress");
+    EDITS_INPROGRESS ("edits_inprogress"),
+    EDITS_TMP ("edits_tmp"),
+    IMAGE_LEGACY_OIV ("fsimage_legacy_oiv");  // For pre-PB format
 
     private String fileName = null;
     private NameNodeFile(String name) { this.fileName = name; }
-    String getName() { return fileName; }
+    @VisibleForTesting
+    public String getName() { return fileName; }
   }
 
   /**
@@ -93,16 +92,19 @@ public class NNStorage extends Storage implements Closeable {
    * or of type EDITS which stores edits or of type IMAGE_AND_EDITS which
    * stores both fsimage and edits.
    */
-  static enum NameNodeDirType implements StorageDirType {
+  @VisibleForTesting
+  public static enum NameNodeDirType implements StorageDirType {
     UNDEFINED,
     IMAGE,
     EDITS,
     IMAGE_AND_EDITS;
 
+    @Override
     public StorageDirType getStorageDirType() {
       return this;
     }
 
+    @Override
     public boolean isOfType(StorageDirType type) {
       if ((this == IMAGE_AND_EDITS) && (type == IMAGE || type == EDITS))
         return true;
@@ -110,14 +112,13 @@ public class NNStorage extends Storage implements Closeable {
     }
   }
 
-  private UpgradeManager upgradeManager = null;
   protected String blockpoolID = ""; // id of the block pool
   
   /**
    * flag that controls if we try to restore failed storages
    */
   private boolean restoreFailedStorage = false;
-  private Object restorationLock = new Object();
+  private final Object restorationLock = new Object();
   private boolean disablePreUpgradableLayoutCheck = false;
 
 
@@ -126,7 +127,7 @@ public class NNStorage extends Storage implements Closeable {
    * recent fsimage file. This does not include any transactions
    * that have since been written to the edit log.
    */
-  protected long mostRecentCheckpointTxId = HdfsConstants.INVALID_TXID;
+  protected volatile long mostRecentCheckpointTxId = HdfsConstants.INVALID_TXID;
   
   /**
    * Time of the last checkpoint, in milliseconds since the epoch.
@@ -234,8 +235,8 @@ public class NNStorage extends Storage implements Closeable {
         File root = sd.getRoot();
         LOG.info("currently disabled dir " + root.getAbsolutePath() +
                  "; type="+sd.getStorageDirType() 
-                 + ";canwrite="+root.canWrite());
-        if(root.exists() && root.canWrite()) {
+                 + ";canwrite="+FileUtil.canWrite(root));
+        if(root.exists() && FileUtil.canWrite(root)) {
           LOG.info("restoring dir " + sd.getRoot().getAbsolutePath());
           this.addStorageDir(sd); // restore
           this.removedStorageDirs.remove(sd);
@@ -301,7 +302,7 @@ public class NNStorage extends Storage implements Closeable {
       if(dirName.getScheme().compareTo("file") == 0) {
         this.addStorageDir(new StorageDirectory(new File(dirName.getPath()),
             dirType,
-            !sharedEditsDirs.contains(dirName))); // Don't lock the dir if it's shared.
+            sharedEditsDirs.contains(dirName))); // Don't lock the dir if it's shared.
       }
     }
 
@@ -312,7 +313,7 @@ public class NNStorage extends Storage implements Closeable {
       // URI is of type file://
       if(dirName.getScheme().compareTo("file") == 0)
         this.addStorageDir(new StorageDirectory(new File(dirName.getPath()),
-                    NameNodeDirType.EDITS, !sharedEditsDirs.contains(dirName)));
+                    NameNodeDirType.EDITS, sharedEditsDirs.contains(dirName)));
     }
   }
 
@@ -420,39 +421,19 @@ public class NNStorage extends Storage implements Closeable {
    */
   static long readTransactionIdFile(StorageDirectory sd) throws IOException {
     File txidFile = getStorageFile(sd, NameNodeFile.SEEN_TXID);
-    long txid = 0L;
-    if (txidFile.exists() && txidFile.canRead()) {
-      BufferedReader br = new BufferedReader(new FileReader(txidFile));
-      try {
-        txid = Long.valueOf(br.readLine());
-        br.close();
-        br = null;
-      } finally {
-        IOUtils.cleanup(LOG, br);
-      }
-    }
-    return txid;
+    return PersistentLongFile.readFile(txidFile, 0);
   }
   
   /**
    * Write last checkpoint time into a separate file.
-   *
-   * @param sd
+   * @param sd storage directory
    * @throws IOException
    */
   void writeTransactionIdFile(StorageDirectory sd, long txid) throws IOException {
     Preconditions.checkArgument(txid >= 0, "bad txid: " + txid);
     
     File txIdFile = getStorageFile(sd, NameNodeFile.SEEN_TXID);
-    OutputStream fos = new AtomicFileOutputStream(txIdFile);
-    try {
-      fos.write(String.valueOf(txid).getBytes());
-      fos.write('\n');
-      fos.close();
-      fos = null;
-    } finally {
-      IOUtils.cleanup(LOG, fos);
-    }
+    PersistentLongFile.writeFile(txIdFile, txid);
   }
 
   /**
@@ -519,21 +500,42 @@ public class NNStorage extends Storage implements Closeable {
   }
 
   /**
-   * Return the name of the image file.
-   * @return The name of the first image file.
+   * @return The first image file with the given txid and image type.
    */
-  public File getFsImageName(long txid) {
-    StorageDirectory sd = null;
-    for (Iterator<StorageDirectory> it =
-      dirIterator(NameNodeDirType.IMAGE); it.hasNext();) {
-      sd = it.next();
-      File fsImage = getStorageFile(sd, NameNodeFile.IMAGE, txid);
-      if(sd.getRoot().canRead() && fsImage.exists())
+  public File getFsImageName(long txid, NameNodeFile nnf) {
+    for (Iterator<StorageDirectory> it = dirIterator(NameNodeDirType.IMAGE);
+        it.hasNext();) {
+      StorageDirectory sd = it.next();
+      File fsImage = getStorageFile(sd, nnf, txid);
+      if (FileUtil.canRead(sd.getRoot()) && fsImage.exists()) {
         return fsImage;
+      }
     }
     return null;
   }
-  
+
+  /**
+   * @return The first image file whose txid is the same with the given txid and
+   * image type is one of the given types.
+   */
+  public File getFsImage(long txid, EnumSet<NameNodeFile> nnfs) {
+    for (Iterator<StorageDirectory> it = dirIterator(NameNodeDirType.IMAGE);
+        it.hasNext();) {
+      StorageDirectory sd = it.next();
+      for (NameNodeFile nnf : nnfs) {
+        File fsImage = getStorageFile(sd, nnf, txid);
+        if (FileUtil.canRead(sd.getRoot()) && fsImage.exists()) {
+          return fsImage;
+        }
+      }
+    }
+    return null;
+  }
+
+  public File getFsImageName(long txid) {
+    return getFsImageName(txid, NameNodeFile.IMAGE);
+  }
+
   public File getHighestFsImageName() {
     return getFsImageName(getMostRecentCheckpointTxId());
   }
@@ -554,7 +556,7 @@ public class NNStorage extends Storage implements Closeable {
    */
   public void format(NamespaceInfo nsInfo) throws IOException {
     Preconditions.checkArgument(nsInfo.getLayoutVersion() == 0 ||
-        nsInfo.getLayoutVersion() == HdfsConstants.LAYOUT_VERSION,
+        nsInfo.getLayoutVersion() == HdfsConstants.NAMENODE_LAYOUT_VERSION,
         "Bad layout version: %s", nsInfo.getLayoutVersion());
     
     this.setStorageInfo(nsInfo);
@@ -568,15 +570,12 @@ public class NNStorage extends Storage implements Closeable {
   
   public static NamespaceInfo newNamespaceInfo()
       throws UnknownHostException {
-    return new NamespaceInfo(
-        newNamespaceID(),
-        newClusterID(),
-        newBlockPoolID(),
-        0L, 0);
+    return new NamespaceInfo(newNamespaceID(), newClusterID(),
+        newBlockPoolID(), 0L);
   }
   
   public void format() throws IOException {
-    this.layoutVersion = HdfsConstants.LAYOUT_VERSION;
+    this.layoutVersion = HdfsConstants.NAMENODE_LAYOUT_VERSION;
     for (Iterator<StorageDirectory> it =
                            dirIterator(); it.hasNext();) {
       StorageDirectory sd = it.next();
@@ -613,17 +612,11 @@ public class NNStorage extends Storage implements Closeable {
     }
 
     // Set Block pool ID in version with federation support
-    if (LayoutVersion.supports(Feature.FEDERATION, layoutVersion)) {
+    if (NameNodeLayoutVersion.supports(
+        LayoutVersion.Feature.FEDERATION, getLayoutVersion())) {
       String sbpid = props.getProperty("blockpoolID");
       setBlockPoolID(sd.getRoot(), sbpid);
     }
-    
-    String sDUS, sDUV;
-    sDUS = props.getProperty("distributedUpgradeState");
-    sDUV = props.getProperty("distributedUpgradeVersion");
-    setDistributedUpgradeState(
-        sDUS == null? false : Boolean.parseBoolean(sDUS),
-        sDUV == null? getLayoutVersion() : Integer.parseInt(sDUV));
     setDeprecatedPropertiesForUpgrade(props);
   }
 
@@ -645,7 +638,7 @@ public class NNStorage extends Storage implements Closeable {
    * This should only be used during upgrades.
    */
   String getDeprecatedProperty(String prop) {
-    assert getLayoutVersion() > HdfsConstants.LAYOUT_VERSION :
+    assert getLayoutVersion() > HdfsConstants.NAMENODE_LAYOUT_VERSION :
       "getDeprecatedProperty should only be done when loading " +
       "storage from past versions during upgrade.";
     return deprecatedProperties.get(prop);
@@ -667,15 +660,9 @@ public class NNStorage extends Storage implements Closeable {
                            ) throws IOException {
     super.setPropertiesFromFields(props, sd);
     // Set blockpoolID in version with federation support
-    if (LayoutVersion.supports(Feature.FEDERATION, layoutVersion)) {
+    if (NameNodeLayoutVersion.supports(
+        LayoutVersion.Feature.FEDERATION, getLayoutVersion())) {
       props.setProperty("blockpoolID", blockpoolID);
-    }
-    boolean uState = getDistributedUpgradeState();
-    int uVersion = getDistributedUpgradeVersion();
-    if(uState && uVersion != getLayoutVersion()) {
-      props.setProperty("distributedUpgradeState", Boolean.toString(uState));
-      props.setProperty("distributedUpgradeVersion",
-                        Integer.toString(uVersion));
     }
   }
   
@@ -694,20 +681,30 @@ public class NNStorage extends Storage implements Closeable {
 
   @VisibleForTesting
   public static String getCheckpointImageFileName(long txid) {
-    return String.format("%s_%019d",
-                         NameNodeFile.IMAGE_NEW.getName(), txid);
+    return getNameNodeFileName(NameNodeFile.IMAGE_NEW, txid);
   }
 
   @VisibleForTesting
   public static String getImageFileName(long txid) {
-    return String.format("%s_%019d",
-                         NameNodeFile.IMAGE.getName(), txid);
+    return getNameNodeFileName(NameNodeFile.IMAGE, txid);
   }
-  
+
+  @VisibleForTesting
+  public static String getRollbackImageFileName(long txid) {
+    return getNameNodeFileName(NameNodeFile.IMAGE_ROLLBACK, txid);
+  }
+
+  public static String getLegacyOIVImageFileName(long txid) {
+    return getNameNodeFileName(NameNodeFile.IMAGE_LEGACY_OIV, txid);
+  }
+
+  private static String getNameNodeFileName(NameNodeFile nnf, long txid) {
+    return String.format("%s_%019d", nnf.getName(), txid);
+  }
+
   @VisibleForTesting
   public static String getInProgressEditsFileName(long startTxId) {
-    return String.format("%s_%019d", NameNodeFile.EDITS_INPROGRESS.getName(),
-                         startTxId);
+    return getNameNodeFileName(NameNodeFile.EDITS_INPROGRESS, startTxId);
   }
   
   static File getInProgressEditsFile(StorageDirectory sd, long startTxId) {
@@ -719,16 +716,27 @@ public class NNStorage extends Storage implements Closeable {
     return new File(sd.getCurrentDir(),
         getFinalizedEditsFileName(startTxId, endTxId));
   }
-  
-  static File getImageFile(StorageDirectory sd, long txid) {
+
+  static File getTemporaryEditsFile(StorageDirectory sd,
+      long startTxId, long endTxId, long timestamp) {
     return new File(sd.getCurrentDir(),
-        getImageFileName(txid));
+        getTemporaryEditsFileName(startTxId, endTxId, timestamp));
   }
-  
+
+  static File getImageFile(StorageDirectory sd, NameNodeFile nnf, long txid) {
+    return new File(sd.getCurrentDir(), getNameNodeFileName(nnf, txid));
+  }
+
   @VisibleForTesting
   public static String getFinalizedEditsFileName(long startTxId, long endTxId) {
     return String.format("%s_%019d-%019d", NameNodeFile.EDITS.getName(),
                          startTxId, endTxId);
+  }
+
+  public static String getTemporaryEditsFileName(long startTxId, long endTxId,
+      long timestamp) {
+    return String.format("%s_%019d-%019d_%019d", NameNodeFile.EDITS_TMP.getName(),
+                         startTxId, endTxId, timestamp);
   }
   
   /**
@@ -746,12 +754,12 @@ public class NNStorage extends Storage implements Closeable {
   }
     
   /**
-   * Return the first readable image file for the given txid, or null
-   * if no such image can be found
+   * Return the first readable image file for the given txid and image type, or
+   * null if no such image can be found
    */
-  File findImageFile(long txid) throws IOException {
+  File findImageFile(NameNodeFile nnf, long txid) {
     return findFile(NameNodeDirType.IMAGE,
-        getImageFileName(txid));
+        getNameNodeFileName(nnf, txid));
   }
 
   /**
@@ -762,96 +770,12 @@ public class NNStorage extends Storage implements Closeable {
   private File findFile(NameNodeDirType dirType, String name) {
     for (StorageDirectory sd : dirIterable(dirType)) {
       File candidate = new File(sd.getCurrentDir(), name);
-      if (sd.getCurrentDir().canRead() &&
+      if (FileUtil.canRead(sd.getCurrentDir()) &&
           candidate.exists()) {
         return candidate;
       }
     }
     return null;
-  }
-
-  /**
-   * @return A list of the given File in every available storage directory,
-   * regardless of whether it might exist.
-   */
-  List<File> getFiles(NameNodeDirType dirType, String fileName) {
-    ArrayList<File> list = new ArrayList<File>();
-    Iterator<StorageDirectory> it =
-      (dirType == null) ? dirIterator() : dirIterator(dirType);
-    for ( ;it.hasNext(); ) {
-      list.add(new File(it.next().getCurrentDir(), fileName));
-    }
-    return list;
-  }
-
-  /**
-   * Set the upgrade manager for use in a distributed upgrade.
-   * @param um The upgrade manager
-   */
-  void setUpgradeManager(UpgradeManager um) {
-    upgradeManager = um;
-  }
-
-  /**
-   * @return The current distribued upgrade state.
-   */
-  boolean getDistributedUpgradeState() {
-    return upgradeManager == null ? false : upgradeManager.getUpgradeState();
-  }
-
-  /**
-   * @return The current upgrade version.
-   */
-  int getDistributedUpgradeVersion() {
-    return upgradeManager == null ? 0 : upgradeManager.getUpgradeVersion();
-  }
-
-  /**
-   * Set the upgrade state and version.
-   * @param uState the new state.
-   * @param uVersion the new version.
-   */
-  private void setDistributedUpgradeState(boolean uState, int uVersion) {
-    if (upgradeManager != null) {
-      upgradeManager.setUpgradeState(uState, uVersion);
-    }
-  }
-
-  /**
-   * Verify that the distributed upgrade state is valid.
-   * @param startOpt the option the namenode was started with.
-   */
-  void verifyDistributedUpgradeProgress(StartupOption startOpt
-                                        ) throws IOException {
-    if(startOpt == StartupOption.ROLLBACK || startOpt == StartupOption.IMPORT)
-      return;
-
-    assert upgradeManager != null : "FSNameSystem.upgradeManager is null.";
-    if(startOpt != StartupOption.UPGRADE) {
-      if(upgradeManager.getUpgradeState())
-        throw new IOException(
-                    "\n   Previous distributed upgrade was not completed. "
-                  + "\n   Please restart NameNode with -upgrade option.");
-      if(upgradeManager.getDistributedUpgrades() != null)
-        throw new IOException("\n   Distributed upgrade for NameNode version "
-                              + upgradeManager.getUpgradeVersion()
-                              + " to current LV " + HdfsConstants.LAYOUT_VERSION
-                              + " is required.\n   Please restart NameNode"
-                              + " with -upgrade option.");
-    }
-  }
-
-  /**
-   * Initialize a distributed upgrade.
-   */
-  void initializeDistributedUpgrade() throws IOException {
-    if(! upgradeManager.initializeUpgrade())
-      return;
-    // write new upgrade state into disk
-    writeAll();
-    LOG.info("\n   Distributed upgrade for NameNode version "
-             + upgradeManager.getUpgradeVersion() + " to current LV "
-             + HdfsConstants.LAYOUT_VERSION + " is initialized.");
   }
 
   /**
@@ -866,7 +790,6 @@ public class NNStorage extends Storage implements Closeable {
    * Marks a list of directories as having experienced an error.
    *
    * @param sds A list of storage directories to mark as errored.
-   * @throws IOException
    */
   void reportErrorsOnDirectories(List<StorageDirectory> sds) {
     for (StorageDirectory sd : sds) {
@@ -880,9 +803,8 @@ public class NNStorage extends Storage implements Closeable {
    * available.
    *
    * @param sd A storage directory to mark as errored.
-   * @throws IOException
    */
-  void reportErrorsOnDirectory(StorageDirectory sd) {
+  private void reportErrorsOnDirectory(StorageDirectory sd) {
     LOG.error("Error reported on storage directory " + sd);
 
     String lsd = listStorageDirectories();
@@ -914,11 +836,12 @@ public class NNStorage extends Storage implements Closeable {
    */
   void processStartupOptionsForUpgrade(StartupOption startOpt, int layoutVersion)
       throws IOException {
-    if (startOpt == StartupOption.UPGRADE) {
+    if (startOpt == StartupOption.UPGRADE || startOpt == StartupOption.UPGRADEONLY) {
       // If upgrade from a release that does not support federation,
       // if clusterId is provided in the startupOptions use it.
       // Else generate a new cluster ID      
-      if (!LayoutVersion.supports(Feature.FEDERATION, layoutVersion)) {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.FEDERATION, layoutVersion)) {
         if (startOpt.getClusterId() == null) {
           startOpt.setClusterId(newClusterID());
         }
@@ -943,7 +866,8 @@ public class NNStorage extends Storage implements Closeable {
    * Report that an IOE has occurred on some file which may
    * or may not be within one of the NN image storage directories.
    */
-  void reportErrorOnFile(File f) {
+  @Override
+  public void reportErrorOnFile(File f) {
     // We use getAbsolutePath here instead of getCanonicalPath since we know
     // that there is some IO problem on that drive.
     // getCanonicalPath may need to call stat() or readlink() and it's likely
@@ -951,8 +875,8 @@ public class NNStorage extends Storage implements Closeable {
     String absPath = f.getAbsolutePath();
     for (StorageDirectory sd : storageDirs) {
       String dirPath = sd.getRoot().getAbsolutePath();
-      if (!dirPath.endsWith("/")) {
-        dirPath += "/";
+      if (!dirPath.endsWith(File.separator)) {
+        dirPath += File.separator;
       }
       if (absPath.startsWith(dirPath)) {
         reportErrorsOnDirectory(sd);
@@ -1027,7 +951,7 @@ public class NNStorage extends Storage implements Closeable {
     }
     
     int rand = DFSUtil.getSecureRandom().nextInt(Integer.MAX_VALUE);
-    String bpid = "BP-" + rand + "-"+ ip + "-" + System.currentTimeMillis();
+    String bpid = "BP-" + rand + "-"+ ip + "-" + Time.now();
     return bpid;
   }
 
@@ -1076,15 +1000,16 @@ public class NNStorage extends Storage implements Closeable {
    * inspected each directory.
    * 
    * <b>Note:</b> this can mutate the storage info fields (ctime, version, etc).
-   * @throws IOException if no valid storage dirs are found
+   * @throws IOException if no valid storage dirs are found or no valid layout version
    */
-  FSImageStorageInspector readAndInspectDirs()
+  FSImageStorageInspector readAndInspectDirs(EnumSet<NameNodeFile> fileTypes)
       throws IOException {
-    int minLayoutVersion = Integer.MAX_VALUE; // the newest
-    int maxLayoutVersion = Integer.MIN_VALUE; // the oldest
-    
+    Integer layoutVersion = null;
+    boolean multipleLV = false;
+    StringBuilder layoutVersions = new StringBuilder();
+
     // First determine what range of layout versions we're going to inspect
-    for (Iterator<StorageDirectory> it = dirIterator();
+    for (Iterator<StorageDirectory> it = dirIterator(false);
          it.hasNext();) {
       StorageDirectory sd = it.next();
       if (!sd.getVersionFile().exists()) {
@@ -1092,29 +1017,43 @@ public class NNStorage extends Storage implements Closeable {
         continue;
       }
       readProperties(sd); // sets layoutVersion
-      minLayoutVersion = Math.min(minLayoutVersion, getLayoutVersion());
-      maxLayoutVersion = Math.max(maxLayoutVersion, getLayoutVersion());
+      int lv = getLayoutVersion();
+      if (layoutVersion == null) {
+        layoutVersion = Integer.valueOf(lv);
+      } else if (!layoutVersion.equals(lv)) {
+        multipleLV = true;
+      }
+      layoutVersions.append("(").append(sd.getRoot()).append(", ").append(lv).append(") ");
     }
     
-    if (minLayoutVersion > maxLayoutVersion) {
+    if (layoutVersion == null) {
       throw new IOException("No storage directories contained VERSION information");
     }
-    assert minLayoutVersion <= maxLayoutVersion;
-    
-    // If we have any storage directories with the new layout version
+    if (multipleLV) {            
+      throw new IOException(
+          "Storage directories contain multiple layout versions: "
+              + layoutVersions);
+    }
+    // If the storage directories are with the new layout version
     // (ie edits_<txnid>) then use the new inspector, which will ignore
     // the old format dirs.
     FSImageStorageInspector inspector;
-    if (LayoutVersion.supports(Feature.TXID_BASED_LAYOUT, minLayoutVersion)) {
-      inspector = new FSImageTransactionalStorageInspector();
-      if (!LayoutVersion.supports(Feature.TXID_BASED_LAYOUT, maxLayoutVersion)) {
-        FSImage.LOG.warn("Ignoring one or more storage directories with old layouts");
-      }
+    if (NameNodeLayoutVersion.supports(
+        LayoutVersion.Feature.TXID_BASED_LAYOUT, getLayoutVersion())) {
+      inspector = new FSImageTransactionalStorageInspector(fileTypes);
     } else {
       inspector = new FSImagePreTransactionalStorageInspector();
     }
     
     inspectStorageDirs(inspector);
     return inspector;
+  }
+
+  public NamespaceInfo getNamespaceInfo() {
+    return new NamespaceInfo(
+        getNamespaceID(),
+        getClusterID(),
+        getBlockPoolID(),
+        getCTime());
   }
 }

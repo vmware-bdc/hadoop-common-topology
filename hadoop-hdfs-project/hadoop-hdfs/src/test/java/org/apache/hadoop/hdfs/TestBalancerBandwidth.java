@@ -17,27 +17,27 @@
 */
 package org.apache.hadoop.hdfs;
 
-import java.util.ArrayList;
+import static org.junit.Assert.assertEquals;
 
-import junit.framework.TestCase;
-import org.apache.hadoop.conf.Configuration;
+import java.util.ArrayList;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.junit.Test;
 
 /**
  * This test ensures that the balancer bandwidth is dynamically adjusted
  * correctly.
  */
-public class TestBalancerBandwidth extends TestCase {
+public class TestBalancerBandwidth {
   final static private Configuration conf = new Configuration();
   final static private int NUM_OF_DATANODES = 2;
   final static private int DEFAULT_BANDWIDTH = 1024*1024;
   public static final Log LOG = LogFactory.getLog(TestBalancerBandwidth.class);
 
+  @Test
   public void testBalancerBandwidth() throws Exception {
     /* Set bandwidthPerSec to a low value of 1M bps. */
     conf.setLong(
@@ -50,7 +50,7 @@ public class TestBalancerBandwidth extends TestCase {
     try {
       cluster.waitActive();
 
-      DistributedFileSystem fs = (DistributedFileSystem) cluster.getFileSystem();
+      DistributedFileSystem fs = cluster.getFileSystem();
 
       ArrayList<DataNode> datanodes = cluster.getDataNodes();
       // Ensure value from the configuration is reflected in the datanodes.

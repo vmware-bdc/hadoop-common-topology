@@ -28,7 +28,7 @@ import org.apache.commons.logging.*;
 import org.apache.commons.logging.impl.*;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.util.ServletUtil;
 
 /**
@@ -36,11 +36,9 @@ import org.apache.hadoop.util.ServletUtil;
  */
 @InterfaceStability.Evolving
 public class LogLevel {
-  public static final String USAGES = "\nUSAGES:\n"
-    + "java " + LogLevel.class.getName()
-    + " -getlevel <host:port> <name>\n"
-    + "java " + LogLevel.class.getName()
-    + " -setlevel <host:port> <name> <level>\n";
+  public static final String USAGES = "\nUsage: General options are:\n"
+      + "\t[-getlevel <host:httpPort> <name>]\n"
+      + "\t[-setlevel <host:httpPort> <name> <level>]\n";
 
   /**
    * A command line implementation
@@ -90,11 +88,12 @@ public class LogLevel {
   public static class Servlet extends HttpServlet {
     private static final long serialVersionUID = 1L;
 
+    @Override
     public void doGet(HttpServletRequest request, HttpServletResponse response
         ) throws ServletException, IOException {
 
       // Do the authorization
-      if (!HttpServer.hasAdministratorAccess(getServletContext(), request,
+      if (!HttpServer2.hasAdministratorAccess(getServletContext(), request,
           response)) {
         return;
       }

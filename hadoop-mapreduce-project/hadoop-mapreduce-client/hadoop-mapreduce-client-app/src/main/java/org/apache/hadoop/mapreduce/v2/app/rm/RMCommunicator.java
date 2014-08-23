@@ -19,8 +19,10 @@
 package org.apache.hadoop.mapreduce.v2.app.rm;
 
 import java.io.IOException;
-import java.security.PrivilegedAction;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
@@ -30,51 +32,53 @@ import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
-import org.apache.hadoop.mapreduce.v2.api.records.JobState;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
+import org.apache.hadoop.mapreduce.v2.app.MRAppMaster.RunningAppContext;
 import org.apache.hadoop.mapreduce.v2.app.client.ClientService;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
-import org.apache.hadoop.mapreduce.v2.jobhistory.JobHistoryUtils;
-import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.mapreduce.v2.app.job.JobStateInternal;
+import org.apache.hadoop.mapreduce.v2.app.job.impl.JobImpl;
+import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.token.Token;
-import org.apache.hadoop.security.token.TokenIdentifier;
-import org.apache.hadoop.yarn.YarnException;
-import org.apache.hadoop.yarn.api.AMRMProtocol;
-import org.apache.hadoop.yarn.api.ApplicationConstants;
+import org.apache.hadoop.service.AbstractService;
+import org.apache.hadoop.yarn.api.ApplicationMasterProtocol;
 import org.apache.hadoop.yarn.api.protocolrecords.FinishApplicationMasterRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.FinishApplicationMasterResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.RegisterApplicationMasterRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.RegisterApplicationMasterResponse;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
-import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.Resource;
-import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.client.ClientRMProxy;
 import org.apache.hadoop.yarn.event.EventHandler;
+import org.apache.hadoop.yarn.exceptions.ApplicationMasterNotRegisteredException;
+import org.apache.hadoop.yarn.exceptions.YarnException;
+import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
-import org.apache.hadoop.yarn.ipc.YarnRPC;
-import org.apache.hadoop.yarn.service.AbstractService;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Registers/unregisters to RM and sends heartbeats to RM.
  */
-public abstract class RMCommunicator extends AbstractService  {
+public abstract class RMCommunicator extends AbstractService
+    implements RMHeartbeatHandler {
   private static final Log LOG = LogFactory.getLog(RMContainerAllocator.class);
   private int rmPollInterval;//millis
   protected ApplicationId applicationId;
-  protected ApplicationAttemptId applicationAttemptId;
-  private AtomicBoolean stopped;
+  private final AtomicBoolean stopped;
   protected Thread allocatorThread;
   @SuppressWarnings("rawtypes")
   protected EventHandler eventHandler;
-  protected AMRMProtocol scheduler;
+  protected ApplicationMasterProtocol scheduler;
   private final ClientService clientService;
   protected int lastResponseID;
-  private Resource minContainerCapability;
   private Resource maxContainerCapability;
   protected Map<ApplicationAccessType, String> applicationACLs;
+  private volatile long lastHeartbeatTime;
+  private ConcurrentLinkedQueue<Runnable> heartbeatCallbacks;
 
   private final RecordFactory recordFactory =
       RecordFactoryProvider.getRecordFactory(null);
@@ -83,6 +87,8 @@ public abstract class RMCommunicator extends AbstractService  {
   private Job job;
   // Has a signal (SIGTERM etc) been issued?
   protected volatile boolean isSignalled = false;
+  private volatile boolean shouldUnregister = true;
+  private boolean isApplicationMasterRegistered = false;
 
   public RMCommunicator(ClientService clientService, AppContext context) {
     super("RMCommunicator");
@@ -90,27 +96,27 @@ public abstract class RMCommunicator extends AbstractService  {
     this.context = context;
     this.eventHandler = context.getEventHandler();
     this.applicationId = context.getApplicationID();
-    this.applicationAttemptId = context.getApplicationAttemptId();
     this.stopped = new AtomicBoolean(false);
+    this.heartbeatCallbacks = new ConcurrentLinkedQueue<Runnable>();
   }
 
   @Override
-  public void init(Configuration conf) {
-    super.init(conf);
+  protected void serviceInit(Configuration conf) throws Exception {
+    super.serviceInit(conf);
     rmPollInterval =
         conf.getInt(MRJobConfig.MR_AM_TO_RM_HEARTBEAT_INTERVAL_MS,
             MRJobConfig.DEFAULT_MR_AM_TO_RM_HEARTBEAT_INTERVAL_MS);
   }
 
   @Override
-  public void start() {
+  protected void serviceStart() throws Exception {
     scheduler= createSchedulerProxy();
-    register();
-    startAllocatorThread();
     JobID id = TypeConverter.fromYarn(this.applicationId);
     JobId jobId = TypeConverter.toYarn(id);
     job = context.getJob(jobId);
-    super.start();
+    register();
+    startAllocatorThread();
+    super.serviceStart();
   }
 
   protected AppContext getContext() {
@@ -133,68 +139,106 @@ public abstract class RMCommunicator extends AbstractService  {
 
   protected void register() {
     //Register
-    String host = clientService.getBindAddress().getAddress()
-        .getCanonicalHostName();
+    InetSocketAddress serviceAddr = null;
+    if (clientService != null ) {
+      serviceAddr = clientService.getBindAddress();
+    }
     try {
       RegisterApplicationMasterRequest request =
         recordFactory.newRecordInstance(RegisterApplicationMasterRequest.class);
-      request.setApplicationAttemptId(applicationAttemptId);
-      request.setHost(host);
-      request.setRpcPort(clientService.getBindAddress().getPort());
-      request.setTrackingUrl(host + ":" + clientService.getHttpPort());
+      if (serviceAddr != null) {
+        request.setHost(serviceAddr.getHostName());
+        request.setRpcPort(serviceAddr.getPort());
+        request.setTrackingUrl(MRWebAppUtil
+            .getAMWebappScheme(getConfig())
+            + serviceAddr.getHostName() + ":" + clientService.getHttpPort());
+      }
       RegisterApplicationMasterResponse response =
         scheduler.registerApplicationMaster(request);
-      minContainerCapability = response.getMinimumResourceCapability();
+      isApplicationMasterRegistered = true;
       maxContainerCapability = response.getMaximumResourceCapability();
-      this.context.getClusterInfo().setMinContainerCapability(
-          minContainerCapability);
       this.context.getClusterInfo().setMaxContainerCapability(
           maxContainerCapability);
+      if (UserGroupInformation.isSecurityEnabled()) {
+        setClientToAMToken(response.getClientToAMTokenMasterKey());        
+      }
       this.applicationACLs = response.getApplicationACLs();
-      LOG.info("minContainerCapability: " + minContainerCapability.getMemory());
       LOG.info("maxContainerCapability: " + maxContainerCapability.getMemory());
+      String queue = response.getQueue();
+      LOG.info("queue: " + queue);
+      job.setQueueName(queue);
     } catch (Exception are) {
       LOG.error("Exception while registering", are);
-      throw new YarnException(are);
+      throw new YarnRuntimeException(are);
     }
+  }
+
+  private void setClientToAMToken(ByteBuffer clientToAMTokenMasterKey) {
+    byte[] key = clientToAMTokenMasterKey.array();
+    context.getClientToAMTokenSecretManager().setMasterKey(key);
   }
 
   protected void unregister() {
     try {
-      FinalApplicationStatus finishState = FinalApplicationStatus.UNDEFINED;
-      if (job.getState() == JobState.SUCCEEDED) {
-        finishState = FinalApplicationStatus.SUCCEEDED;
-      } else if (job.getState() == JobState.KILLED
-          || (job.getState() == JobState.RUNNING && isSignalled)) {
-        finishState = FinalApplicationStatus.KILLED;
-      } else if (job.getState() == JobState.FAILED
-          || job.getState() == JobState.ERROR) {
-        finishState = FinalApplicationStatus.FAILED;
-      }
-      StringBuffer sb = new StringBuffer();
-      for (String s : job.getDiagnostics()) {
-        sb.append(s).append("\n");
-      }
-      LOG.info("Setting job diagnostics to " + sb.toString());
-
-      String historyUrl = JobHistoryUtils.getHistoryUrl(getConfig(),
-          context.getApplicationID());
-      LOG.info("History url is " + historyUrl);
-
-      FinishApplicationMasterRequest request =
-          recordFactory.newRecordInstance(FinishApplicationMasterRequest.class);
-      request.setAppAttemptId(this.applicationAttemptId);
-      request.setFinishApplicationStatus(finishState);
-      request.setDiagnostics(sb.toString());
-      request.setTrackingUrl(historyUrl);
-      scheduler.finishApplicationMaster(request);
+      doUnregistration();
     } catch(Exception are) {
       LOG.error("Exception while unregistering ", are);
+      // if unregistration failed, isLastAMRetry needs to be recalculated
+      // to see whether AM really has the chance to retry
+      RunningAppContext raContext = (RunningAppContext) context;
+      raContext.resetIsLastAMRetry();
     }
   }
 
-  protected Resource getMinContainerCapability() {
-    return minContainerCapability;
+  @VisibleForTesting
+  protected void doUnregistration()
+      throws YarnException, IOException, InterruptedException {
+    FinalApplicationStatus finishState = FinalApplicationStatus.UNDEFINED;
+    JobImpl jobImpl = (JobImpl)job;
+    if (jobImpl.getInternalState() == JobStateInternal.SUCCEEDED) {
+      finishState = FinalApplicationStatus.SUCCEEDED;
+    } else if (jobImpl.getInternalState() == JobStateInternal.KILLED
+        || (jobImpl.getInternalState() == JobStateInternal.RUNNING && isSignalled)) {
+      finishState = FinalApplicationStatus.KILLED;
+    } else if (jobImpl.getInternalState() == JobStateInternal.FAILED
+        || jobImpl.getInternalState() == JobStateInternal.ERROR) {
+      finishState = FinalApplicationStatus.FAILED;
+    }
+    StringBuffer sb = new StringBuffer();
+    for (String s : job.getDiagnostics()) {
+      sb.append(s).append("\n");
+    }
+    LOG.info("Setting job diagnostics to " + sb.toString());
+
+    String historyUrl =
+        MRWebAppUtil.getApplicationWebURLOnJHSWithScheme(getConfig(),
+            context.getApplicationID());
+    LOG.info("History url is " + historyUrl);
+    FinishApplicationMasterRequest request =
+        FinishApplicationMasterRequest.newInstance(finishState,
+          sb.toString(), historyUrl);
+    try {
+      while (true) {
+        FinishApplicationMasterResponse response =
+            scheduler.finishApplicationMaster(request);
+        if (response.getIsUnregistered()) {
+          // When excepting ClientService, other services are already stopped,
+          // it is safe to let clients know the final states. ClientService
+          // should wait for some time so clients have enough time to know the
+          // final states.
+          RunningAppContext raContext = (RunningAppContext) context;
+          raContext.markSuccessfulUnregistration();
+          break;
+        }
+        LOG.info("Waiting for application to be successfully unregistered.");
+        Thread.sleep(rmPollInterval);
+      }
+    } catch (ApplicationMasterNotRegisteredException e) {
+      // RM might have restarted or failed over and so lost the fact that AM had
+      // registered before.
+      register();
+      doUnregistration();
+    }
   }
 
   protected Resource getMaxContainerCapability() {
@@ -202,19 +246,23 @@ public abstract class RMCommunicator extends AbstractService  {
   }
 
   @Override
-  public void stop() {
+  protected void serviceStop() throws Exception {
     if (stopped.getAndSet(true)) {
       // return if already stopped
       return;
     }
-    allocatorThread.interrupt();
-    try {
-      allocatorThread.join();
-    } catch (InterruptedException ie) {
-      LOG.warn("InterruptedException while stopping", ie);
+    if (allocatorThread != null) {
+      allocatorThread.interrupt();
+      try {
+        allocatorThread.join();
+      } catch (InterruptedException ie) {
+        LOG.warn("InterruptedException while stopping", ie);
+      }
     }
-    unregister();
-    super.stop();
+    if (isApplicationMasterRegistered && shouldUnregister) {
+      unregister();
+    }
+    super.serviceStop();
   }
 
   protected void startAllocatorThread() {
@@ -226,15 +274,21 @@ public abstract class RMCommunicator extends AbstractService  {
             Thread.sleep(rmPollInterval);
             try {
               heartbeat();
-            } catch (YarnException e) {
+            } catch (YarnRuntimeException e) {
               LOG.error("Error communicating with RM: " + e.getMessage() , e);
               return;
             } catch (Exception e) {
               LOG.error("ERROR IN CONTACTING RM. ", e);
+              continue;
               // TODO: for other exceptions
             }
+
+            lastHeartbeatTime = context.getClock().getTime();
+            executeHeartbeatCallbacks();
           } catch (InterruptedException e) {
-            LOG.warn("Allocated thread interrupted. Returning.");
+            if (!stopped.get()) {
+              LOG.warn("Allocated thread interrupted. Returning.");
+            }
             return;
           }
         }
@@ -244,50 +298,49 @@ public abstract class RMCommunicator extends AbstractService  {
     allocatorThread.start();
   }
 
-  protected AMRMProtocol createSchedulerProxy() {
-    final YarnRPC rpc = YarnRPC.create(getConfig());
+  protected ApplicationMasterProtocol createSchedulerProxy() {
     final Configuration conf = getConfig();
-    final String serviceAddr = conf.get(
-        YarnConfiguration.RM_SCHEDULER_ADDRESS,
-        YarnConfiguration.DEFAULT_RM_SCHEDULER_ADDRESS);
 
-    UserGroupInformation currentUser;
     try {
-      currentUser = UserGroupInformation.getCurrentUser();
+      return ClientRMProxy.createRMProxy(conf, ApplicationMasterProtocol.class);
     } catch (IOException e) {
-      throw new YarnException(e);
+      throw new YarnRuntimeException(e);
     }
-
-    if (UserGroupInformation.isSecurityEnabled()) {
-      String tokenURLEncodedStr = System.getenv().get(
-          ApplicationConstants.APPLICATION_MASTER_TOKEN_ENV_NAME);
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("AppMasterToken is " + tokenURLEncodedStr);
-      }
-      Token<? extends TokenIdentifier> token = new Token<TokenIdentifier>();
-
-      try {
-        token.decodeFromUrlString(tokenURLEncodedStr);
-      } catch (IOException e) {
-        throw new YarnException(e);
-      }
-
-      currentUser.addToken(token);
-    }
-
-    return currentUser.doAs(new PrivilegedAction<AMRMProtocol>() {
-      @Override
-      public AMRMProtocol run() {
-        return (AMRMProtocol) rpc.getProxy(AMRMProtocol.class,
-            NetUtils.createSocketAddr(serviceAddr), conf);
-      }
-    });
   }
 
   protected abstract void heartbeat() throws Exception;
 
+  private void executeHeartbeatCallbacks() {
+    Runnable callback = null;
+    while ((callback = heartbeatCallbacks.poll()) != null) {
+      callback.run();
+    }
+  }
+
+  @Override
+  public long getLastHeartbeatTime() {
+    return lastHeartbeatTime;
+  }
+
+  @Override
+  public void runOnNextHeartbeat(Runnable callback) {
+    heartbeatCallbacks.add(callback);
+  }
+
+  public void setShouldUnregister(boolean shouldUnregister) {
+    this.shouldUnregister = shouldUnregister;
+    LOG.info("RMCommunicator notified that shouldUnregistered is: " 
+        + shouldUnregister);
+  }
+  
   public void setSignalled(boolean isSignalled) {
     this.isSignalled = isSignalled;
-    LOG.info("RMCommunicator notified that iSignalled was : " + isSignalled);
+    LOG.info("RMCommunicator notified that iSignalled is: " 
+        + isSignalled);
+  }
+
+  @VisibleForTesting
+  protected boolean isApplicationMasterRegistered() {
+    return isApplicationMasterRegistered;
   }
 }

@@ -17,24 +17,32 @@
  */
 package org.apache.hadoop.security;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
 import java.io.IOException;
 import java.util.Random;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.fs.*;
-import org.apache.hadoop.fs.permission.*;
 import org.apache.hadoop.util.StringUtils;
-
-import junit.framework.TestCase;
+import org.junit.Test;
 
 /** Unit tests for permission */
-public class TestPermission extends TestCase {
+public class TestPermission {
   public static final Log LOG = LogFactory.getLog(TestPermission.class);
 
   final private static Path ROOT_PATH = new Path("/data");
@@ -65,6 +73,7 @@ public class TestPermission extends TestCase {
    * either set with old param dfs.umask that takes decimal umasks
    * or dfs.umaskmode that takes symbolic or octal umask.
    */
+  @Test
   public void testBackwardCompatibility() {
     // Test 1 - old configuration key with decimal 
     // umask value should be handled when set using 
@@ -93,6 +102,7 @@ public class TestPermission extends TestCase {
     assertEquals(18, FsPermission.getUMask(conf).toShort());
   }
 
+  @Test
   public void testCreate() throws Exception {
     Configuration conf = new HdfsConfiguration();
     conf.setBoolean(DFSConfigKeys.DFS_PERMISSIONS_ENABLED_KEY, true);
@@ -123,9 +133,10 @@ public class TestPermission extends TestCase {
       checkPermission(fs, "/aa/1/aa/2/aa/3", dirPerm);
 
       FsPermission filePerm = new FsPermission((short)0444);
-      FSDataOutputStream out = fs.create(new Path("/b1/b2/b3.txt"), filePerm,
+      Path p = new Path("/b1/b2/b3.txt");
+      FSDataOutputStream out = fs.create(p, filePerm,
           true, conf.getInt(CommonConfigurationKeys.IO_FILE_BUFFER_SIZE_KEY, 4096),
-          fs.getDefaultReplication(), fs.getDefaultBlockSize(), null);
+          fs.getDefaultReplication(p), fs.getDefaultBlockSize(p), null);
       out.write(123);
       out.close();
       checkPermission(fs, "/b1", inheritPerm);
@@ -154,7 +165,8 @@ public class TestPermission extends TestCase {
     }
   }
 
-  public void testFilePermision() throws Exception {
+  @Test
+  public void testFilePermission() throws Exception {
     final Configuration conf = new HdfsConfiguration();
     conf.setBoolean(DFSConfigKeys.DFS_PERMISSIONS_ENABLED_KEY, true);
     MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(3).build();
@@ -178,14 +190,28 @@ public class TestPermission extends TestCase {
       catch(java.io.FileNotFoundException e) {
         LOG.info("GOOD: got " + e);
       }
+      
+      // make sure nn can take user specified permission (with default fs
+      // permission umask applied)
+      FSDataOutputStream out = nnfs.create(CHILD_FILE1, new FsPermission(
+          (short) 0777), true, 1024, (short) 1, 1024, null);
+      FileStatus status = nnfs.getFileStatus(CHILD_FILE1);
+      // FS_PERMISSIONS_UMASK_DEFAULT is 0022
+      assertTrue(status.getPermission().toString().equals("rwxr-xr-x"));
+      nnfs.delete(CHILD_FILE1, false);
+      
       // following dir/file creations are legal
       nnfs.mkdirs(CHILD_DIR1);
-      FSDataOutputStream out = nnfs.create(CHILD_FILE1);
+      out = nnfs.create(CHILD_FILE1);
+      status = nnfs.getFileStatus(CHILD_FILE1);
+      assertTrue(status.getPermission().toString().equals("rw-r--r--"));
       byte data[] = new byte[FILE_LEN];
       RAN.nextBytes(data);
       out.write(data);
       out.close();
       nnfs.setPermission(CHILD_FILE1, new FsPermission("700"));
+      status = nnfs.getFileStatus(CHILD_FILE1);
+      assertTrue(status.getPermission().toString().equals("rwx------"));
 
       // following read is legal
       byte dataIn[] = new byte[FILE_LEN];
@@ -196,6 +222,15 @@ public class TestPermission extends TestCase {
         assertEquals(data[i], dataIn[i]);
       }
 
+      // test execution bit support for files
+      nnfs.setPermission(CHILD_FILE1, new FsPermission("755"));
+      status = nnfs.getFileStatus(CHILD_FILE1);
+      assertTrue(status.getPermission().toString().equals("rwxr-xr-x"));
+      nnfs.setPermission(CHILD_FILE1, new FsPermission("744"));
+      status = nnfs.getFileStatus(CHILD_FILE1);
+      assertTrue(status.getPermission().toString().equals("rwxr--r--"));
+      nnfs.setPermission(CHILD_FILE1, new FsPermission("700"));
+      
       ////////////////////////////////////////////////////////////////
       // test illegal file/dir creation
       UserGroupInformation userGroupInfo = 
@@ -232,6 +267,10 @@ public class TestPermission extends TestCase {
       fs.mkdirs(p);
       return true;
     } catch(AccessControlException e) {
+      // We check that AccessControlExceptions contain absolute paths.
+      Path parent = p.getParent();
+      assertTrue(parent.isUriPathAbsolute());
+      assertTrue(e.getMessage().contains(parent.toString()));
       return false;
     }
   }
@@ -241,6 +280,9 @@ public class TestPermission extends TestCase {
       fs.create(p);
       return true;
     } catch(AccessControlException e) {
+      Path parent = p.getParent();
+      assertTrue(parent.isUriPathAbsolute());
+      assertTrue(e.getMessage().contains(parent.toString()));
       return false;
     }
   }
@@ -250,6 +292,8 @@ public class TestPermission extends TestCase {
       fs.open(p);
       return true;
     } catch(AccessControlException e) {
+      assertTrue(p.isUriPathAbsolute());
+      assertTrue(e.getMessage().contains(p.toString()));
       return false;
     }
   }
@@ -260,6 +304,9 @@ public class TestPermission extends TestCase {
       fs.rename(src, dst);
       return true;
     } catch(AccessControlException e) {
+      Path parent = dst.getParent();
+      assertTrue(parent.isUriPathAbsolute());
+      assertTrue(e.getMessage().contains(parent.toString()));
       return false;
     }
   }

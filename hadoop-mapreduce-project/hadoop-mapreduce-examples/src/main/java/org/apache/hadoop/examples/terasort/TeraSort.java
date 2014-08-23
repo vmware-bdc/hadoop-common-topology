@@ -213,7 +213,7 @@ public class TeraSort extends Configured implements Tool {
         splitPoints = readPartitions(fs, partFile, conf);
         trie = buildTrie(splitPoints, 0, splitPoints.length, new Text(), 2);
       } catch (IOException ie) {
-        throw new IllegalArgumentException("can't read paritions file", ie);
+        throw new IllegalArgumentException("can't read partitions file", ie);
       }
     }
 
@@ -305,8 +305,7 @@ public class TeraSort extends Configured implements Tool {
         LOG.error(e.getMessage());
         return -1;
       }
-      job.addCacheFile(partitionUri);
-      job.createSymlink();    
+      job.addCacheFile(partitionUri);  
       long end = System.currentTimeMillis();
       System.out.println("Spent " + (end - start) + "ms computing partitions.");
       job.setPartitionerClass(TotalOrderPartitioner.class);

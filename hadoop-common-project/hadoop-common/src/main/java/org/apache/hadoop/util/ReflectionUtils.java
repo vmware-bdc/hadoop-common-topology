@@ -25,7 +25,10 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -151,7 +154,7 @@ public class ReflectionUtils {
    * @param stream the stream to
    * @param title a string title for the stack trace
    */
-  public static void printThreadInfo(PrintWriter stream,
+  public synchronized static void printThreadInfo(PrintWriter stream,
                                      String title) {
     final int STACK_DEPTH = 20;
     boolean contention = threadBean.isThreadContentionMonitoringEnabled();
@@ -205,7 +208,7 @@ public class ReflectionUtils {
     boolean dumpStack = false;
     if (log.isInfoEnabled()) {
       synchronized (ReflectionUtils.class) {
-        long now = System.currentTimeMillis();
+        long now = Time.now();
         if (now - previousLogTime >= minInterval * 1000) {
           previousLogTime = now;
           dumpStack = true;
@@ -257,6 +260,7 @@ public class ReflectionUtils {
    */
   private static ThreadLocal<CopyInCopyOutBuffer> cloneBuffers
       = new ThreadLocal<CopyInCopyOutBuffer>() {
+      @Override
       protected synchronized CopyInCopyOutBuffer initialValue() {
         return new CopyInCopyOutBuffer();
       }
@@ -271,8 +275,9 @@ public class ReflectionUtils {
   
   /**
    * Make a copy of the writable object using serialization to a buffer
-   * @param dst the object to copy from
-   * @param src the object to copy into, which is destroyed
+   * @param src the object to copy from
+   * @param dst the object to copy into, which is destroyed
+   * @return dst param (the copy)
    * @throws IOException
    */
   @SuppressWarnings("unchecked")
@@ -300,5 +305,37 @@ public class ReflectionUtils {
     src.write(buffer.outBuffer);
     buffer.moveData();
     dst.readFields(buffer.inBuffer);
+  }
+  
+  /**
+   * Gets all the declared fields of a class including fields declared in
+   * superclasses.
+   */
+  public static List<Field> getDeclaredFieldsIncludingInherited(Class<?> clazz) {
+    List<Field> fields = new ArrayList<Field>();
+    while (clazz != null) {
+      for (Field field : clazz.getDeclaredFields()) {
+        fields.add(field);
+      }
+      clazz = clazz.getSuperclass();
+    }
+    
+    return fields;
+  }
+  
+  /**
+   * Gets all the declared methods of a class including methods declared in
+   * superclasses.
+   */
+  public static List<Method> getDeclaredMethodsIncludingInherited(Class<?> clazz) {
+    List<Method> methods = new ArrayList<Method>();
+    while (clazz != null) {
+      for (Method method : clazz.getDeclaredMethods()) {
+        methods.add(method);
+      }
+      clazz = clazz.getSuperclass();
+    }
+    
+    return methods;
   }
 }

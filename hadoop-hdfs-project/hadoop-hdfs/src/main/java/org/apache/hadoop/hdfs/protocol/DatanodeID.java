@@ -20,7 +20,8 @@ package org.apache.hadoop.hdfs.protocol;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.hdfs.DFSConfigKeys;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * This class represents the primary identifier for a Datanode.
@@ -38,55 +39,52 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 public class DatanodeID implements Comparable<DatanodeID> {
   public static final DatanodeID[] EMPTY_ARRAY = {};
 
-  protected String ipAddr;     // IP address
-  protected String hostName;   // hostname
-  protected String storageID;  // unique per cluster storageID
-  protected int xferPort;      // data streaming port
-  protected int infoPort;      // info server port
-  protected int ipcPort;       // IPC server port
-
-  public DatanodeID(String ipAddr, int xferPort) {
-    this(ipAddr, "", "", xferPort,
-        DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
-        DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT);
-  }
-
-  public DatanodeID(String ipAddr, String hostName, int xferPort) {
-    this(ipAddr, hostName, "", xferPort,
-        DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
-        DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT);
-  }
+  private String ipAddr;     // IP address
+  private String hostName;   // hostname claimed by datanode
+  private String peerHostName; // hostname from the actual connection
+  private int xferPort;      // data streaming port
+  private int infoPort;      // info server port
+  private int infoSecurePort; // info server port
+  private int ipcPort;       // IPC server port
 
   /**
-   * DatanodeID copy constructor
-   * 
-   * @param from
+   * UUID identifying a given datanode. For upgraded Datanodes this is the
+   * same as the StorageID that was previously used by this Datanode. 
+   * For newly formatted Datanodes it is a UUID.
    */
+  private String datanodeUuid = null;
+
   public DatanodeID(DatanodeID from) {
     this(from.getIpAddr(),
         from.getHostName(),
-        from.getStorageID(),
+        from.getDatanodeUuid(),
         from.getXferPort(),
         from.getInfoPort(),
+        from.getInfoSecurePort(),
         from.getIpcPort());
+    this.peerHostName = from.getPeerHostName();
   }
-  
+
   /**
-   * Create DatanodeID
+   * Create a DatanodeID
    * @param ipAddr IP
    * @param hostName hostname
-   * @param storageID data storage ID
+   * @param datanodeUuid data node ID, UUID for new Datanodes, may be the
+   *                     storage ID for pre-UUID datanodes. NULL if unknown
+   *                     e.g. if this is a new datanode. A new UUID will
+   *                     be assigned by the namenode.
    * @param xferPort data transfer port
    * @param infoPort info server port 
    * @param ipcPort ipc server port
    */
-  public DatanodeID(String ipAddr, String hostName, String storageID,
-      int xferPort, int infoPort, int ipcPort) {
+  public DatanodeID(String ipAddr, String hostName, String datanodeUuid,
+      int xferPort, int infoPort, int infoSecurePort, int ipcPort) {
     this.ipAddr = ipAddr;
     this.hostName = hostName;
-    this.storageID = storageID;
+    this.datanodeUuid = checkDatanodeUuid(datanodeUuid);
     this.xferPort = xferPort;
     this.infoPort = infoPort;
+    this.infoSecurePort = infoSecurePort;
     this.ipcPort = ipcPort;
   }
   
@@ -94,24 +92,28 @@ public class DatanodeID implements Comparable<DatanodeID> {
     this.ipAddr = ipAddr;
   }
 
-  public void setHostName(String hostName) {
-    this.hostName = hostName;
-  }
-
-  public void setXferPort(int xferPort) {
-    this.xferPort = xferPort;
-  }
-
-  public void setInfoPort(int infoPort) {
-    this.infoPort = infoPort;
+  public void setPeerHostName(String peerHostName) {
+    this.peerHostName = peerHostName;
   }
   
-  public void setIpcPort(int ipcPort) {
-    this.ipcPort = ipcPort;
+  /**
+   * @return data node ID.
+   */
+  public String getDatanodeUuid() {
+    return datanodeUuid;
   }
 
-  public void setStorageID(String storageID) {
-    this.storageID = storageID;
+  @VisibleForTesting
+  public void setDatanodeUuidForTesting(String datanodeUuid) {
+    this.datanodeUuid = datanodeUuid;
+  }
+
+  private String checkDatanodeUuid(String uuid) {
+    if (uuid == null || uuid.isEmpty()) {
+      return null;
+    } else {
+      return uuid;
+    }
   }
 
   /**
@@ -129,6 +131,13 @@ public class DatanodeID implements Comparable<DatanodeID> {
   }
 
   /**
+   * @return hostname from the actual connection 
+   */
+  public String getPeerHostName() {
+    return peerHostName;
+  }
+  
+  /**
    * @return IP:xferPort string
    */
   public String getXferAddr() {
@@ -138,7 +147,7 @@ public class DatanodeID implements Comparable<DatanodeID> {
   /**
    * @return IP:ipcPort string
    */
-  public String getIpcAddr() {
+  private String getIpcAddr() {
     return ipAddr + ":" + ipcPort;
   }
 
@@ -150,6 +159,13 @@ public class DatanodeID implements Comparable<DatanodeID> {
   }
 
   /**
+   * @return IP:infoPort string
+   */
+  public String getInfoSecureAddr() {
+    return ipAddr + ":" + infoSecurePort;
+  }
+
+  /**
    * @return hostname:xferPort
    */
   public String getXferAddrWithHostname() {
@@ -157,10 +173,26 @@ public class DatanodeID implements Comparable<DatanodeID> {
   }
 
   /**
-   * @return data storage ID.
+   * @return hostname:ipcPort
    */
-  public String getStorageID() {
-    return storageID;
+  private String getIpcAddrWithHostname() {
+    return hostName + ":" + ipcPort;
+  }
+
+  /**
+   * @param useHostname true to use the DN hostname, use the IP otherwise
+   * @return name:xferPort
+   */
+  public String getXferAddr(boolean useHostname) {
+    return useHostname ? getXferAddrWithHostname() : getXferAddr();
+  }
+
+  /**
+   * @param useHostname true to use the DN hostname, use the IP otherwise
+   * @return name:ipcPort
+   */
+  public String getIpcAddr(boolean useHostname) {
+    return useHostname ? getIpcAddrWithHostname() : getIpcAddr();
   }
 
   /**
@@ -178,12 +210,20 @@ public class DatanodeID implements Comparable<DatanodeID> {
   }
 
   /**
+   * @return infoSecurePort (the port at which the HTTPS server bound to)
+   */
+  public int getInfoSecurePort() {
+    return infoSecurePort;
+  }
+
+  /**
    * @return ipcPort (the port at which the IPC server bound to)
    */
   public int getIpcPort() {
     return ipcPort;
   }
 
+  @Override
   public boolean equals(Object to) {
     if (this == to) {
       return true;
@@ -192,13 +232,15 @@ public class DatanodeID implements Comparable<DatanodeID> {
       return false;
     }
     return (getXferAddr().equals(((DatanodeID)to).getXferAddr()) &&
-            storageID.equals(((DatanodeID)to).getStorageID()));
+        datanodeUuid.equals(((DatanodeID)to).getDatanodeUuid()));
   }
   
+  @Override
   public int hashCode() {
-    return getXferAddr().hashCode()^ storageID.hashCode();
+    return getXferAddr().hashCode()^ datanodeUuid.hashCode();
   }
   
+  @Override
   public String toString() {
     return getXferAddr();
   }
@@ -210,17 +252,20 @@ public class DatanodeID implements Comparable<DatanodeID> {
   public void updateRegInfo(DatanodeID nodeReg) {
     ipAddr = nodeReg.getIpAddr();
     hostName = nodeReg.getHostName();
+    peerHostName = nodeReg.getPeerHostName();
     xferPort = nodeReg.getXferPort();
     infoPort = nodeReg.getInfoPort();
+    infoSecurePort = nodeReg.getInfoSecurePort();
     ipcPort = nodeReg.getIpcPort();
   }
     
   /**
    * Compare based on data transfer address.
    *
-   * @param that
+   * @param that datanode to compare with
    * @return as specified by Comparable
    */
+  @Override
   public int compareTo(DatanodeID that) {
     return getXferAddr().compareTo(that.getXferAddr());
   }

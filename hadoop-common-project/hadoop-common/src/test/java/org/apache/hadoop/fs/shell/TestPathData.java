@@ -19,37 +19,38 @@ package org.apache.hadoop.fs.shell;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.File;
+import java.io.IOException;
+import java.net.URI;
 import java.util.Arrays;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.junit.BeforeClass;
+import org.apache.hadoop.util.Shell;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 public class TestPathData {
-  protected static Configuration conf;
-  protected static FileSystem fs;
-  protected static String dirString;
-  protected static Path testDir;
-  protected static PathData item;
+  private static final String TEST_ROOT_DIR = 
+      System.getProperty("test.build.data","build/test/data") + "/testPD";
+  protected Configuration conf;
+  protected FileSystem fs;
+  protected Path testDir;
   
-  protected static String[] d1Paths =
-    new String[] { "d1/f1", "d1/f1.1", "d1/f2" };
-  protected static String[] d2Paths =
-    new String[] { "d2/f3" };
-        
-  @BeforeClass
-  public static void initialize() throws Exception {
+  @Before
+  public void initialize() throws Exception {
     conf = new Configuration();
     fs = FileSystem.getLocal(conf);
-    testDir = new Path(
-        System.getProperty("test.build.data", "build/test/data") + "/testPD"
-    );
+    testDir = new Path(TEST_ROOT_DIR);
+    
     // don't want scheme on the path, just an absolute path
     testDir = new Path(fs.makeQualified(testDir).toUri().getPath());
+    fs.mkdirs(testDir);
+
     FileSystem.setDefaultUri(conf, fs.getUri());    
     fs.setWorkingDirectory(testDir);
     fs.mkdirs(new Path("d1"));
@@ -60,23 +61,29 @@ public class TestPathData {
     fs.create(new Path("d2","f3"));
   }
 
-  @Test
+  @After
+  public void cleanup() throws Exception {
+    fs.delete(testDir, true);
+    fs.close();
+  }
+
+  @Test (timeout = 30000)
   public void testWithDirStringAndConf() throws Exception {
-    dirString = "d1";
-    item = new PathData(dirString, conf);
-    checkPathData();
+    String dirString = "d1";
+    PathData item = new PathData(dirString, conf);
+    checkPathData(dirString, item);
 
     // properly implementing symlink support in various commands will require
     // trailing slashes to be retained
     dirString = "d1/";
     item = new PathData(dirString, conf);
-    checkPathData();
+    checkPathData(dirString, item);
   }
 
-  @Test
+  @Test (timeout = 30000)
   public void testUnqualifiedUriContents() throws Exception {
-    dirString = "d1";
-    item = new PathData(dirString, conf);
+    String dirString = "d1";
+    PathData item = new PathData(dirString, conf);
     PathData[] items = item.getDirectoryContents();
     assertEquals(
         sortedString("d1/f1", "d1/f1.1", "d1/f2"),
@@ -84,10 +91,10 @@ public class TestPathData {
     );
   }
 
-  @Test
+  @Test (timeout = 30000)
   public void testQualifiedUriContents() throws Exception {
-    dirString = fs.makeQualified(new Path("d1")).toString();
-    item = new PathData(dirString, conf);
+    String dirString = fs.makeQualified(new Path("d1")).toString();
+    PathData item = new PathData(dirString, conf);
     PathData[] items = item.getDirectoryContents();
     assertEquals(
         sortedString(dirString+"/f1", dirString+"/f1.1", dirString+"/f2"),
@@ -95,10 +102,10 @@ public class TestPathData {
     );
   }
 
-  @Test
+  @Test (timeout = 30000)
   public void testCwdContents() throws Exception {
-    dirString = Path.CUR_DIR;
-    item = new PathData(dirString, conf);
+    String dirString = Path.CUR_DIR;
+    PathData item = new PathData(dirString, conf);
     PathData[] items = item.getDirectoryContents();
     assertEquals(
         sortedString("d1", "d2"),
@@ -106,27 +113,94 @@ public class TestPathData {
     );
   }
 
-
-	@Test
-	public void testToFile() throws Exception {
-    item = new PathData(".", conf);
+  @Test (timeout = 30000)
+  public void testToFile() throws Exception {
+    PathData item = new PathData(".", conf);
     assertEquals(new File(testDir.toString()), item.toFile());
-	  item = new PathData("d1/f1", conf);
-	  assertEquals(new File(testDir+"/d1/f1"), item.toFile());
-    item = new PathData(testDir+"/d1/f1", conf);
-    assertEquals(new File(testDir+"/d1/f1"), item.toFile());
-	}
-	
-  @Test
+    item = new PathData("d1/f1", conf);
+    assertEquals(new File(testDir + "/d1/f1"), item.toFile());
+    item = new PathData(testDir + "/d1/f1", conf);
+    assertEquals(new File(testDir + "/d1/f1"), item.toFile());
+  }
+
+  @Test (timeout = 5000)
+  public void testToFileRawWindowsPaths() throws Exception {
+    if (!Path.WINDOWS) {
+      return;
+    }
+
+    // Can we handle raw Windows paths? The files need not exist for
+    // these tests to succeed.
+    String[] winPaths = {
+        "n:\\",
+        "N:\\",
+        "N:\\foo",
+        "N:\\foo\\bar",
+        "N:/",
+        "N:/foo",
+        "N:/foo/bar"
+    };
+
+    PathData item;
+
+    for (String path : winPaths) {
+      item = new PathData(path, conf);
+      assertEquals(new File(path), item.toFile());
+    }
+
+    item = new PathData("foo\\bar", conf);
+    assertEquals(new File(testDir + "\\foo\\bar"), item.toFile());
+  }
+
+  @Test (timeout = 5000)
+  public void testInvalidWindowsPath() throws Exception {
+    if (!Path.WINDOWS) {
+      return;
+    }
+
+    // Verify that the following invalid paths are rejected.
+    String [] winPaths = {
+        "N:\\foo/bar"
+    };
+
+    for (String path : winPaths) {
+      try {
+        PathData item = new PathData(path, conf);
+        fail("Did not throw for invalid path " + path);
+      } catch (IOException ioe) {
+      }
+    }
+  }
+
+  @Test (timeout = 30000)
   public void testAbsoluteGlob() throws Exception {
     PathData[] items = PathData.expandAsGlob(testDir+"/d1/f1*", conf);
     assertEquals(
         sortedString(testDir+"/d1/f1", testDir+"/d1/f1.1"),
         sortedString(items)
     );
+    
+    String absolutePathNoDriveLetter = testDir+"/d1/f1";
+    if (Shell.WINDOWS) {
+      // testDir is an absolute path with a drive letter on Windows, i.e.
+      // c:/some/path
+      // and for the test we want something like the following
+      // /some/path
+      absolutePathNoDriveLetter = absolutePathNoDriveLetter.substring(2);
+    }
+    items = PathData.expandAsGlob(absolutePathNoDriveLetter, conf);
+    assertEquals(
+        sortedString(absolutePathNoDriveLetter),
+        sortedString(items)
+    );
+    items = PathData.expandAsGlob(".", conf);
+    assertEquals(
+        sortedString("."),
+        sortedString(items)
+    );
   }
 
-  @Test
+  @Test (timeout = 30000)
   public void testRelativeGlob() throws Exception {
     PathData[] items = PathData.expandAsGlob("d1/f1*", conf);
     assertEquals(
@@ -135,7 +209,7 @@ public class TestPathData {
     );
   }
 
-  @Test
+  @Test (timeout = 30000)
   public void testRelativeGlobBack() throws Exception {
     fs.setWorkingDirectory(new Path("d1"));
     PathData[] items = PathData.expandAsGlob("../d2/*", conf);
@@ -145,20 +219,20 @@ public class TestPathData {
     );
   }
 
-  @Test
+  @Test (timeout = 30000)
   public void testWithStringAndConfForBuggyPath() throws Exception {
-    dirString = "file:///tmp";
-    testDir = new Path(dirString);
-    item = new PathData(dirString, conf);
+    String dirString = "file:///tmp";
+    Path tmpDir = new Path(dirString);
+    PathData item = new PathData(dirString, conf);
     // this may fail some day if Path is fixed to not crunch the uri
     // if the authority is null, however we need to test that the PathData
     // toString() returns the given string, while Path toString() does
     // the crunching
-    assertEquals("file:/tmp", testDir.toString());
-    checkPathData();
+    assertEquals("file:/tmp", tmpDir.toString());
+    checkPathData(dirString, item);
   }
 
-  public void checkPathData() throws Exception {
+  public void checkPathData(String dirString, PathData item) throws Exception {
     assertEquals("checking fs", fs, item.fs);
     assertEquals("checking string", dirString, item.toString());
     assertEquals("checking path",

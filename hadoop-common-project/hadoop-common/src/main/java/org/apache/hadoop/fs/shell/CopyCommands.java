@@ -18,8 +18,12 @@
 
 package org.apache.hadoop.fs.shell;
 
-import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -27,7 +31,8 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIsDirectoryException;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.PathIsDirectoryException;
 import org.apache.hadoop.io.IOUtils;
 
 /** Various commands for copy files */
@@ -42,6 +47,7 @@ class CopyCommands {
     factory.addClass(CopyToLocal.class, "-copyToLocal");
     factory.addClass(Get.class, "-get");
     factory.addClass(Put.class, "-put");
+    factory.addClass(AppendToFile.class, "-appendToFile");
   }
 
   /** merge multiple files together */
@@ -49,10 +55,10 @@ class CopyCommands {
     public static final String NAME = "getmerge";    
     public static final String USAGE = "[-nl] <src> <localdst>";
     public static final String DESCRIPTION =
-      "Get all the files in the directories that\n" +
-      "match the source file pattern and merge and sort them to only\n" +
+      "Get all the files in the directories that " +
+      "match the source file pattern and merge and sort them to only " +
       "one file on local fs. <src> is kept.\n" +
-      "  -nl   Add a newline character at the end of each file.";
+      "-nl: Add a newline character at the end of each file.";
 
     protected PathData dst = null;
     protected String delimiter = null;
@@ -60,16 +66,20 @@ class CopyCommands {
 
     @Override
     protected void processOptions(LinkedList<String> args) throws IOException {
-      CommandFormat cf = new CommandFormat(2, Integer.MAX_VALUE, "nl");
-      cf.parse(args);
+      try {
+        CommandFormat cf = new CommandFormat(2, Integer.MAX_VALUE, "nl");
+        cf.parse(args);
 
-      delimiter = cf.getOpt("nl") ? "\n" : null;
+        delimiter = cf.getOpt("nl") ? "\n" : null;
 
-      dst = new PathData(new File(args.removeLast()), getConf());
-      if (dst.exists && dst.stat.isDirectory()) {
-        throw new PathIsDirectoryException(dst.toString());
+        dst = new PathData(new URI(args.removeLast()), getConf());
+        if (dst.exists && dst.stat.isDirectory()) {
+          throw new PathIsDirectoryException(dst.toString());
+        }
+        srcs = new LinkedList<PathData>();
+      } catch (URISyntaxException e) {
+        throw new IOException("unexpected URISyntaxException", e);
       }
-      srcs = new LinkedList<PathData>();
     }
 
     @Override
@@ -123,20 +133,52 @@ class CopyCommands {
 
   static class Cp extends CommandWithDestination {
     public static final String NAME = "cp";
-    public static final String USAGE = "<src> ... <dst>";
+    public static final String USAGE = "[-f] [-p | -p[topax]] <src> ... <dst>";
     public static final String DESCRIPTION =
-      "Copy files that match the file pattern <src> to a\n" +
-      "destination.  When copying multiple files, the destination\n" +
-      "must be a directory.";
-    
+      "Copy files that match the file pattern <src> to a " +
+      "destination.  When copying multiple files, the destination " +
+      "must be a directory. Passing -p preserves status " +
+      "[topax] (timestamps, ownership, permission, ACLs, XAttr). " +
+      "If -p is specified with no <arg>, then preserves " +
+      "timestamps, ownership, permission. If -pa is specified, " +
+      "then preserves permission also because ACL is a super-set of " +
+      "permission. Passing -f overwrites the destination if it " +
+      "already exists. raw namespace extended attributes are preserved " +
+      "if (1) they are supported (HDFS only) and, (2) all of the source and " +
+      "target pathnames are in the /.reserved/raw hierarchy. raw namespace " +
+      "xattr preservation is determined solely by the presence (or absence) " +
+      "of the /.reserved/raw prefix and not by the -p option.\n";
+
     @Override
     protected void processOptions(LinkedList<String> args) throws IOException {
+      popPreserveOption(args);
       CommandFormat cf = new CommandFormat(2, Integer.MAX_VALUE, "f");
       cf.parse(args);
       setOverwrite(cf.getOpt("f"));
       // should have a -r option
       setRecursive(true);
       getRemoteDestination(args);
+    }
+    
+    private void popPreserveOption(List<String> args) {
+      for (Iterator<String> iter = args.iterator(); iter.hasNext(); ) {
+        String cur = iter.next();
+        if (cur.equals("--")) {
+          // stop parsing arguments when you see --
+          break;
+        } else if (cur.startsWith("-p")) {
+          iter.remove();
+          if (cur.length() == 2) {
+            setPreserve(true);
+          } else {
+            String attributes = cur.substring(2);
+            for (int index = 0; index < attributes.length(); index++) {
+              preserve(FileAttribute.getAttribute(attributes.charAt(index)));
+            }
+          }
+          return;
+        }
+      }
     }
   }
   
@@ -146,20 +188,23 @@ class CopyCommands {
   public static class Get extends CommandWithDestination {
     public static final String NAME = "get";
     public static final String USAGE =
-      "[-ignoreCrc] [-crc] <src> ... <localdst>";
+      "[-p] [-ignoreCrc] [-crc] <src> ... <localdst>";
     public static final String DESCRIPTION =
-      "Copy files that match the file pattern <src>\n" +
-      "to the local name.  <src> is kept.  When copying multiple,\n" +
-      "files, the destination must be a directory.";
+      "Copy files that match the file pattern <src> " +
+      "to the local name.  <src> is kept.  When copying multiple " +
+      "files, the destination must be a directory. Passing " +
+      "-p preserves access and modification times, " +
+      "ownership and the mode.\n";
 
     @Override
     protected void processOptions(LinkedList<String> args)
     throws IOException {
       CommandFormat cf = new CommandFormat(
-          1, Integer.MAX_VALUE, "crc", "ignoreCrc");
+          1, Integer.MAX_VALUE, "crc", "ignoreCrc", "p");
       cf.parse(args);
       setWriteChecksum(cf.getOpt("crc"));
       setVerifyChecksum(!cf.getOpt("ignoreCrc"));
+      setPreserve(cf.getOpt("p"));
       setRecursive(true);
       getLocalDestination(args);
     }
@@ -170,16 +215,21 @@ class CopyCommands {
    */
   public static class Put extends CommandWithDestination {
     public static final String NAME = "put";
-    public static final String USAGE = "<localsrc> ... <dst>";
+    public static final String USAGE = "[-f] [-p] <localsrc> ... <dst>";
     public static final String DESCRIPTION =
-      "Copy files from the local file system\n" +
-      "into fs.";
+      "Copy files from the local file system " +
+      "into fs. Copying fails if the file already " +
+      "exists, unless the -f flag is given. Passing " +
+      "-p preserves access and modification times, " +
+      "ownership and the mode. Passing -f overwrites " +
+      "the destination if it already exists.\n";
 
     @Override
     protected void processOptions(LinkedList<String> args) throws IOException {
-      CommandFormat cf = new CommandFormat(1, Integer.MAX_VALUE, "f");
+      CommandFormat cf = new CommandFormat(1, Integer.MAX_VALUE, "f", "p");
       cf.parse(args);
       setOverwrite(cf.getOpt("f"));
+      setPreserve(cf.getOpt("p"));
       getRemoteDestination(args);
       // should have a -r option
       setRecursive(true);
@@ -189,7 +239,16 @@ class CopyCommands {
     @Override
     protected List<PathData> expandArgument(String arg) throws IOException {
       List<PathData> items = new LinkedList<PathData>();
-      items.add(new PathData(new File(arg), getConf()));
+      try {
+        items.add(new PathData(new URI(arg), getConf()));
+      } catch (URISyntaxException e) {
+        if (Path.WINDOWS) {
+          // Unlike URI, PathData knows how to parse Windows drive-letter paths.
+          items.add(new PathData(arg, getConf()));
+        } else {
+          throw new IOException("unexpected URISyntaxException", e);
+        }
+      }
       return items;
     }
 
@@ -215,5 +274,94 @@ class CopyCommands {
     public static final String NAME = "copyToLocal";
     public static final String USAGE = Get.USAGE;
     public static final String DESCRIPTION = "Identical to the -get command.";
+  }
+
+  /**
+   *  Append the contents of one or more local files to a remote
+   *  file.
+   */
+  public static class AppendToFile extends CommandWithDestination {
+    public static final String NAME = "appendToFile";
+    public static final String USAGE = "<localsrc> ... <dst>";
+    public static final String DESCRIPTION =
+        "Appends the contents of all the given local files to the " +
+            "given dst file. The dst file will be created if it does " +
+            "not exist. If <localSrc> is -, then the input is read " +
+            "from stdin.";
+
+    private static final int DEFAULT_IO_LENGTH = 1024 * 1024;
+    boolean readStdin = false;
+
+    // commands operating on local paths have no need for glob expansion
+    @Override
+    protected List<PathData> expandArgument(String arg) throws IOException {
+      List<PathData> items = new LinkedList<PathData>();
+      if (arg.equals("-")) {
+        readStdin = true;
+      } else {
+        try {
+          items.add(new PathData(new URI(arg), getConf()));
+        } catch (URISyntaxException e) {
+          if (Path.WINDOWS) {
+            // Unlike URI, PathData knows how to parse Windows drive-letter paths.
+            items.add(new PathData(arg, getConf()));
+          } else {
+            throw new IOException("Unexpected URISyntaxException: " + e.toString());
+          }
+        }
+      }
+      return items;
+    }
+
+    @Override
+    protected void processOptions(LinkedList<String> args)
+        throws IOException {
+
+      if (args.size() < 2) {
+        throw new IOException("missing destination argument");
+      }
+
+      getRemoteDestination(args);
+      super.processOptions(args);
+    }
+
+    @Override
+    protected void processArguments(LinkedList<PathData> args)
+        throws IOException {
+
+      if (!dst.exists) {
+        dst.fs.create(dst.path, false).close();
+      }
+
+      InputStream is = null;
+      FSDataOutputStream fos = dst.fs.append(dst.path);
+
+      try {
+        if (readStdin) {
+          if (args.size() == 0) {
+            IOUtils.copyBytes(System.in, fos, DEFAULT_IO_LENGTH);
+          } else {
+            throw new IOException(
+                "stdin (-) must be the sole input argument when present");
+          }
+        }
+
+        // Read in each input file and write to the target.
+        for (PathData source : args) {
+          is = new FileInputStream(source.toFile());
+          IOUtils.copyBytes(is, fos, DEFAULT_IO_LENGTH);
+          IOUtils.closeStream(is);
+          is = null;
+        }
+      } finally {
+        if (is != null) {
+          IOUtils.closeStream(is);
+        }
+
+        if (fos != null) {
+          IOUtils.closeStream(fos);
+        }
+      }
+    }
   }
 }

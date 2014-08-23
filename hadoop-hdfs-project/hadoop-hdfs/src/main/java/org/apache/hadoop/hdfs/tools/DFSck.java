@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
 import java.net.URLEncoder;
@@ -36,8 +37,9 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck;
-import org.apache.hadoop.security.SecurityUtil;
+import org.apache.hadoop.hdfs.web.URLConnectionFactory;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authentication.client.AuthenticationException;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
@@ -72,8 +74,38 @@ public class DFSck extends Configured implements Tool {
     HdfsConfiguration.init();
   }
 
+  private static final String USAGE = "Usage: DFSck <path> "
+      + "[-list-corruptfileblocks | "
+      + "[-move | -delete | -openforwrite] "
+      + "[-files [-blocks [-locations | -racks]]]] [-showprogress]\n"
+      + "\t<path>\tstart checking from this path\n"
+      + "\t-move\tmove corrupted files to /lost+found\n"
+      + "\t-delete\tdelete corrupted files\n"
+      + "\t-files\tprint out files being checked\n"
+      + "\t-openforwrite\tprint out files opened for write\n"
+      + "\t-includeSnapshots\tinclude snapshot data if the given path"
+      + " indicates a snapshottable directory or there are "
+      + "snapshottable directories under it\n"
+      + "\t-list-corruptfileblocks\tprint out list of missing "
+      + "blocks and files they belong to\n"
+      + "\t-blocks\tprint out block report\n"
+      + "\t-locations\tprint out locations for every block\n"
+      + "\t-racks\tprint out network topology for data-node locations\n"
+      + "\t-showprogress\tshow progress in output. Default is OFF (no progress)\n\n"
+      + "Please Note:\n"
+      + "\t1. By default fsck ignores files opened for write, "
+      + "use -openforwrite to report such files. They are usually "
+      + " tagged CORRUPT or HEALTHY depending on their block "
+      + "allocation status\n"
+      + "\t2. Option -includeSnapshots should not be used for comparing stats,"
+      + " should be used only for HEALTH check, as this may contain duplicates"
+      + " if the same file present in both original fs tree "
+      + "and inside snapshots.";
+  
   private final UserGroupInformation ugi;
   private final PrintStream out;
+  private final URLConnectionFactory connectionFactory;
+  private final boolean isSpnegoEnabled;
 
   /**
    * Filesystem checker.
@@ -87,37 +119,22 @@ public class DFSck extends Configured implements Tool {
     super(conf);
     this.ugi = UserGroupInformation.getCurrentUser();
     this.out = out;
+    this.connectionFactory = URLConnectionFactory
+        .newDefaultURLConnectionFactory(conf);
+    this.isSpnegoEnabled = UserGroupInformation.isSecurityEnabled();
   }
 
   /**
    * Print fsck usage information
    */
-  static void printUsage() {
-    System.err.println("Usage: DFSck <path> [-list-corruptfileblocks | " +
-        "[-move | -delete | -openforwrite] " +
-        "[-files [-blocks [-locations | -racks]]]]");
-    System.err.println("\t<path>\tstart checking from this path");
-    System.err.println("\t-move\tmove corrupted files to /lost+found");
-    System.err.println("\t-delete\tdelete corrupted files");
-    System.err.println("\t-files\tprint out files being checked");
-    System.err.println("\t-openforwrite\tprint out files opened for write");
-    System.err.println("\t-list-corruptfileblocks\tprint out list of missing "
-        + "blocks and files they belong to");
-    System.err.println("\t-blocks\tprint out block report");
-    System.err.println("\t-locations\tprint out locations for every block");
-    System.err.println("\t-racks\tprint out network topology for data-node locations");
-    System.err.println("\t\tBy default fsck ignores files opened for write, " +
-                       "use -openforwrite to report such files. They are usually " +
-                       " tagged CORRUPT or HEALTHY depending on their block " +
-                        "allocation status");
-    ToolRunner.printGenericCommandUsage(System.err);
+  static void printUsage(PrintStream out) {
+    out.println(USAGE + "\n");
+    ToolRunner.printGenericCommandUsage(out);
   }
-  /**
-   * @param args
-   */
+  @Override
   public int run(final String[] args) throws IOException {
     if (args.length == 0) {
-      printUsage();
+      printUsage(System.err);
       return -1;
     }
 
@@ -153,8 +170,12 @@ public class DFSck extends Configured implements Tool {
         url.append("&startblockafter=").append(String.valueOf(cookie));
       }
       URL path = new URL(url.toString());
-      SecurityUtil.fetchServiceTicket(path);
-      URLConnection connection = path.openConnection();
+      URLConnection connection;
+      try {
+        connection = connectionFactory.openConnection(path, isSpnegoEnabled);
+      } catch (AuthenticationException e) {
+        throw new IOException(e);
+      }
       InputStream stream = connection.getInputStream();
       BufferedReader input = new BufferedReader(new InputStreamReader(
           stream, "UTF-8"));
@@ -204,7 +225,7 @@ public class DFSck extends Configured implements Tool {
    * @return Returns http address or null if failure.
    * @throws IOException if we can't determine the active NN address
    */
-  private String getCurrentNamenodeAddress() throws IOException {
+  private URI getCurrentNamenodeAddress() throws IOException {
     //String nnAddress = null;
     Configuration conf = getConf();
 
@@ -222,24 +243,21 @@ public class DFSck extends Configured implements Tool {
       return null;
     }
     
-    return DFSUtil.getInfoServer(HAUtil.getAddressOfActive(fs), conf, true);
+    return DFSUtil.getInfoServer(HAUtil.getAddressOfActive(fs), conf,
+        DFSUtil.getHttpClientScheme(conf));
   }
 
   private int doWork(final String[] args) throws IOException {
-    String proto = "http://";
-    if (UserGroupInformation.isSecurityEnabled()) {
-      SecurityUtil.initKrb5CipherSuites();
-      proto = "https://";
-    }
-    final StringBuilder url = new StringBuilder(proto);
+    final StringBuilder url = new StringBuilder();
     
-    String namenodeAddress = getCurrentNamenodeAddress();
+    URI namenodeAddress = getCurrentNamenodeAddress();
     if (namenodeAddress == null) {
       //Error message already output in {@link #getCurrentNamenodeAddress()}
       System.err.println("DFSck exiting.");
       return 0;
     }
-    url.append(namenodeAddress);
+
+    url.append(namenodeAddress.toString());
     System.err.println("Connecting to namenode via " + url.toString());
     
     url.append("/fsck?ugi=").append(ugi.getShortUserName());
@@ -253,21 +271,24 @@ public class DFSck extends Configured implements Tool {
       else if (args[idx].equals("-blocks")) { url.append("&blocks=1"); }
       else if (args[idx].equals("-locations")) { url.append("&locations=1"); }
       else if (args[idx].equals("-racks")) { url.append("&racks=1"); }
+      else if (args[idx].equals("-showprogress")) { url.append("&showprogress=1"); }
       else if (args[idx].equals("-list-corruptfileblocks")) {
         url.append("&listcorruptfileblocks=1");
         doListCorruptFileBlocks = true;
+      } else if (args[idx].equals("-includeSnapshots")) {
+        url.append("&includeSnapshots=1");
       } else if (!args[idx].startsWith("-")) {
         if (null == dir) {
           dir = args[idx];
         } else {
           System.err.println("fsck: can only operate on one path at a time '"
               + args[idx] + "'");
-          printUsage();
+          printUsage(System.err);
           return -1;
         }
       } else {
         System.err.println("fsck: Illegal option '" + args[idx] + "'");
-        printUsage();
+        printUsage(System.err);
         return -1;
       }
     }
@@ -279,8 +300,12 @@ public class DFSck extends Configured implements Tool {
       return listCorruptFileBlocks(dir, url.toString());
     }
     URL path = new URL(url.toString());
-    SecurityUtil.fetchServiceTicket(path);
-    URLConnection connection = path.openConnection();
+    URLConnection connection;
+    try {
+      connection = connectionFactory.openConnection(path, isSpnegoEnabled);
+    } catch (AuthenticationException e) {
+      throw new IOException(e);
+    }
     InputStream stream = connection.getInputStream();
     BufferedReader input = new BufferedReader(new InputStreamReader(
                                               stream, "UTF-8"));
@@ -309,10 +334,14 @@ public class DFSck extends Configured implements Tool {
     // -files option is also used by GenericOptionsParser
     // Make sure that is not the first argument for fsck
     int res = -1;
-    if ((args.length == 0 ) || ("-files".equals(args[0]))) 
-      printUsage();
-    else
+    if ((args.length == 0) || ("-files".equals(args[0]))) {
+      printUsage(System.err);
+      ToolRunner.printGenericCommandUsage(System.err);
+    } else if (DFSUtil.parseHelpArgument(args, USAGE, System.out, true)) {
+      res = 0;
+    } else {
       res = ToolRunner.run(new DFSck(new HdfsConfiguration()), args);
+    }
     System.exit(res);
   }
 }

@@ -18,10 +18,13 @@
 
 package org.apache.hadoop.mapreduce.v2.app.job;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.mapred.TaskCompletionEvent;
 import org.apache.hadoop.mapreduce.Counters;
 import org.apache.hadoop.mapreduce.JobACL;
 import org.apache.hadoop.mapreduce.v2.api.records.AMInfo;
@@ -36,7 +39,7 @@ import org.apache.hadoop.security.authorize.AccessControlList;
 
 
 /**
- * Main interface to interact with the job. Provides only getters. 
+ * Main interface to interact with the job.
  */
 public interface Job {
 
@@ -72,6 +75,13 @@ public interface Job {
   Path getConfFile();
   
   /**
+   * @return a parsed version of the config files pointed to by 
+   * {@link #getConfFile()}.
+   * @throws IOException on any error trying to load the conf file. 
+   */
+  Configuration loadConfFile() throws IOException;
+  
+  /**
    * @return the ACLs for this job for each type of JobACL given. 
    */
   Map<JobACL, AccessControlList> getJobACLs();
@@ -79,10 +89,15 @@ public interface Job {
   TaskAttemptCompletionEvent[]
       getTaskAttemptCompletionEvents(int fromEventId, int maxEvents);
 
+  TaskCompletionEvent[]
+      getMapAttemptCompletionEvents(int startIndex, int maxEvents);
+
   /**
    * @return information for MR AppMasters (previously failed and current)
    */
   List<AMInfo> getAMInfos();
   
   boolean checkAccess(UserGroupInformation callerUGI, JobACL jobOperation);
+  
+  public void setQueueName(String queueName);
 }

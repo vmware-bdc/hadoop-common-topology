@@ -23,7 +23,6 @@ import static org.junit.Assert.assertEquals;
 import java.io.File;
 import java.io.IOException;
 import java.util.EnumMap;
-import java.util.Random;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
@@ -32,14 +31,13 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
-import org.apache.hadoop.hdfs.server.namenode.FSEditLog;
-import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes;
 import org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage;
 import org.apache.hadoop.hdfs.util.Holder;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.PathUtils;
 import org.junit.Test;
 
 /**
@@ -99,29 +97,30 @@ public class TestFileAppendRestart {
 
       counts = FSImageTestUtil.countEditLogOpTypes(editLog);
       // OP_ADD to create file
-      // OP_UPDATE_BLOCKS for first block
+      // OP_ADD_BLOCK for first block
       // OP_CLOSE to close file
       // OP_ADD to reopen file
-      // OP_UPDATE_BLOCKS for second block
+      // OP_ADD_BLOCK for second block
       // OP_CLOSE to close file
       assertEquals(2, (int)counts.get(FSEditLogOpCodes.OP_ADD).held);
-      assertEquals(2, (int)counts.get(FSEditLogOpCodes.OP_UPDATE_BLOCKS).held);
+      assertEquals(2, (int)counts.get(FSEditLogOpCodes.OP_ADD_BLOCK).held);
       assertEquals(2, (int)counts.get(FSEditLogOpCodes.OP_CLOSE).held);
 
       Path p2 = new Path("/not-block-boundaries");
       writeAndAppend(fs, p2, BLOCK_SIZE/2, BLOCK_SIZE);
       counts = FSImageTestUtil.countEditLogOpTypes(editLog);
       // OP_ADD to create file
-      // OP_UPDATE_BLOCKS for first block
+      // OP_ADD_BLOCK for first block
       // OP_CLOSE to close file
       // OP_ADD to re-establish the lease
       // OP_UPDATE_BLOCKS from the updatePipeline call (increments genstamp of last block)
-      // OP_UPDATE_BLOCKS at the start of the second block
+      // OP_ADD_BLOCK at the start of the second block
       // OP_CLOSE to close file
-      // Total: 2 OP_ADDs, 3 OP_UPDATE_BLOCKS, and 2 OP_CLOSEs in addition
-      //        to the ones above
+      // Total: 2 OP_ADDs, 1 OP_UPDATE_BLOCKS, 2 OP_ADD_BLOCKs, and 2 OP_CLOSEs
+       //       in addition to the ones above
       assertEquals(2+2, (int)counts.get(FSEditLogOpCodes.OP_ADD).held);
-      assertEquals(2+3, (int)counts.get(FSEditLogOpCodes.OP_UPDATE_BLOCKS).held);
+      assertEquals(1, (int)counts.get(FSEditLogOpCodes.OP_UPDATE_BLOCKS).held);
+      assertEquals(2+2, (int)counts.get(FSEditLogOpCodes.OP_ADD_BLOCK).held);
       assertEquals(2+2, (int)counts.get(FSEditLogOpCodes.OP_CLOSE).held);
       
       cluster.restartNameNode();
@@ -148,7 +147,7 @@ public class TestFileAppendRestart {
 
     String tarFile = System.getProperty("test.cache.data", "build/test/cache")
       + "/" + HADOOP_23_BROKEN_APPEND_TGZ;
-    String testDir = System.getProperty("test.build.data", "build/test/data");
+    String testDir = PathUtils.getTestDirName(getClass());
     File dfsDir = new File(testDir, "image-with-buggy-append");
     if (dfsDir.exists() && !FileUtil.fullyDelete(dfsDir)) {
       throw new IOException("Could not delete dfs directory '" + dfsDir + "'");
@@ -174,6 +173,44 @@ public class TestFileAppendRestart {
       assertEquals(2*1024*1024, fs.getFileStatus(testPath).getLen());
     } finally {
       cluster.shutdown();
+    }
+  }
+
+  /**
+   * Test to append to the file, when one of datanode in the existing pipeline
+   * is down.
+   */
+  @Test
+  public void testAppendWithPipelineRecovery() throws Exception {
+    Configuration conf = new Configuration();
+    MiniDFSCluster cluster = null;
+    FSDataOutputStream out = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).manageDataDfsDirs(true)
+          .manageNameDfsDirs(true).numDataNodes(4)
+          .racks(new String[] { "/rack1", "/rack1", "/rack1", "/rack2" })
+          .build();
+      cluster.waitActive();
+
+      DistributedFileSystem fs = cluster.getFileSystem();
+      Path path = new Path("/test1");
+      
+      out = fs.create(path, true, BLOCK_SIZE, (short) 3, BLOCK_SIZE);
+      AppendTestUtil.write(out, 0, 1024);
+      out.close();
+
+      cluster.stopDataNode(3);
+      out = fs.append(path);
+      AppendTestUtil.write(out, 1024, 1024);
+      out.close();
+      
+      cluster.restartNameNode(true);
+      AppendTestUtil.check(fs, path, 2048);
+    } finally {
+      IOUtils.closeStream(out);
+      if (null != cluster) {
+        cluster.shutdown();
+      }
     }
   }
 }

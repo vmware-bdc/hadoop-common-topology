@@ -20,37 +20,34 @@ package org.apache.hadoop.mapreduce.v2.jobhistory;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
 import java.util.Calendar;
-import java.util.Iterator;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.RemoteIterator;
+import org.apache.hadoop.fs.UnsupportedFileSystemException;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
-import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.yarn.api.records.ApplicationId;
-
-import com.google.common.base.Joiner;
-import com.google.common.base.Splitter;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
@@ -79,6 +76,13 @@ public class JobHistoryUtils {
 
   public static final FsPermission HISTORY_DONE_FILE_PERMISSION =
     FsPermission.createImmutable((short) 0770); // rwx------
+
+ /**
+   * Umask for the done dir and derivatives.
+   */
+  public static final FsPermission HISTORY_DONE_DIR_UMASK = FsPermission
+      .createImmutable((short) (0770 ^ 0777));
+
   
   /**
    * Permissions for the intermediate done directory.
@@ -114,12 +118,10 @@ public class JobHistoryUtils {
 
   public static final int SERIAL_NUMBER_DIRECTORY_DIGITS = 6;
   
-  public static final String TIMESTAMP_DIR_REGEX = "\\d{4}" + "\\" + File.separator +  "\\d{2}" + "\\" + File.separator + "\\d{2}";
+  public static final String TIMESTAMP_DIR_REGEX = "\\d{4}" + "\\" + Path.SEPARATOR +  "\\d{2}" + "\\" + Path.SEPARATOR + "\\d{2}";
   public static final Pattern TIMESTAMP_DIR_PATTERN = Pattern.compile(TIMESTAMP_DIR_REGEX);
   private static final String TIMESTAMP_DIR_FORMAT = "%04d" + File.separator + "%02d" + File.separator + "%02d";
-
-  private static final Splitter ADDR_SPLITTER = Splitter.on(':').trimResults();
-  private static final Joiner JOINER = Joiner.on("");
+  private static final Log LOG = LogFactory.getLog(JobHistoryUtils.class);
 
   private static final PathFilter CONF_FILTER = new PathFilter() {
     @Override
@@ -175,16 +177,18 @@ public class JobHistoryUtils {
 
   /**
    * Gets the configured directory prefix for In Progress history files.
-   * @param conf
+   * @param conf the configuration for hte job
+   * @param jobId the id of the job the history file is for.
    * @return A string representation of the prefix.
    */
   public static String
-      getConfiguredHistoryStagingDirPrefix(Configuration conf)
+      getConfiguredHistoryStagingDirPrefix(Configuration conf, String jobId)
           throws IOException {
     String user = UserGroupInformation.getCurrentUser().getShortUserName();
-    Path path = MRApps.getStagingAreaDir(conf, user);
+    Path stagingPath = MRApps.getStagingAreaDir(conf, user);
+    Path path = new Path(stagingPath, jobId);
     String logDir = path.toString();
-    return logDir;
+    return ensurePathInDefaultFileSystem(logDir, conf);
   }
   
   /**
@@ -201,7 +205,7 @@ public class JobHistoryUtils {
           MRJobConfig.DEFAULT_MR_AM_STAGING_DIR)
           + "/history/done_intermediate";
     }
-    return doneDirPrefix;
+    return ensurePathInDefaultFileSystem(doneDirPrefix, conf);
   }
   
   /**
@@ -217,7 +221,69 @@ public class JobHistoryUtils {
           MRJobConfig.DEFAULT_MR_AM_STAGING_DIR)
           + "/history/done";
     }
-    return doneDirPrefix;
+    return ensurePathInDefaultFileSystem(doneDirPrefix, conf);
+  }
+
+  /**
+   * Get default file system URI for the cluster (used to ensure consistency
+   * of history done/staging locations) over different context
+   *
+   * @return Default file context
+   */
+  private static FileContext getDefaultFileContext() {
+    // If FS_DEFAULT_NAME_KEY was set solely by core-default.xml then we ignore
+    // ignore it. This prevents defaulting history paths to file system specified
+    // by core-default.xml which would not make sense in any case. For a test
+    // case to exploit this functionality it should create core-site.xml
+    FileContext fc = null;
+    Configuration defaultConf = new Configuration();
+    String[] sources;
+    sources = defaultConf.getPropertySources(
+        CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY);
+    if (sources != null &&
+        (!Arrays.asList(sources).contains("core-default.xml") ||
+        sources.length > 1)) {
+      try {
+        fc = FileContext.getFileContext(defaultConf);
+        LOG.info("Default file system [" +
+                  fc.getDefaultFileSystem().getUri() + "]");
+      } catch (UnsupportedFileSystemException e) {
+        LOG.error("Unable to create default file context [" +
+            defaultConf.get(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY) +
+            "]",
+            e);
+      }
+    }
+    else {
+      LOG.info("Default file system is set solely " +
+          "by core-default.xml therefore -  ignoring");
+    }
+
+    return fc;
+  }
+
+  /**
+   * Ensure that path belongs to cluster's default file system unless
+   * 1. it is already fully qualified.
+   * 2. current job configuration uses default file system
+   * 3. running from a test case without core-site.xml
+   *
+   * @param sourcePath source path
+   * @param conf the job configuration
+   * @return full qualified path (if necessary) in default file system
+   */
+  private static String ensurePathInDefaultFileSystem(String sourcePath, Configuration conf) {
+    Path path = new Path(sourcePath);
+    FileContext fc = getDefaultFileContext();
+    if (fc == null ||
+        fc.getDefaultFileSystem().getUri().toString().equals(
+            conf.get(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY, "")) ||
+        path.toUri().getAuthority() != null ||
+        path.toUri().getScheme()!= null) {
+      return sourcePath;
+    }
+
+    return fc.makeQualified(path).toString();
   }
 
   /**
@@ -226,8 +292,8 @@ public class JobHistoryUtils {
    * @return the intermediate done directory for jobhistory files.
    */
   public static String getHistoryIntermediateDoneDirForUser(Configuration conf) throws IOException {
-    return getConfiguredHistoryIntermediateDoneDirPrefix(conf) + File.separator
-        + UserGroupInformation.getCurrentUser().getShortUserName();
+    return new Path(getConfiguredHistoryIntermediateDoneDirPrefix(conf),
+        UserGroupInformation.getCurrentUser().getShortUserName()).toString();
   }
 
   public static boolean shouldCreateNonUserDirectory(Configuration conf) {
@@ -336,20 +402,19 @@ public class JobHistoryUtils {
   /**
    * Gets the timestamp component based on millisecond time.
    * @param millisecondTime
-   * @param debugMode
    * @return the timestamp component based on millisecond time
    */
-  public static String timestampDirectoryComponent(long millisecondTime, boolean debugMode) {
+  public static String timestampDirectoryComponent(long millisecondTime) {
     Calendar timestamp = Calendar.getInstance();
     timestamp.setTimeInMillis(millisecondTime);
     String dateString = null;
-    dateString = String.format(
-        TIMESTAMP_DIR_FORMAT,
-        timestamp.get(Calendar.YEAR),
-        // months are 0-based in Calendar, but people will expect January
-        // to be month #1.
-        timestamp.get(debugMode ? Calendar.HOUR : Calendar.MONTH) + 1,
-        timestamp.get(debugMode ? Calendar.MINUTE : Calendar.DAY_OF_MONTH));
+    dateString = String
+        .format(TIMESTAMP_DIR_FORMAT,
+            timestamp.get(Calendar.YEAR),
+            // months are 0-based in Calendar, but people will expect January to
+            // be month #1.
+            timestamp.get(Calendar.MONTH) + 1,
+            timestamp.get(Calendar.DAY_OF_MONTH));
     dateString = dateString.intern();
     return dateString;
   }
@@ -488,33 +553,86 @@ public class JobHistoryUtils {
     return result;
   }
 
-  public static String getHistoryUrl(Configuration conf, ApplicationId appId) 
-       throws UnknownHostException {
-  //construct the history url for job
-    String addr = conf.get(JHAdminConfig.MR_HISTORY_WEBAPP_ADDRESS,
-        JHAdminConfig.DEFAULT_MR_HISTORY_WEBAPP_ADDRESS);
-    Iterator<String> it = ADDR_SPLITTER.split(addr).iterator();
-    it.next(); // ignore the bind host
-    String port = it.next();
-    // Use hs address to figure out the host for webapp
-    addr = conf.get(JHAdminConfig.MR_HISTORY_ADDRESS,
-        JHAdminConfig.DEFAULT_MR_HISTORY_ADDRESS);
-    String host = ADDR_SPLITTER.split(addr).iterator().next();
-    String hsAddress = JOINER.join(host, ":", port);
-    InetSocketAddress address = NetUtils.createSocketAddr(
-      hsAddress, JHAdminConfig.DEFAULT_MR_HISTORY_WEBAPP_PORT,
-      JHAdminConfig.DEFAULT_MR_HISTORY_WEBAPP_ADDRESS);
-    StringBuffer sb = new StringBuffer();
-    if (address.getAddress().isAnyLocalAddress() || 
-        address.getAddress().isLoopbackAddress()) {
-      sb.append(InetAddress.getLocalHost().getCanonicalHostName());
-    } else {
-      sb.append(address.getHostName());
+  public static Path getPreviousJobHistoryPath(
+      Configuration conf, ApplicationAttemptId applicationAttemptId)
+      throws IOException {
+    String jobId =
+        TypeConverter.fromYarn(applicationAttemptId.getApplicationId())
+          .toString();
+    String jobhistoryDir =
+        JobHistoryUtils.getConfiguredHistoryStagingDirPrefix(conf, jobId);
+    Path histDirPath = FileContext.getFileContext(conf).makeQualified(
+            new Path(jobhistoryDir));
+    FileContext fc = FileContext.getFileContext(histDirPath.toUri(), conf);
+    return fc.makeQualified(JobHistoryUtils.getStagingJobHistoryFile(
+        histDirPath,jobId, (applicationAttemptId.getAttemptId() - 1)));
+  }
+
+  /**
+   * Looks for the dirs to clean.  The folder structure is YYYY/MM/DD/Serial so
+   * we can use that to more efficiently find the directories to clean by
+   * comparing the cutoff timestamp with the timestamp from the folder
+   * structure.
+   *
+   * @param fc done dir FileContext
+   * @param root folder for completed jobs
+   * @param cutoff The cutoff for the max history age
+   * @return The list of directories for cleaning
+   * @throws IOException
+   */
+  public static List<FileStatus> getHistoryDirsForCleaning(FileContext fc,
+      Path root, long cutoff) throws IOException {
+    List<FileStatus> fsList = new ArrayList<FileStatus>();
+    Calendar cCal = Calendar.getInstance();
+    cCal.setTimeInMillis(cutoff);
+    int cYear = cCal.get(Calendar.YEAR);
+    int cMonth = cCal.get(Calendar.MONTH) + 1;
+    int cDate = cCal.get(Calendar.DATE);
+
+    RemoteIterator<FileStatus> yearDirIt = fc.listStatus(root);
+    while (yearDirIt.hasNext()) {
+      FileStatus yearDir = yearDirIt.next();
+      try {
+        int year = Integer.parseInt(yearDir.getPath().getName());
+        if (year <= cYear) {
+          RemoteIterator<FileStatus> monthDirIt =
+              fc.listStatus(yearDir.getPath());
+          while (monthDirIt.hasNext()) {
+            FileStatus monthDir = monthDirIt.next();
+            try {
+              int month = Integer.parseInt(monthDir.getPath().getName());
+              // If we only checked the month here, then something like 07/2013
+              // would incorrectly not pass when the cutoff is 06/2014
+              if (year < cYear || month <= cMonth) {
+                RemoteIterator<FileStatus> dateDirIt =
+                    fc.listStatus(monthDir.getPath());
+                while (dateDirIt.hasNext()) {
+                  FileStatus dateDir = dateDirIt.next();
+                  try {
+                    int date = Integer.parseInt(dateDir.getPath().getName());
+                    // If we only checked the date here, then something like
+                    // 07/21/2013 would incorrectly not pass when the cutoff is
+                    // 08/20/2013 or 07/20/2012
+                    if (year < cYear || month < cMonth || date <= cDate) {
+                      fsList.addAll(remoteIterToList(
+                          fc.listStatus(dateDir.getPath())));
+                    }
+                  } catch (NumberFormatException nfe) {
+                    // the directory didn't fit the format we're looking for so
+                    // skip the dir
+                  }
+                }
+              }
+            } catch (NumberFormatException nfe) {
+              // the directory didn't fit the format we're looking for so skip
+              // the dir
+            }
+          }
+        }
+      } catch (NumberFormatException nfe) {
+        // the directory didn't fit the format we're looking for so skip the dir
+      }
     }
-    sb.append(":").append(address.getPort());
-    sb.append("/jobhistory/job/");
-    JobID jobId = TypeConverter.fromYarn(appId);
-    sb.append(jobId.toString());
-    return sb.toString();
+    return fsList;
   }
 }

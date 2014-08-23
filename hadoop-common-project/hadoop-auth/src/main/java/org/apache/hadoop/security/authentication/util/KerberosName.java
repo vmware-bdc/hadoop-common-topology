@@ -21,6 +21,7 @@ package org.apache.hadoop.security.authentication.util;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -66,7 +67,7 @@ public class KerberosName {
    */
   private static final Pattern ruleParser =
     Pattern.compile("\\s*((DEFAULT)|(RULE:\\[(\\d*):([^\\]]*)](\\(([^)]*)\\))?"+
-                    "(s/([^/]*)/([^/]*)/(g)?)?))");
+                    "(s/([^/]*)/([^/]*)/(g)?)?))/?(L)?");
 
   /**
    * A pattern that recognizes simple/non-simple names.
@@ -84,7 +85,7 @@ public class KerberosName {
     try {
       defaultRealm = KerberosUtil.getDefaultRealm();
     } catch (Exception ke) {
-        LOG.warn("Kerberos krb5 configuration not found, setting default realm to empty");
+        LOG.debug("Kerberos krb5 configuration not found, setting default realm to empty");
         defaultRealm="";
     }
   }
@@ -171,6 +172,7 @@ public class KerberosName {
     private final Pattern fromPattern;
     private final String toPattern;
     private final boolean repeat;
+    private final boolean toLowerCase;
 
     Rule() {
       isDefault = true;
@@ -180,10 +182,11 @@ public class KerberosName {
       fromPattern = null;
       toPattern = null;
       repeat = false;
+      toLowerCase = false;
     }
 
     Rule(int numOfComponents, String format, String match, String fromPattern,
-         String toPattern, boolean repeat) {
+         String toPattern, boolean repeat, boolean toLowerCase) {
       isDefault = false;
       this.numOfComponents = numOfComponents;
       this.format = format;
@@ -192,6 +195,7 @@ public class KerberosName {
         fromPattern == null ? null : Pattern.compile(fromPattern);
       this.toPattern = toPattern;
       this.repeat = repeat;
+      this.toLowerCase = toLowerCase;
     }
 
     @Override
@@ -219,6 +223,9 @@ public class KerberosName {
           if (repeat) {
             buf.append('g');
           }
+        }
+        if (toLowerCase) {
+          buf.append("/L");
         }
       }
       return buf.toString();
@@ -308,6 +315,9 @@ public class KerberosName {
         throw new NoMatchingRule("Non-simple name " + result +
                                  " after auth_to_local rule " + this);
       }
+      if (toLowerCase && result != null) {
+        result = result.toLowerCase(Locale.ENGLISH);
+      }
       return result;
     }
   }
@@ -328,7 +338,8 @@ public class KerberosName {
                             matcher.group(7),
                             matcher.group(9),
                             matcher.group(10),
-                            "g".equals(matcher.group(11))));
+                            "g".equals(matcher.group(11)),
+                            "L".equals(matcher.group(12))));
       }
       remaining = remaining.substring(matcher.end());
     }
@@ -383,9 +394,25 @@ public class KerberosName {
    * @param ruleString the rules string.
    */
   public static void setRules(String ruleString) {
-    rules = parseRules(ruleString);
+    rules = (ruleString != null) ? parseRules(ruleString) : null;
   }
 
+  /**
+   * Get the rules.
+   * @return String of configured rules, or null if not yet configured
+   */
+  public static String getRules() {
+    String ruleString = null;
+    if (rules != null) {
+      StringBuilder sb = new StringBuilder();
+      for (Rule rule : rules) {
+        sb.append(rule.toString()).append("\n");
+      }
+      ruleString = sb.toString().trim();
+    }
+    return ruleString;
+  }
+  
   /**
    * Indicates if the name rules have been set.
    * 

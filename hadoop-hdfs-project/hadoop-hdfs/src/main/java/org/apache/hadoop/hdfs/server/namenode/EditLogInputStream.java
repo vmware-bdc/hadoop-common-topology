@@ -19,11 +19,10 @@ package org.apache.hadoop.hdfs.server.namenode;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+
 import java.io.Closeable;
 import java.io.IOException;
-
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
 
 /**
  * A generic abstract class to support reading edits log data from 
@@ -36,7 +35,18 @@ import org.apache.hadoop.classification.InterfaceStability;
 @InterfaceStability.Evolving
 public abstract class EditLogInputStream implements Closeable {
   private FSEditLogOp cachedOp = null; 
-  
+
+  /**
+   * Returns the name of the currently active underlying stream.  The default
+   * implementation returns the same value as getName unless overridden by the
+   * subclass.
+   * 
+   * @return String name of the currently active underlying stream
+   */
+  public String getCurrentStreamName() {
+    return getName();
+  }
+
   /** 
    * @return the name of the EditLogInputStream
    */
@@ -45,18 +55,19 @@ public abstract class EditLogInputStream implements Closeable {
   /** 
    * @return the first transaction which will be found in this stream
    */
-  public abstract long getFirstTxId() throws IOException;
+  public abstract long getFirstTxId();
   
   /** 
    * @return the last transaction which will be found in this stream
    */
-  public abstract long getLastTxId() throws IOException;
+  public abstract long getLastTxId();
 
 
   /**
    * Close the stream.
    * @throws IOException if an error occurred while closing
    */
+  @Override
   public abstract void close() throws IOException;
 
   /** 
@@ -73,14 +84,14 @@ public abstract class EditLogInputStream implements Closeable {
     }
     return nextOp();
   }
-
+  
   /** 
    * Position the stream so that a valid operation can be read from it with
    * readOp().
    * 
    * This method can be used to skip over corrupted sections of edit logs.
    */
-  public void resync() throws IOException {
+  public void resync() {
     if (cachedOp != null) {
       return;
     }
@@ -94,6 +105,15 @@ public abstract class EditLogInputStream implements Closeable {
    * @throws IOException if there is an error reading from the stream
    */
   protected abstract FSEditLogOp nextOp() throws IOException;
+
+  /**
+   * Go through the next operation from the stream storage.
+   * @return the txid of the next operation.
+   */
+  protected long scanNextOp() throws IOException {
+    FSEditLogOp next = readOp();
+    return next != null ? next.txid : HdfsConstants.INVALID_TXID;
+  }
   
   /** 
    * Get the next valid operation from the stream storage.
@@ -109,7 +129,7 @@ public abstract class EditLogInputStream implements Closeable {
     // error recovery will want to override this.
     try {
       return nextOp();
-    } catch (IOException e) {
+    } catch (Throwable e) {
       return null;
     }
   }
@@ -138,13 +158,22 @@ public abstract class EditLogInputStream implements Closeable {
       }
     }
   }
+
+  /**
+   * return the cachedOp, and reset it to null. 
+   */
+  FSEditLogOp getCachedOp() {
+    FSEditLogOp op = this.cachedOp;
+    cachedOp = null;
+    return op;
+  }
   
   /** 
    * Get the layout version of the data in the stream.
    * @return the layout version of the ops in the stream.
    * @throws IOException if there is an error reading the version
    */
-  public abstract int getVersion() throws IOException;
+  public abstract int getVersion(boolean verifyVersion) throws IOException;
 
   /**
    * Get the "position" of in the stream. This is useful for 
@@ -159,7 +188,9 @@ public abstract class EditLogInputStream implements Closeable {
   public abstract long getPosition();
 
   /**
-   * Return the size of the current edits log.
+   * Return the size of the current edits log or -1 if unknown.
+   * 
+   * @return long size of the current edits log or -1 if unknown
    */
   public abstract long length() throws IOException;
   
@@ -167,4 +198,9 @@ public abstract class EditLogInputStream implements Closeable {
    * Return true if this stream is in progress, false if it is finalized.
    */
   public abstract boolean isInProgress();
+  
+  /**
+   * Set the maximum opcode size in bytes.
+   */
+  public abstract void setMaxOpSize(int maxOpSize);
 }

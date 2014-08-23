@@ -29,8 +29,8 @@ import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.AttributesImpl;
 
-import com.sun.org.apache.xml.internal.serialize.OutputFormat;
-import com.sun.org.apache.xml.internal.serialize.XMLSerializer;
+import org.apache.xml.serialize.OutputFormat;
+import org.apache.xml.serialize.XMLSerializer;
 
 /**
  * An XmlEditsVisitor walks over an EditLog structure and writes out
@@ -39,7 +39,7 @@ import com.sun.org.apache.xml.internal.serialize.XMLSerializer;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class XmlEditsVisitor implements OfflineEditsVisitor {
-  private OutputStream out;
+  private final OutputStream out;
   private ContentHandler contentHandler;
 
   /**

@@ -80,6 +80,40 @@ public class TestJobCounters {
     }
   }
 
+  @SuppressWarnings("deprecation")
+  private void validateOldFileCounters(Counters counter, long fileBytesRead,
+      long fileBytesWritten, long mapOutputBytes,
+      long mapOutputMaterializedBytes) {
+
+    assertEquals(fileBytesRead,
+      counter.findCounter(FileInputFormat.Counter.BYTES_READ).getValue());
+
+    assertEquals(
+      fileBytesRead,
+      counter
+        .findCounter(
+          org.apache.hadoop.mapreduce.lib.input.FileInputFormat.Counter.BYTES_READ)
+        .getValue());
+
+    assertEquals(fileBytesWritten,
+      counter.findCounter(FileOutputFormat.Counter.BYTES_WRITTEN).getValue());
+
+    assertEquals(
+      fileBytesWritten,
+      counter
+        .findCounter(
+          org.apache.hadoop.mapreduce.lib.output.FileOutputFormat.Counter.BYTES_WRITTEN)
+        .getValue());
+
+    if (mapOutputBytes >= 0) {
+      assertTrue(counter.findCounter(TaskCounter.MAP_OUTPUT_BYTES).getValue() != 0);
+    }
+    if (mapOutputMaterializedBytes >= 0) {
+      assertTrue(counter.findCounter(TaskCounter.MAP_OUTPUT_MATERIALIZED_BYTES)
+        .getValue() != 0);
+    }
+  }
+  
   private void validateCounters(Counters counter, long spillRecCnt,
                                 long mapInputRecords, long mapOutputRecords) {
       // Check if the numer of Spilled Records is same as expected
@@ -242,20 +276,18 @@ public class TestJobCounters {
     // there are too few spills to combine (2 < 3)
     // Each map spills 2^14 records, so maps spill 49152 records, combined.
 
-    // The reduce spill count is composed of the read from one segment and
-    // the intermediate merge of the other two. The intermediate merge
+    // The combiner has emitted 24576 records to the reducer; these are all
+    // fetched straight to memory from the map side. The intermediate merge
     // adds 8192 records per segment read; again, there are too few spills to
-    // combine, so all 16834 are written to disk (total 32768 spilled records
-    // for the intermediate merge). The merge into the reduce includes only
-    // the unmerged segment, size 8192. Total spilled records in the reduce
-    // is 32768 from the merge + 8192 unmerged segment = 40960 records
+    // combine, so all Total spilled records in the reduce
+    // is 8192 records / map * 3 maps = 24576.
 
-    // Total: map + reduce = 49152 + 40960 = 90112
+    // Total: map + reduce = 49152 + 24576 = 73728
     // 3 files, 5120 = 5 * 1024 rec/file = 15360 input records
     // 4 records/line = 61440 output records
-    validateCounters(c1, 90112, 15360, 61440);
+    validateCounters(c1, 73728, 15360, 61440);
     validateFileCounters(c1, inputSize, 0, 0, 0);
-
+    validateOldFileCounters(c1, inputSize, 61928, 0, 0);
   }
 
   @Test
@@ -282,12 +314,12 @@ public class TestJobCounters {
     // 1st merge: read + write = 8192 * 4
     // 2nd merge: read + write = 8192 * 4
     // final merge: 0
-    // Total reduce: 65536
+    // Total reduce: 32768
 
-    // Total: map + reduce = 2^16 + 2^16 = 131072
+    // Total: map + reduce = 2^16 + 2^15 = 98304
     // 4 files, 5120 = 5 * 1024 rec/file = 15360 input records
     // 4 records/line = 81920 output records
-    validateCounters(c1, 131072, 20480, 81920);
+    validateCounters(c1, 98304, 20480, 81920);
     validateFileCounters(c1, inputSize, 0, 0, 0);
   }
 
@@ -315,7 +347,7 @@ public class TestJobCounters {
     // Total reduce: 45056
     // 5 files, 5120 = 5 * 1024 rec/file = 15360 input records
     // 4 records/line = 102400 output records
-    validateCounters(c1, 147456, 25600, 102400);
+    validateCounters(c1, 122880, 25600, 102400);
     validateFileCounters(c1, inputSize, 0, 0, 0);
   }
 
@@ -360,7 +392,7 @@ public class TestJobCounters {
         job, new Path(OUT_DIR, "outputN0"));
     assertTrue(job.waitForCompletion(true));
     final Counters c1 = Counters.downgrade(job.getCounters());
-    validateCounters(c1, 90112, 15360, 61440);
+    validateCounters(c1, 73728, 15360, 61440);
     validateFileCounters(c1, inputSize, 0, 0, 0);    
   }
 
@@ -382,7 +414,7 @@ public class TestJobCounters {
         job, new Path(OUT_DIR, "outputN1"));
     assertTrue(job.waitForCompletion(true));
     final Counters c1 = Counters.downgrade(job.getCounters());
-    validateCounters(c1, 131072, 20480, 81920);
+    validateCounters(c1, 98304, 20480, 81920);
     validateFileCounters(c1, inputSize, 0, 0, 0);
   }
 
@@ -405,7 +437,7 @@ public class TestJobCounters {
         job, new Path(OUT_DIR, "outputN2"));
     assertTrue(job.waitForCompletion(true));
     final Counters c1 = Counters.downgrade(job.getCounters());
-    validateCounters(c1, 147456, 25600, 102400);
+    validateCounters(c1, 122880, 25600, 102400);
     validateFileCounters(c1, inputSize, 0, 0, 0);
   }
 
@@ -429,6 +461,18 @@ public class TestJobCounters {
     final Counters c1 = Counters.downgrade(job.getCounters());
     validateCounters(c1, 0, 15360, 61440);
     validateFileCounters(c1, inputSize, 0, -1, -1);
+  }
+
+  @SuppressWarnings("deprecation")
+  @Test
+  public void testOldCounters() throws Exception {
+    Counters c1 = new Counters();
+    c1.incrCounter(FileInputFormat.Counter.BYTES_READ, 100);
+    c1.incrCounter(FileOutputFormat.Counter.BYTES_WRITTEN, 200);
+    c1.incrCounter(TaskCounter.MAP_OUTPUT_BYTES, 100);
+    c1.incrCounter(TaskCounter.MAP_OUTPUT_MATERIALIZED_BYTES, 100);
+    validateFileCounters(c1, 100, 200, 100, 100);
+    validateOldFileCounters(c1, 100, 200, 100, 100);
   }
 
   /** 

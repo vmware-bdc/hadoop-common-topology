@@ -71,9 +71,14 @@ public class JobCounterInfo {
   }
 
   private void getCounters(AppContext ctx, Job job) {
-    total = new Counters();
     if (job == null) {
       return;
+    }
+    total = job.getAllCounters();
+    boolean needTotalCounters = false;
+    if (total == null) {
+      total = new Counters();
+      needTotalCounters = true;
     }
     map = new Counters();
     reduce = new Counters();
@@ -81,7 +86,9 @@ public class JobCounterInfo {
     Map<TaskId, Task> tasks = job.getTasks();
     for (Task t : tasks.values()) {
       Counters counters = t.getCounters();
-      total.incrAllCounters(counters);
+      if (counters == null) {
+        continue;
+      }
       switch (t.getType()) {
       case MAP:
         map.incrAllCounters(counters);
@@ -89,6 +96,9 @@ public class JobCounterInfo {
       case REDUCE:
         reduce.incrAllCounters(counters);
         break;
+      }
+      if (needTotalCounters) {
+        total.incrAllCounters(counters);
       }
     }
   }

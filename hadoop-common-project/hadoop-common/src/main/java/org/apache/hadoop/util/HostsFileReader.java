@@ -25,6 +25,7 @@ import java.util.HashSet;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability;
 
 // Keeps track of which datanodes/tasktrackers are allowed to connect to the 
@@ -48,15 +49,30 @@ public class HostsFileReader {
     refresh();
   }
 
-  private void readFileToSet(String filename, Set<String> set) throws IOException {
+  @Private
+  public HostsFileReader(String includesFile, InputStream inFileInputStream,
+      String excludesFile, InputStream exFileInputStream) throws IOException {
+    includes = new HashSet<String>();
+    excludes = new HashSet<String>();
+    this.includesFile = includesFile;
+    this.excludesFile = excludesFile;
+    refresh(inFileInputStream, exFileInputStream);
+  }
+
+  public static void readFileToSet(String type,
+      String filename, Set<String> set) throws IOException {
     File file = new File(filename);
-    if (!file.exists()) {
-      return;
-    }
     FileInputStream fis = new FileInputStream(file);
+    readFileToSetWithFileInputStream(type, filename, fis, set);
+  }
+
+  @Private
+  public static void readFileToSetWithFileInputStream(String type,
+      String filename, InputStream fileInputStream, Set<String> set)
+      throws IOException {
     BufferedReader reader = null;
     try {
-      reader = new BufferedReader(new InputStreamReader(fis));
+      reader = new BufferedReader(new InputStreamReader(fileInputStream));
       String line;
       while ((line = reader.readLine()) != null) {
         String[] nodes = line.split("[ \t\n\f\r]+");
@@ -66,32 +82,70 @@ public class HostsFileReader {
               // Everything from now on is a comment
               break;
             }
-            if (!nodes[i].equals("")) {
-              LOG.info("Adding " + nodes[i] + " to the list of hosts from " + filename);
-              set.add(nodes[i]);  // might need to add canonical name
+            if (!nodes[i].isEmpty()) {
+              LOG.info("Adding " + nodes[i] + " to the list of " + type +
+                  " hosts from " + filename);
+              set.add(nodes[i]);
             }
           }
         }
-      }   
+      }
     } finally {
       if (reader != null) {
         reader.close();
       }
-      fis.close();
-    }  
+      fileInputStream.close();
+    }
   }
 
   public synchronized void refresh() throws IOException {
     LOG.info("Refreshing hosts (include/exclude) list");
-    if (!includesFile.equals("")) {
-      Set<String> newIncludes = new HashSet<String>();
-      readFileToSet(includesFile, newIncludes);
+    Set<String> newIncludes = new HashSet<String>();
+    Set<String> newExcludes = new HashSet<String>();
+    boolean switchIncludes = false;
+    boolean switchExcludes = false;
+    if (!includesFile.isEmpty()) {
+      readFileToSet("included", includesFile, newIncludes);
+      switchIncludes = true;
+    }
+    if (!excludesFile.isEmpty()) {
+      readFileToSet("excluded", excludesFile, newExcludes);
+      switchExcludes = true;
+    }
+
+    if (switchIncludes) {
       // switch the new hosts that are to be included
       includes = newIncludes;
     }
-    if (!excludesFile.equals("")) {
-      Set<String> newExcludes = new HashSet<String>();
-      readFileToSet(excludesFile, newExcludes);
+    if (switchExcludes) {
+      // switch the excluded hosts
+      excludes = newExcludes;
+    }
+  }
+
+  @Private
+  public synchronized void refresh(InputStream inFileInputStream,
+      InputStream exFileInputStream) throws IOException {
+    LOG.info("Refreshing hosts (include/exclude) list");
+    Set<String> newIncludes = new HashSet<String>();
+    Set<String> newExcludes = new HashSet<String>();
+    boolean switchIncludes = false;
+    boolean switchExcludes = false;
+    if (inFileInputStream != null) {
+      readFileToSetWithFileInputStream("included", includesFile,
+          inFileInputStream, newIncludes);
+      switchIncludes = true;
+    }
+    if (exFileInputStream != null) {
+      readFileToSetWithFileInputStream("excluded", excludesFile,
+          exFileInputStream, newExcludes);
+      switchExcludes = true;
+    }
+    if (switchIncludes) {
+      // switch the new hosts that are to be included
+      includes = newIncludes;
+    }
+    if (switchExcludes) {
       // switch the excluded hosts
       excludes = newExcludes;
     }
@@ -115,9 +169,8 @@ public class HostsFileReader {
     this.excludesFile = excludesFile;
   }
 
-  public synchronized void updateFileNames(String includesFile, 
-                                           String excludesFile) 
-                                           throws IOException {
+  public synchronized void updateFileNames(String includesFile,
+      String excludesFile) {
     setIncludesFile(includesFile);
     setExcludesFile(excludesFile);
   }

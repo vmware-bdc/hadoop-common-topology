@@ -20,7 +20,6 @@ package org.apache.hadoop.mapred;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.List;
 
 import junit.framework.TestCase;
@@ -29,20 +28,17 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.ipc.ProtocolSignature;
 import org.apache.hadoop.mapreduce.InputFormat;
 import org.apache.hadoop.mapreduce.InputSplit;
-import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.OutputFormat;
-import org.apache.hadoop.mapreduce.jobhistory.JobSubmittedEvent;
+import org.apache.hadoop.mapreduce.checkpoint.TaskCheckpointID;
 import org.apache.hadoop.mapreduce.lib.output.NullOutputFormat;
 import org.apache.hadoop.mapreduce.server.jobtracker.JTConfig;
-import org.apache.hadoop.mapreduce.split.JobSplitWriter;
-import org.apache.hadoop.mapreduce.split.SplitMetaInfoReader;
-import org.apache.hadoop.mapreduce.split.JobSplit.SplitMetaInfo;
 import org.apache.hadoop.mapreduce.split.JobSplit.TaskSplitIndex;
 import org.apache.hadoop.mapreduce.split.JobSplit.TaskSplitMetaInfo;
+import org.apache.hadoop.mapreduce.split.JobSplitWriter;
+import org.apache.hadoop.mapreduce.split.SplitMetaInfoReader;
 import org.apache.hadoop.util.ReflectionUtils;
 
 /**
@@ -61,8 +57,12 @@ import org.apache.hadoop.util.ReflectionUtils;
  */
 public class TestMapProgress extends TestCase {
   public static final Log LOG = LogFactory.getLog(TestMapProgress.class);
-  private static String TEST_ROOT_DIR = new File(System.getProperty(
-           "test.build.data", "/tmp")).getAbsolutePath() + "/mapPahseprogress";
+  private static String TEST_ROOT_DIR;
+  static {
+    String root = new File(System.getProperty("test.build.data", "/tmp"))
+      .getAbsolutePath();
+    TEST_ROOT_DIR = new Path(root, "mapPhaseprogress").toString();
+  }
 
   static class FakeUmbilical implements TaskUmbilicalProtocol {
 
@@ -106,11 +106,16 @@ public class TestMapProgress extends TestCase {
       statusUpdate(taskId, taskStatus);
     }
     
+    public void preempted(TaskAttemptID taskId, TaskStatus taskStatus)
+        throws IOException, InterruptedException {
+      statusUpdate(taskId, taskStatus);
+    }
+
     public boolean canCommit(TaskAttemptID taskid) throws IOException {
       return true;
     }
     
-    public boolean statusUpdate(TaskAttemptID taskId, TaskStatus taskStatus) 
+    public AMFeedback statusUpdate(TaskAttemptID taskId, TaskStatus taskStatus) 
     throws IOException, InterruptedException {
       StringBuffer buf = new StringBuffer("Task ");
       buf.append(taskId);
@@ -124,7 +129,9 @@ public class TestMapProgress extends TestCase {
       LOG.info(buf.toString());
       // ignore phase
       // ignore counters
-      return true;
+      AMFeedback a = new AMFeedback();
+      a.setTaskFound(true);
+      return a;
     }
 
     public void reportDiagnosticInfo(TaskAttemptID taskid, String trace) throws IOException {
@@ -140,6 +147,17 @@ public class TestMapProgress extends TestCase {
     public void reportNextRecordRange(TaskAttemptID taskid, 
         SortedRanges.Range range) throws IOException {
       LOG.info("Task " + taskid + " reportedNextRecordRange " + range);
+    }
+
+    @Override
+    public TaskCheckpointID getCheckpointID(TaskID taskId) {
+      // do nothing
+      return null;
+    }
+
+    @Override
+    public void setCheckpointID(TaskID downgrade, TaskCheckpointID cid) {
+      // do nothing
     }
   }
   

@@ -17,12 +17,13 @@
  */
 package org.apache.hadoop.hdfs.server.namenode.ha;
 
-import java.io.ByteArrayInputStream;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
-import java.util.Collections;
-import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -41,11 +42,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
-
-import static org.junit.Assert.*;
 
 public class TestBootstrapStandby {
   private static final Log LOG = LogFactory.getLog(TestBootstrapStandby.class);
@@ -59,8 +56,8 @@ public class TestBootstrapStandby {
 
     MiniDFSNNTopology topology = new MiniDFSNNTopology()
       .addNameservice(new MiniDFSNNTopology.NSConf("ns1")
-        .addNN(new MiniDFSNNTopology.NNConf("nn1").setHttpPort(10001))
-        .addNN(new MiniDFSNNTopology.NNConf("nn2").setHttpPort(10002)));
+        .addNN(new MiniDFSNNTopology.NNConf("nn1").setHttpPort(20001))
+        .addNN(new MiniDFSNNTopology.NNConf("nn2").setHttpPort(20002)));
     
     cluster = new MiniDFSCluster.Builder(conf)
       .nnTopology(topology)
@@ -74,7 +71,7 @@ public class TestBootstrapStandby {
   }
   
   @After
-  public void shutdownCluster() throws IOException {
+  public void shutdownCluster() {
     if (cluster != null) {
       cluster.shutdown();
     }
@@ -94,7 +91,7 @@ public class TestBootstrapStandby {
       fail("Did not throw");
     } catch (IOException ioe) {
       GenericTestUtils.assertExceptionContains(
-          "Cannot start an HA namenode with name dirs that need recovery",
+          "storage directory does not exist or is not accessible",
           ioe);
     }
     
@@ -106,7 +103,7 @@ public class TestBootstrapStandby {
     // Should have copied over the namespace from the active
     FSImageTestUtil.assertNNHasCheckpoints(cluster, 1,
         ImmutableList.of(0));
-    assertNNFilesMatch();
+    FSImageTestUtil.assertNNFilesMatch(cluster);
 
     // We should now be able to start the standby successfully.
     cluster.restartNameNode(1);
@@ -124,7 +121,7 @@ public class TestBootstrapStandby {
     // Make checkpoint
     NameNodeAdapter.enterSafeMode(nn0, false);
     NameNodeAdapter.saveNamespace(nn0);
-    NameNodeAdapter.leaveSafeMode(nn0, false);
+    NameNodeAdapter.leaveSafeMode(nn0);
     long expectedCheckpointTxId = NameNodeAdapter.getNamesystem(nn0)
       .getFSImage().getMostRecentCheckpointTxId();
     assertEquals(6, expectedCheckpointTxId);
@@ -137,7 +134,7 @@ public class TestBootstrapStandby {
     // Should have copied over the namespace from the active
     FSImageTestUtil.assertNNHasCheckpoints(cluster, 1,
         ImmutableList.of((int)expectedCheckpointTxId));
-    assertNNFilesMatch();
+    FSImageTestUtil.assertNNFilesMatch(cluster);
 
     // We should now be able to start the standby successfully.
     cluster.restartNameNode(1);
@@ -177,7 +174,7 @@ public class TestBootstrapStandby {
       logs.stopCapturing();
     }
     GenericTestUtils.assertMatches(logs.getOutput(),
-        "FATAL.*Unable to read transaction ids 1-4 from the configured shared");
+        "FATAL.*Unable to read transaction ids 1-3 from the configured shared");
   }
   
   @Test
@@ -195,30 +192,17 @@ public class TestBootstrapStandby {
     assertEquals(0, rc);
   }
   
+  /**
+   * Test that, even if the other node is not active, we are able
+   * to bootstrap standby from it.
+   */
   @Test(timeout=30000)
   public void testOtherNodeNotActive() throws Exception {
     cluster.transitionToStandby(0);
     int rc = BootstrapStandby.run(
-        new String[]{"-nonInteractive"},
-        cluster.getConfiguration(1));
-    assertEquals(BootstrapStandby.ERR_CODE_OTHER_NN_NOT_ACTIVE, rc);
-    
-    // Answer "yes" to the prompt about transition to active
-    System.setIn(new ByteArrayInputStream("yes\n".getBytes()));
-    rc = BootstrapStandby.run(
         new String[]{"-force"},
         cluster.getConfiguration(1));
     assertEquals(0, rc);
-    
-    assertFalse(nn0.getNamesystem().isInStandbyState());
-  }
-
-  private void assertNNFilesMatch() throws Exception {
-    List<File> curDirs = Lists.newArrayList();
-    curDirs.addAll(FSImageTestUtil.getNameNodeCurrentDirs(cluster, 0));
-    curDirs.addAll(FSImageTestUtil.getNameNodeCurrentDirs(cluster, 1));
-    FSImageTestUtil.assertParallelFilesAreIdentical(curDirs,
-        Collections.<String>emptySet());
   }
 
   private void removeStandbyNameDirs() {

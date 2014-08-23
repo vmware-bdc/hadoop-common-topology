@@ -17,40 +17,57 @@
  */
 package org.apache.hadoop.hdfs.server.namenode.ha;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
+import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.ha.HAServiceProtocol.RequestSource;
+import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
+import org.apache.hadoop.hdfs.DFSClient;
+import org.apache.hadoop.hdfs.DFSClientAdapter;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSOutputStream;
 import org.apache.hadoop.hdfs.DFSTestUtil;
-import org.apache.hadoop.hdfs.HAUtil;
+import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.namenode.FSImage;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.hdfs.server.namenode.FSNamesystem.SafeModeInfo;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.ipc.RemoteException;
+import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.log4j.Level;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.internal.util.reflection.Whitebox;
 
 import com.google.common.base.Supplier;
 import com.google.common.collect.Lists;
@@ -65,7 +82,6 @@ public class TestHASafeMode {
   private NameNode nn1;
   private FileSystem fs;
   private MiniDFSCluster cluster;
-  private Runtime mockRuntime = mock(Runtime.class);
   
   static {
     ((Log4JLogger)LogFactory.getLog(FSImage.class)).getLogger().setLevel(Level.ALL);
@@ -90,17 +106,61 @@ public class TestHASafeMode {
     nn0 = cluster.getNameNode(0);
     nn1 = cluster.getNameNode(1);
     fs = HATestUtil.configureFailoverFs(cluster, conf);
-    
-    nn0.getNamesystem().getEditLogTailer().setRuntime(mockRuntime);
 
     cluster.transitionToActive(0);
   }
   
   @After
-  public void shutdownCluster() throws IOException {
+  public void shutdownCluster() {
     if (cluster != null) {
-      verify(mockRuntime, times(0)).exit(anyInt());
       cluster.shutdown();
+    }
+  }
+  
+  /**
+   * Make sure the client retries when the active NN is in safemode
+   */
+  @Test (timeout=300000)
+  public void testClientRetrySafeMode() throws Exception {
+    final Map<Path, Boolean> results = Collections
+        .synchronizedMap(new HashMap<Path, Boolean>());
+    final Path test = new Path("/test");
+    // let nn0 enter safemode
+    NameNodeAdapter.enterSafeMode(nn0, false);
+    SafeModeInfo safeMode = (SafeModeInfo) Whitebox.getInternalState(
+        nn0.getNamesystem(), "safeMode");
+    Whitebox.setInternalState(safeMode, "extension", Integer.valueOf(30000));
+    LOG.info("enter safemode");
+    new Thread() {
+      @Override
+      public void run() {
+        try {
+          boolean mkdir = fs.mkdirs(test);
+          LOG.info("mkdir finished, result is " + mkdir);
+          synchronized (TestHASafeMode.this) {
+            results.put(test, mkdir);
+            TestHASafeMode.this.notifyAll();
+          }
+        } catch (Exception e) {
+          LOG.info("Got Exception while calling mkdir", e);
+        }
+      }
+    }.start();
+    
+    // make sure the client's call has actually been handled by the active NN
+    assertFalse("The directory should not be created while NN in safemode",
+        fs.exists(test));
+    
+    Thread.sleep(1000);
+    // let nn0 leave safemode
+    NameNodeAdapter.leaveSafeMode(nn0);
+    LOG.info("leave safemode");
+    
+    synchronized (this) {
+      while (!results.containsKey(test)) {
+        this.wait();
+      }
+      assertTrue(results.get(test));
     }
   }
   
@@ -129,7 +189,8 @@ public class TestHASafeMode {
     DFSTestUtil
       .createFile(fs, new Path("/test"), 3 * BLOCK_SIZE, (short) 3, 1L);
     restartActive();
-    nn0.getRpcServer().transitionToActive();
+    nn0.getRpcServer().transitionToActive(
+        new StateChangeRequestInfo(RequestSource.REQUEST_BY_USER));
 
     FSNamesystem namesystem = nn0.getNamesystem();
     String status = namesystem.getSafemode();
@@ -208,11 +269,11 @@ public class TestHASafeMode {
     // We expect it not to be stuck in safemode, since those blocks
     // that are already visible to the SBN should be processed
     // in the initial block reports.
-    assertSafeMode(nn1, 3, 3);
+    assertSafeMode(nn1, 3, 3, 3, 0);
 
     banner("Waiting for standby to catch up to active namespace");
     HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
-    assertSafeMode(nn1, 8, 8);
+    assertSafeMode(nn1, 8, 8, 3, 0);
   }
   
   /**
@@ -232,7 +293,7 @@ public class TestHASafeMode {
     banner("Restarting standby");
     restartStandby();
     
-    assertSafeMode(nn1, 3, 3);
+    assertSafeMode(nn1, 3, 3, 3, 0);
     
     // Create a few blocks which will send blockReceived calls to the
     // SBN.
@@ -243,7 +304,7 @@ public class TestHASafeMode {
     banner("Waiting for standby to catch up to active namespace");
     HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
 
-    assertSafeMode(nn1, 8, 8);
+    assertSafeMode(nn1, 8, 8, 3, 0);
   }
 
   /**
@@ -283,11 +344,11 @@ public class TestHASafeMode {
 
     banner("Restarting standby");
     restartStandby();
-    assertSafeMode(nn1, 0, 5);
+    assertSafeMode(nn1, 0, 5, 3, 0);
     
     banner("Waiting for standby to catch up to active namespace");
     HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
-    assertSafeMode(nn1, 0, 0);
+    assertSafeMode(nn1, 0, 0, 3, 0);
   }
   
   /**
@@ -309,7 +370,7 @@ public class TestHASafeMode {
     restartStandby();
     
     // It will initially have all of the blocks necessary.
-    assertSafeMode(nn1, 10, 10);
+    assertSafeMode(nn1, 10, 10, 3, 0);
 
     // Delete those blocks while the SBN is in safe mode.
     // This doesn't affect the SBN, since deletions are not
@@ -324,14 +385,14 @@ public class TestHASafeMode {
     HATestUtil.waitForDNDeletions(cluster);
     cluster.triggerDeletionReports();
 
-    assertSafeMode(nn1, 10, 10);
+    assertSafeMode(nn1, 10, 10, 3, 0);
 
     // When we catch up to active namespace, it will restore back
     // to 0 blocks.
     banner("Waiting for standby to catch up to active namespace");
     HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
 
-    assertSafeMode(nn1, 0, 0);
+    assertSafeMode(nn1, 0, 0, 3, 0);
   }
   
   /**
@@ -357,20 +418,20 @@ public class TestHASafeMode {
     restartStandby();
     
     // It will initially have all of the blocks necessary.
-    assertSafeMode(nn1, 5, 5);
+    assertSafeMode(nn1, 5, 5, 3, 0);
 
     // Append to a block while SBN is in safe mode. This should
     // not affect safemode initially, since the DN message
     // will get queued.
     FSDataOutputStream stm = fs.append(new Path("/test"));
     try {
-      assertSafeMode(nn1, 5, 5);
+      assertSafeMode(nn1, 5, 5, 3, 0);
       
       // if we roll edits now, the SBN should see that it's under construction
       // and change its total count and safe count down by one, since UC
       // blocks are not counted by safe mode.
       HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
-      assertSafeMode(nn1, 4, 4);
+      assertSafeMode(nn1, 4, 4, 3, 0);
     } finally {
       IOUtils.closeStream(stm);
     }
@@ -388,13 +449,13 @@ public class TestHASafeMode {
     HATestUtil.waitForDNDeletions(cluster);
     cluster.triggerDeletionReports();
 
-    assertSafeMode(nn1, 4, 4);
+    assertSafeMode(nn1, 4, 4, 3, 0);
 
     // When we roll the edit log, the deletions will go through.
     banner("Waiting for standby to catch up to active namespace");
     HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
 
-    assertSafeMode(nn1, 0, 0);
+    assertSafeMode(nn1, 0, 0, 3, 0);
   }
   
   /**
@@ -414,7 +475,7 @@ public class TestHASafeMode {
         4*BLOCK_SIZE, (short) 3, 1L);
     NameNodeAdapter.enterSafeMode(nn0, false);
     NameNodeAdapter.saveNamespace(nn0);
-    NameNodeAdapter.leaveSafeMode(nn0, false);
+    NameNodeAdapter.leaveSafeMode(nn0);
     
     // OP_ADD for 2 blocks
     DFSTestUtil.createFile(fs, new Path("/test2"),
@@ -426,20 +487,22 @@ public class TestHASafeMode {
     restartActive();
   }
   
-  private void assertSafeMode(NameNode nn, int safe, int total) {
-    String status = nn1.getNamesystem().getSafemode();
+  private static void assertSafeMode(NameNode nn, int safe, int total,
+    int numNodes, int nodeThresh) {
+    String status = nn.getNamesystem().getSafemode();
     if (safe == total) {
       assertTrue("Bad safemode status: '" + status + "'",
           status.startsWith(
-            "Safe mode is ON." +
-            "The reported blocks " + safe + " has reached the threshold " +
-            "0.9990 of total blocks " + total + ". Safe mode will be " +
-            "turned off automatically"));
+            "Safe mode is ON. The reported blocks " + safe + " has reached the "
+            + "threshold 0.9990 of total blocks " + total + ". The number of "
+            + "live datanodes " + numNodes + " has reached the minimum number "
+            + nodeThresh + ". In safe mode extension. "
+            + "Safe mode will be turned off automatically"));
     } else {
       int additional = total - safe;
       assertTrue("Bad safemode status: '" + status + "'",
           status.startsWith(
-              "Safe mode is ON." +
+              "Safe mode is ON. " +
               "The reported blocks " + safe + " needs additional " +
               additional + " blocks"));
     }
@@ -469,14 +532,14 @@ public class TestHASafeMode {
 
     // We expect it to be on its way out of safemode, since all of the blocks
     // from the edit log have been reported.
-    assertSafeMode(nn1, 3, 3);
+    assertSafeMode(nn1, 3, 3, 3, 0);
     
     // Initiate a failover into it while it's in safemode
     banner("Initiating a failover into NN1 in safemode");
     NameNodeAdapter.abortEditLogs(nn0);
     cluster.transitionToActive(1);
 
-    assertSafeMode(nn1, 5, 5);
+    assertSafeMode(nn1, 5, 5, 3, 0);
   }
   
   /**
@@ -501,10 +564,11 @@ public class TestHASafeMode {
     // It will initially have all of the blocks necessary.
     String status = nn1.getNamesystem().getSafemode();
     assertTrue("Bad safemode status: '" + status + "'",
-        status.startsWith(
-            "Safe mode is ON." +
-            "The reported blocks 10 has reached the threshold 0.9990 of " +
-            "total blocks 10. Safe mode will be turned off automatically"));
+      status.startsWith(
+        "Safe mode is ON. The reported blocks 10 has reached the threshold "
+        + "0.9990 of total blocks 10. The number of live datanodes 3 has "
+        + "reached the minimum number 0. In safe mode extension. "
+        + "Safe mode will be turned off automatically"));
 
     // Delete those blocks while the SBN is in safe mode.
     // Immediately roll the edit log before the actual deletions are sent
@@ -514,7 +578,7 @@ public class TestHASafeMode {
     HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
 
     // Should see removal of the blocks as well as their contribution to safe block count.
-    assertSafeMode(nn1, 0, 0);
+    assertSafeMode(nn1, 0, 0, 3, 0);
 
     
     banner("Triggering sending deletions to DNs and Deletion Reports");
@@ -527,9 +591,18 @@ public class TestHASafeMode {
     // No change in assertion status here, but some of the consistency checks
     // in safemode will fire here if we accidentally decrement safe block count
     // below 0.    
-    assertSafeMode(nn1, 0, 0);
+    assertSafeMode(nn1, 0, 0, 3, 0);
   }
-  
+
+  @Test
+  public void testSafeBlockTracking() throws Exception {
+    testSafeBlockTracking(false);
+  }
+
+  @Test
+  public void testSafeBlockTracking2() throws Exception {
+    testSafeBlockTracking(true);
+  }
 
   /**
    * Test that the number of safe blocks is accounted correctly even when
@@ -537,9 +610,15 @@ public class TestHASafeMode {
    * If a FINALIZED report arrives at the SBN before the block is marked
    * COMPLETE, then when we get the OP_CLOSE we need to count it as "safe"
    * at that point. This is a regression test for HDFS-2742.
+   * 
+   * @param noFirstBlockReport If this is set to true, we shutdown NN1 before
+   * closing the writing streams. In this way, when NN1 restarts, all DNs will
+   * first send it incremental block report before the first full block report.
+   * And NN1 will not treat the full block report as the first block report
+   * in BlockManager#processReport. 
    */
-  @Test
-  public void testSafeBlockTracking() throws Exception {
+  private void testSafeBlockTracking(boolean noFirstBlockReport)
+      throws Exception {
     banner("Starting with NN0 active and NN1 standby, creating some " +
     		"UC blocks plus some other blocks to force safemode");
     DFSTestUtil.createFile(fs, new Path("/other-blocks"), 10*BLOCK_SIZE, (short) 3, 1L);
@@ -556,6 +635,9 @@ public class TestHASafeMode {
       // the namespace during startup and enter safemode.
       nn0.getRpcServer().rollEditLog();
     } finally {
+      if (noFirstBlockReport) {
+        cluster.shutdownNameNode(1);
+      }
       for (FSDataOutputStream stm : stms) {
         IOUtils.closeStream(stm);
       }
@@ -563,11 +645,11 @@ public class TestHASafeMode {
     
     banner("Restarting SBN");
     restartStandby();
-    assertSafeMode(nn1, 10, 10);
+    assertSafeMode(nn1, 10, 10, 3, 0);
 
     banner("Allowing SBN to catch up");
     HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
-    assertSafeMode(nn1, 15, 15);
+    assertSafeMode(nn1, 15, 15, 3, 0);
   }
   
   /**
@@ -595,7 +677,7 @@ public class TestHASafeMode {
     nn0.getRpcServer().rollEditLog();
     
     restartStandby();
-    assertSafeMode(nn1, 6, 6);
+    assertSafeMode(nn1, 6, 6, 3, 0);
   }
   
   /**
@@ -609,9 +691,9 @@ public class TestHASafeMode {
     HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
     
     // get some blocks in the SBN's image
-    nn1.getRpcServer().setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+    nn1.getRpcServer().setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
     NameNodeAdapter.saveNamespace(nn1);
-    nn1.getRpcServer().setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+    nn1.getRpcServer().setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
 
     // and some blocks in the edit logs
     DFSTestUtil.createFile(fs, new Path("/test2"), 15*BLOCK_SIZE, (short)3, 1L);
@@ -637,6 +719,32 @@ public class TestHASafeMode {
   }
   
   /**
+   * Make sure that when we transition to active in safe mode that we don't
+   * prematurely consider blocks missing just because not all DNs have reported
+   * yet.
+   * 
+   * This is a regression test for HDFS-3921.
+   */
+  @Test
+  public void testNoPopulatingReplQueuesWhenStartingActiveInSafeMode()
+      throws IOException {
+    DFSTestUtil.createFile(fs, new Path("/test"), 15*BLOCK_SIZE, (short)3, 1L);
+    
+    // Stop the DN so that when the NN restarts not all blocks wil be reported
+    // and the NN won't leave safe mode.
+    cluster.stopDataNode(1);
+    // Restart the namenode but don't wait for it to hear from all DNs (since
+    // one DN is deliberately shut down.)
+    cluster.restartNameNode(0, false);
+    cluster.transitionToActive(0);
+    
+    assertTrue(cluster.getNameNode(0).isInSafeMode());
+    // We shouldn't yet consider any blocks "missing" since we're in startup
+    // safemode, i.e. not all DNs may have reported.
+    assertEquals(0, cluster.getNamesystem(0).getMissingBlocksCount());
+  }
+  
+  /**
    * Print a big banner in the test log to make debug easier.
    */
   static void banner(String string) {
@@ -644,5 +752,99 @@ public class TestHASafeMode {
         string + "\n" +
         "==================================================\n\n");
   }
+  
+  /**
+   * DFS#isInSafeMode should check the ActiveNNs safemode in HA enabled cluster. HDFS-3507
+   * 
+   * @throws Exception
+   */
+  @Test
+  public void testIsInSafemode() throws Exception {
+    // Check for the standby nn without client failover.
+    NameNode nn2 = cluster.getNameNode(1);
+    assertTrue("nn2 should be in standby state", nn2.isStandbyState());
 
+    InetSocketAddress nameNodeAddress = nn2.getNameNodeAddress();
+    Configuration conf = new Configuration();
+    DistributedFileSystem dfs = new DistributedFileSystem();
+    try {
+      dfs.initialize(
+          URI.create("hdfs://" + nameNodeAddress.getHostName() + ":"
+              + nameNodeAddress.getPort()), conf);
+      dfs.isInSafeMode();
+      fail("StandBy should throw exception for isInSafeMode");
+    } catch (IOException e) {
+      if (e instanceof RemoteException) {
+        IOException sbExcpetion = ((RemoteException) e).unwrapRemoteException();
+        assertTrue("StandBy nn should not support isInSafeMode",
+            sbExcpetion instanceof StandbyException);
+      } else {
+        throw e;
+      }
+    } finally {
+      if (null != dfs) {
+        dfs.close();
+      }
+    }
+
+    // Check with Client FailOver
+    cluster.transitionToStandby(0);
+    cluster.transitionToActive(1);
+    cluster.getNameNodeRpc(1).setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
+    DistributedFileSystem dfsWithFailOver = (DistributedFileSystem) fs;
+    assertTrue("ANN should be in SafeMode", dfsWithFailOver.isInSafeMode());
+
+    cluster.getNameNodeRpc(1).setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
+    assertFalse("ANN should be out of SafeMode", dfsWithFailOver.isInSafeMode());
+  }
+
+  /** Test NN crash and client crash/stuck immediately after block allocation */
+  @Test(timeout = 100000)
+  public void testOpenFileWhenNNAndClientCrashAfterAddBlock() throws Exception {
+    cluster.getConfiguration(0).set(
+        DFSConfigKeys.DFS_NAMENODE_SAFEMODE_THRESHOLD_PCT_KEY, "1.0f");
+    String testData = "testData";
+    // to make sure we write the full block before creating dummy block at NN.
+    cluster.getConfiguration(0).setInt("io.bytes.per.checksum",
+        testData.length());
+    cluster.restartNameNode(0);
+    try {
+      cluster.waitActive();
+      cluster.transitionToActive(0);
+      cluster.transitionToStandby(1);
+      DistributedFileSystem dfs = cluster.getFileSystem(0);
+      String pathString = "/tmp1.txt";
+      Path filePath = new Path(pathString);
+      FSDataOutputStream create = dfs.create(filePath,
+          FsPermission.getDefault(), true, 1024, (short) 3, testData.length(),
+          null);
+      create.write(testData.getBytes());
+      create.hflush();
+      long fileId = ((DFSOutputStream)create.
+          getWrappedStream()).getFileId();
+      FileStatus fileStatus = dfs.getFileStatus(filePath);
+      DFSClient client = DFSClientAdapter.getClient(dfs);
+      // add one dummy block at NN, but not write to DataNode
+      ExtendedBlock previousBlock =
+          DFSClientAdapter.getPreviousBlock(client, fileId);
+      DFSClientAdapter.getNamenode(client).addBlock(
+          pathString,
+          client.getClientName(),
+          new ExtendedBlock(previousBlock),
+          new DatanodeInfo[0],
+          DFSClientAdapter.getFileId((DFSOutputStream) create
+              .getWrappedStream()), null);
+      cluster.restartNameNode(0, true);
+      cluster.restartDataNode(0);
+      cluster.transitionToActive(0);
+      // let the block reports be processed.
+      Thread.sleep(2000);
+      FSDataInputStream is = dfs.open(filePath);
+      is.close();
+      dfs.recoverLease(filePath);// initiate recovery
+      assertTrue("Recovery also should be success", dfs.recoverLease(filePath));
+    } finally {
+      cluster.shutdown();
+    }
+  }
 }

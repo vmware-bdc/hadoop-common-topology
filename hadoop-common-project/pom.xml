@@ -12,7 +12,10 @@
   See the License for the specific language governing permissions and
   limitations under the License. See accompanying LICENSE file.
 -->
-<project>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                      http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>org.apache.hadoop</groupId>
@@ -32,6 +35,9 @@
     <module>hadoop-auth-examples</module>
     <module>hadoop-common</module>
     <module>hadoop-annotations</module>
+    <module>hadoop-nfs</module>
+    <module>hadoop-minikdc</module>
+    <module>hadoop-kms</module>
   </modules>
 
   <build>
@@ -46,9 +52,6 @@
         <groupId>org.apache.rat</groupId>
         <artifactId>apache-rat-plugin</artifactId>
         <configuration>
-          <includes>
-            <include>pom.xml</include>
-          </includes>
         </configuration>
       </plugin>
     </plugins>

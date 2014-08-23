@@ -32,7 +32,7 @@ import org.apache.hadoop.io.Text;
  * the job. JobID consists of two parts. First part 
  * represents the jobtracker identifier, so that jobID to jobtracker map 
  * is defined. For cluster setup this string is the jobtracker 
- * start time, for local setting, it is "local".
+ * start time, for local setting, it is "local" and a random number.
  * Second part of the JobID is the job number. <br> 
  * An example JobID is : 
  * <code>job_200707121733_0003</code> , which represents the third job 
@@ -48,7 +48,7 @@ import org.apache.hadoop.io.Text;
 @InterfaceStability.Stable
 public class JobID extends org.apache.hadoop.mapred.ID 
                    implements Comparable<ID> {
-  protected static final String JOB = "job";
+  public static final String JOB = "job";
   
   // Jobid regex for various tools and framework components
   public static final String JOBID_REGEX = 

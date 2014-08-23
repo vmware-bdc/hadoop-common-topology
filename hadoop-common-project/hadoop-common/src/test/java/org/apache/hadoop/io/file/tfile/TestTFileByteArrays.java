@@ -23,18 +23,18 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.util.Random;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.WritableUtils;
+import org.apache.hadoop.io.compress.zlib.ZlibFactory;
 import org.apache.hadoop.io.file.tfile.TFile.Reader;
 import org.apache.hadoop.io.file.tfile.TFile.Writer;
 import org.apache.hadoop.io.file.tfile.TFile.Reader.Location;
 import org.apache.hadoop.io.file.tfile.TFile.Reader.Scanner;
-import org.apache.hadoop.util.NativeCodeLoader;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -57,39 +57,38 @@ public class TestTFileByteArrays {
   private static final String VALUE = "value";
 
   private FileSystem fs;
-  private Configuration conf;
+  private Configuration conf = new Configuration();
   private Path path;
   private FSDataOutputStream out;
   private Writer writer;
 
   private String compression = Compression.Algorithm.GZ.getName();
   private String comparator = "memcmp";
-  private String outputFile = "TFileTestByteArrays";
+  private final String outputFile = getClass().getSimpleName();
 
   /*
    * pre-sampled numbers of records in one block, based on the given the
    * generated key and value strings. This is slightly different based on
    * whether or not the native libs are present.
    */
-  private int records1stBlock = NativeCodeLoader.isNativeCodeLoaded() ? 5674 : 4480;
-  private int records2ndBlock = NativeCodeLoader.isNativeCodeLoaded() ? 5574 : 4263;
+  private boolean usingNative = ZlibFactory.isNativeZlibLoaded(conf);
+  private int records1stBlock = usingNative ? 5674 : 4480;
+  private int records2ndBlock = usingNative ? 5574 : 4263;
 
-  public void init(String compression, String comparator, String outputFile,
+  public void init(String compression, String comparator,
       int numRecords1stBlock, int numRecords2ndBlock) {
-    init(compression, comparator, outputFile);
+    init(compression, comparator);
     this.records1stBlock = numRecords1stBlock;
     this.records2ndBlock = numRecords2ndBlock;
   }
   
-  public void init(String compression, String comparator, String outputFile) {
+  public void init(String compression, String comparator) {
     this.compression = compression;
     this.comparator = comparator;
-    this.outputFile = outputFile;
   }
 
   @Before
   public void setUp() throws IOException {
-    conf = new Configuration();
     path = new Path(ROOT, outputFile);
     fs = path.getFileSystem(conf);
     out = fs.create(path);
@@ -99,7 +98,7 @@ public class TestTFileByteArrays {
   @After
   public void tearDown() throws IOException {
     if (!skip)
-    fs.delete(path, true);
+      fs.delete(path, true);
   }
 
   @Test

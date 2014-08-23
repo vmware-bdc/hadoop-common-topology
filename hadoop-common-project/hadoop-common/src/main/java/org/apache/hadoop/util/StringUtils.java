@@ -23,21 +23,28 @@ import java.io.StringWriter;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.text.DateFormat;
-import java.text.DecimalFormat;
-import java.text.NumberFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.StringTokenizer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+import org.apache.commons.lang.SystemUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.net.NetUtils;
+
+import com.google.common.net.InetAddresses;
 
 /**
  * General string utils
@@ -46,12 +53,31 @@ import org.apache.hadoop.net.NetUtils;
 @InterfaceStability.Unstable
 public class StringUtils {
 
-  private static final DecimalFormat decimalFormat;
-  static {
-          NumberFormat numberFormat = NumberFormat.getNumberInstance(Locale.ENGLISH);
-          decimalFormat = (DecimalFormat) numberFormat;
-          decimalFormat.applyPattern("#.##");
-  }
+  /**
+   * Priority of the StringUtils shutdown hook.
+   */
+  public static final int SHUTDOWN_HOOK_PRIORITY = 0;
+
+  /**
+   * Shell environment variables: $ followed by one letter or _ followed by
+   * multiple letters, numbers, or underscores.  The group captures the
+   * environment variable name without the leading $.
+   */
+  public static final Pattern SHELL_ENV_VAR_PATTERN =
+    Pattern.compile("\\$([A-Za-z_]{1}[A-Za-z0-9_]*)");
+
+  /**
+   * Windows environment variables: surrounded by %.  The group captures the
+   * environment variable name without the leading and trailing %.
+   */
+  public static final Pattern WIN_ENV_VAR_PATTERN = Pattern.compile("%(.*?)%");
+
+  /**
+   * Regular expression that matches and captures environment variable names
+   * according to platform-specific rules.
+   */
+  public static final Pattern ENV_VAR_PATTERN = Shell.WINDOWS ?
+    WIN_ENV_VAR_PATTERN : SHELL_ENV_VAR_PATTERN;
 
   /**
    * Make a string representation of the exception.
@@ -72,56 +98,42 @@ public class StringUtils {
    * @return the hostname to the first dot
    */
   public static String simpleHostname(String fullHostname) {
+    if (InetAddresses.isInetAddress(fullHostname)) {
+      return fullHostname;
+    }
     int offset = fullHostname.indexOf('.');
     if (offset != -1) {
       return fullHostname.substring(0, offset);
     }
     return fullHostname;
   }
-
-  private static DecimalFormat oneDecimal = new DecimalFormat("0.0");
   
   /**
    * Given an integer, return a string that is in an approximate, but human 
    * readable format. 
-   * It uses the bases 'k', 'm', and 'g' for 1024, 1024**2, and 1024**3.
    * @param number the number to format
    * @return a human readable form of the integer
+   *
+   * @deprecated use {@link TraditionalBinaryPrefix#long2String(long, String, int)}.
    */
+  @Deprecated
   public static String humanReadableInt(long number) {
-    long absNumber = Math.abs(number);
-    double result = number;
-    String suffix = "";
-    if (absNumber < 1024) {
-      // since no division has occurred, don't format with a decimal point
-      return String.valueOf(number);
-    } else if (absNumber < 1024 * 1024) {
-      result = number / 1024.0;
-      suffix = "k";
-    } else if (absNumber < 1024 * 1024 * 1024) {
-      result = number / (1024.0 * 1024);
-      suffix = "m";
-    } else {
-      result = number / (1024.0 * 1024 * 1024);
-      suffix = "g";
-    }
-    return oneDecimal.format(result) + suffix;
+    return TraditionalBinaryPrefix.long2String(number, "", 1);
   }
-  
+
+  /** The same as String.format(Locale.ENGLISH, format, objects). */
+  public static String format(final String format, final Object... objects) {
+    return String.format(Locale.ENGLISH, format, objects);
+  }
+
   /**
    * Format a percentage for presentation to the user.
-   * @param done the percentage to format (0.0 to 1.0)
-   * @param digits the number of digits past the decimal point
+   * @param fraction the percentage as a fraction, e.g. 0.1 = 10%
+   * @param decimalPlaces the number of decimal places
    * @return a string representation of the percentage
    */
-  public static String formatPercent(double done, int digits) {
-    DecimalFormat percentFormat = new DecimalFormat("0.00%");
-    double scale = Math.pow(10.0, digits+2);
-    double rounded = Math.floor(done * scale);
-    percentFormat.setDecimalSeparatorAlwaysShown(false);
-    percentFormat.setMinimumFractionDigits(digits);
-    percentFormat.setMaximumFractionDigits(digits);
-    return percentFormat.format(rounded / scale);
+  public static String formatPercent(double fraction, int decimalPlaces) {
+    return format("%." + decimalPlaces + "f%%", fraction*100);
   }
   
   /**
@@ -156,7 +168,7 @@ public class StringUtils {
     }
     StringBuilder s = new StringBuilder(); 
     for(int i = start; i < end; i++) {
-      s.append(String.format("%02x", bytes[i]));
+      s.append(format("%02x", bytes[i]));
     }
     return s.toString();
   }
@@ -197,8 +209,12 @@ public class StringUtils {
   }
   
   /**
-   * 
    * @param str
+   *          The string array to be parsed into an URI array.
+   * @return <tt>null</tt> if str is <tt>null</tt>, else the URI array
+   *         equivalent to str.
+   * @throws IllegalArgumentException
+   *           If any string in str violates RFC&nbsp;2396.
    */
   public static URI[] stringToURI(String[] str){
     if (str == null) 
@@ -208,9 +224,8 @@ public class StringUtils {
       try{
         uris[i] = new URI(str[i]);
       }catch(URISyntaxException ur){
-        System.out.println("Exception in specified URI's " + StringUtils.stringifyException(ur));
-        //making sure its asssigned to null in case of an error
-        uris[i] = null;
+        throw new IllegalArgumentException(
+            "Failed to create uri for " + str[i], ur);
       }
     }
     return uris;
@@ -313,11 +328,24 @@ public class StringUtils {
    * @return an <code>ArrayList</code> of string values
    */
   public static Collection<String> getStringCollection(String str){
+    String delim = ",";
+    return getStringCollection(str, delim);
+  }
+
+  /**
+   * Returns a collection of strings.
+   * 
+   * @param str
+   *          String to parse
+   * @param delim
+   *          delimiter to separate the values
+   * @return Collection of parsed elements.
+   */
+  public static Collection<String> getStringCollection(String str, String delim) {
     List<String> values = new ArrayList<String>();
     if (str == null)
       return values;
-    StringTokenizer tokenizer = new StringTokenizer (str,",");
-    values = new ArrayList<String>();
+    StringTokenizer tokenizer = new StringTokenizer(str, delim);
     while (tokenizer.hasMoreTokens()) {
       values.add(tokenizer.nextToken());
     }
@@ -326,12 +354,15 @@ public class StringUtils {
 
   /**
    * Splits a comma separated value <code>String</code>, trimming leading and trailing whitespace on each value.
+   * Duplicate and empty values are removed.
    * @param str a comma separated <String> with values
    * @return a <code>Collection</code> of <code>String</code> values
    */
   public static Collection<String> getTrimmedStringCollection(String str){
-    return new ArrayList<String>(
+    Set<String> set = new LinkedHashSet<String>(
       Arrays.asList(getTrimmedStrings(str)));
+    set.remove("");
+    return set;
   }
   
   /**
@@ -340,11 +371,24 @@ public class StringUtils {
    * @return an array of <code>String</code> values
    */
   public static String[] getTrimmedStrings(String str){
-    if (null == str || "".equals(str.trim())) {
+    if (null == str || str.trim().isEmpty()) {
       return emptyStringArray;
     }
 
     return str.trim().split("\\s*,\\s*");
+  }
+
+  /**
+   * Trims all the strings in a Collection<String> and returns a Set<String>.
+   * @param strings
+   * @return
+   */
+  public static Set<String> getTrimmedStrings(Collection<String> strings) {
+    Set<String> trimmedStrings = new HashSet<String>();
+    for (String string: strings) {
+      trimmedStrings.add(string.trim());
+    }
+    return trimmedStrings;
   }
 
   final public static String[] emptyStringArray = {};
@@ -400,13 +444,13 @@ public class StringUtils {
       String str, char separator) {
     // String.split returns a single empty result for splitting the empty
     // string.
-    if ("".equals(str)) {
+    if (str.isEmpty()) {
       return new String[]{""};
     }
     ArrayList<String> strList = new ArrayList<String>();
     int startIndex = 0;
     int nextIndex = 0;
-    while ((nextIndex = str.indexOf((int)separator, startIndex)) != -1) {
+    while ((nextIndex = str.indexOf(separator, startIndex)) != -1) {
       strList.add(str.substring(startIndex, nextIndex));
       startIndex = nextIndex + 1;
     }
@@ -596,16 +640,27 @@ public class StringUtils {
             "  build = " + VersionInfo.getUrl() + " -r "
                          + VersionInfo.getRevision()  
                          + "; compiled by '" + VersionInfo.getUser()
-                         + "' on " + VersionInfo.getDate()}
+                         + "' on " + VersionInfo.getDate(),
+            "  java = " + System.getProperty("java.version") }
         )
       );
 
-    Runtime.getRuntime().addShutdownHook(new Thread() {
-      public void run() {
-        LOG.info(toStartupShutdownString("SHUTDOWN_MSG: ", new String[]{
-          "Shutting down " + classname + " at " + hostname}));
+    if (SystemUtils.IS_OS_UNIX) {
+      try {
+        SignalLogger.INSTANCE.register(LOG);
+      } catch (Throwable t) {
+        LOG.warn("failed to register any UNIX signal loggers: ", t);
       }
-    });
+    }
+    ShutdownHookManager.get().addShutdownHook(
+      new Runnable() {
+        @Override
+        public void run() {
+          LOG.info(toStartupShutdownString("SHUTDOWN_MSG: ", new String[]{
+            "Shutting down " + classname + " at " + hostname}));
+        }
+      }, SHUTDOWN_HOOK_PRIORITY);
+
   }
 
   /**
@@ -614,18 +669,22 @@ public class StringUtils {
    * TraditionalBinaryPrefix symbol are case insensitive. 
    */
   public static enum TraditionalBinaryPrefix {
-    KILO(1024),
-    MEGA(KILO.value << 10),
-    GIGA(MEGA.value << 10),
-    TERA(GIGA.value << 10),
-    PETA(TERA.value << 10),
-    EXA(PETA.value << 10);
+    KILO(10),
+    MEGA(KILO.bitShift + 10),
+    GIGA(MEGA.bitShift + 10),
+    TERA(GIGA.bitShift + 10),
+    PETA(TERA.bitShift + 10),
+    EXA (PETA.bitShift + 10);
 
     public final long value;
     public final char symbol;
+    public final int bitShift;
+    public final long bitMask;
 
-    TraditionalBinaryPrefix(long value) {
-      this.value = value;
+    private TraditionalBinaryPrefix(int bitShift) {
+      this.bitShift = bitShift;
+      this.value = 1L << bitShift;
+      this.bitMask = this.value - 1L;
       this.symbol = toString().charAt(0);
     }
 
@@ -676,8 +735,58 @@ public class StringUtils {
         return num * prefix;
       }
     }
+
+    /**
+     * Convert a long integer to a string with traditional binary prefix.
+     * 
+     * @param n the value to be converted
+     * @param unit The unit, e.g. "B" for bytes.
+     * @param decimalPlaces The number of decimal places.
+     * @return a string with traditional binary prefix.
+     */
+    public static String long2String(long n, String unit, int decimalPlaces) {
+      if (unit == null) {
+        unit = "";
+      }
+      //take care a special case
+      if (n == Long.MIN_VALUE) {
+        return "-8 " + EXA.symbol + unit;
+      }
+
+      final StringBuilder b = new StringBuilder();
+      //take care negative numbers
+      if (n < 0) {
+        b.append('-');
+        n = -n;
+      }
+      if (n < KILO.value) {
+        //no prefix
+        b.append(n);
+        return (unit.isEmpty()? b: b.append(" ").append(unit)).toString();
+      } else {
+        //find traditional binary prefix
+        int i = 0;
+        for(; i < values().length && n >= values()[i].value; i++);
+        TraditionalBinaryPrefix prefix = values()[i - 1];
+
+        if ((n & prefix.bitMask) == 0) {
+          //exact division
+          b.append(n >> prefix.bitShift);
+        } else {
+          final String  format = "%." + decimalPlaces + "f";
+          String s = format(format, n/(double)prefix.value);
+          //check a special rounding up case
+          if (s.startsWith("1024")) {
+            prefix = values()[i];
+            s = format(format, n/(double)prefix.value);
+          }
+          b.append(s);
+        }
+        return b.append(' ').append(prefix.symbol).append(unit).toString();
+      }
+    }
   }
-  
+
     /**
      * Escapes HTML Special characters present in the string.
      * @param string
@@ -715,32 +824,16 @@ public class StringUtils {
     }
 
   /**
-   * Return an abbreviated English-language desc of the byte length
+   * @return a byte description of the given long interger value.
    */
   public static String byteDesc(long len) {
-    double val = 0.0;
-    String ending = "";
-    if (len < 1024 * 1024) {
-      val = (1.0 * len) / 1024;
-      ending = " KB";
-    } else if (len < 1024 * 1024 * 1024) {
-      val = (1.0 * len) / (1024 * 1024);
-      ending = " MB";
-    } else if (len < 1024L * 1024 * 1024 * 1024) {
-      val = (1.0 * len) / (1024 * 1024 * 1024);
-      ending = " GB";
-    } else if (len < 1024L * 1024 * 1024 * 1024 * 1024) {
-      val = (1.0 * len) / (1024L * 1024 * 1024 * 1024);
-      ending = " TB";
-    } else {
-      val = (1.0 * len) / (1024L * 1024 * 1024 * 1024 * 1024);
-      ending = " PB";
-    }
-    return limitDecimalTo2(val) + ending;
+    return TraditionalBinaryPrefix.long2String(len, "B", 2);
   }
 
-  public static synchronized String limitDecimalTo2(double d) {
-    return decimalFormat.format(d);
+  /** @deprecated use StringUtils.format("%.2f", d). */
+  @Deprecated
+  public static String limitDecimalTo2(double d) {
+    return format("%.2f", d);
   }
   
   /**
@@ -763,6 +856,28 @@ public class StringUtils {
   }
 
   /**
+   * Concatenates strings, using a separator.
+   *
+   * @param separator to join with
+   * @param strings to join
+   * @return  the joined string
+   */
+  public static String join(CharSequence separator, String[] strings) {
+    // Ideally we don't have to duplicate the code here if array is iterable.
+    StringBuilder sb = new StringBuilder();
+    boolean first = true;
+    for (String s : strings) {
+      if (first) {
+        first = false;
+      } else {
+        sb.append(separator);
+      }
+      sb.append(s);
+    }
+    return sb.toString();
+  }
+
+  /**
    * Convert SOME_STUFF to SomeStuff
    *
    * @param s input string
@@ -776,5 +891,129 @@ public class StringUtils {
       sb.append(org.apache.commons.lang.StringUtils.capitalize(word));
 
     return sb.toString();
+  }
+
+  /**
+   * Matches a template string against a pattern, replaces matched tokens with
+   * the supplied replacements, and returns the result.  The regular expression
+   * must use a capturing group.  The value of the first capturing group is used
+   * to look up the replacement.  If no replacement is found for the token, then
+   * it is replaced with the empty string.
+   * 
+   * For example, assume template is "%foo%_%bar%_%baz%", pattern is "%(.*?)%",
+   * and replacements contains 2 entries, mapping "foo" to "zoo" and "baz" to
+   * "zaz".  The result returned would be "zoo__zaz".
+   * 
+   * @param template String template to receive replacements
+   * @param pattern Pattern to match for identifying tokens, must use a capturing
+   *   group
+   * @param replacements Map<String, String> mapping tokens identified by the
+   *   capturing group to their replacement values
+   * @return String template with replacements
+   */
+  public static String replaceTokens(String template, Pattern pattern,
+      Map<String, String> replacements) {
+    StringBuffer sb = new StringBuffer();
+    Matcher matcher = pattern.matcher(template);
+    while (matcher.find()) {
+      String replacement = replacements.get(matcher.group(1));
+      if (replacement == null) {
+        replacement = "";
+      }
+      matcher.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+    }
+    matcher.appendTail(sb);
+    return sb.toString();
+  }
+  
+  /**
+   * Get stack trace for a given thread.
+   */
+  public static String getStackTrace(Thread t) {
+    final StackTraceElement[] stackTrace = t.getStackTrace();
+    StringBuilder str = new StringBuilder();
+    for (StackTraceElement e : stackTrace) {
+      str.append(e.toString() + "\n");
+    }
+    return str.toString();
+  }
+
+  /**
+   * From a list of command-line arguments, remove both an option and the 
+   * next argument.
+   *
+   * @param name  Name of the option to remove.  Example: -foo.
+   * @param args  List of arguments.
+   * @return      null if the option was not found; the value of the 
+   *              option otherwise.
+   * @throws IllegalArgumentException if the option's argument is not present
+   */
+  public static String popOptionWithArgument(String name, List<String> args)
+      throws IllegalArgumentException {
+    String val = null;
+    for (Iterator<String> iter = args.iterator(); iter.hasNext(); ) {
+      String cur = iter.next();
+      if (cur.equals("--")) {
+        // stop parsing arguments when you see --
+        break;
+      } else if (cur.equals(name)) {
+        iter.remove();
+        if (!iter.hasNext()) {
+          throw new IllegalArgumentException("option " + name + " requires 1 " +
+              "argument.");
+        }
+        val = iter.next();
+        iter.remove();
+        break;
+      }
+    }
+    return val;
+  }
+  
+  /**
+   * From a list of command-line arguments, remove an option.
+   *
+   * @param name  Name of the option to remove.  Example: -foo.
+   * @param args  List of arguments.
+   * @return      true if the option was found and removed; false otherwise.
+   */
+  public static boolean popOption(String name, List<String> args) {
+    for (Iterator<String> iter = args.iterator(); iter.hasNext(); ) {
+      String cur = iter.next();
+      if (cur.equals("--")) {
+        // stop parsing arguments when you see --
+        break;
+      } else if (cur.equals(name)) {
+        iter.remove();
+        return true;
+      }
+    }
+    return false;
+  }
+  
+  /**
+   * From a list of command-line arguments, return the first non-option
+   * argument.  Non-option arguments are those which either come after 
+   * a double dash (--) or do not start with a dash.
+   *
+   * @param args  List of arguments.
+   * @return      The first non-option argument, or null if there were none.
+   */
+  public static String popFirstNonOption(List<String> args) {
+    for (Iterator<String> iter = args.iterator(); iter.hasNext(); ) {
+      String cur = iter.next();
+      if (cur.equals("--")) {
+        if (!iter.hasNext()) {
+          return null;
+        }
+        cur = iter.next();
+        iter.remove();
+        return cur;
+      } else if (!cur.startsWith("-")) {
+        iter.remove();
+        return cur;
+      }
+    }
+    return null;
   }
 }

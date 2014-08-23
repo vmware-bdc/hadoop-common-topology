@@ -18,11 +18,12 @@
 package org.apache.hadoop.hdfs.server.namenode.ha;
 
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_KEYTAB_FILE_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URL;
 import java.security.PrivilegedAction;
 import java.util.Collection;
 import java.util.List;
@@ -33,28 +34,24 @@ import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.ha.HAServiceProtocol;
-import org.apache.hadoop.ha.HAServiceStatus;
-import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
-import org.apache.hadoop.ha.ServiceFailedException;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HAUtil;
-import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.NameNodeProxies;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.server.namenode.CheckpointSignature;
+import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.namenode.EditLogInputStream;
 import org.apache.hadoop.hdfs.server.namenode.FSImage;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.TransferFsImage;
+import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
-import org.apache.hadoop.hdfs.tools.NNHAServiceTarget;
+import org.apache.hadoop.hdfs.tools.DFSHAAdmin;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.MD5Hash;
-import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Tool;
@@ -62,7 +59,6 @@ import org.apache.hadoop.util.ToolRunner;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Sets;
 
 /**
  * Tool which allows the standby node's storage directories to be bootstrapped
@@ -76,7 +72,7 @@ public class BootstrapStandby implements Tool, Configurable {
   private String nnId;
   private String otherNNId;
 
-  private String otherHttpAddr;
+  private URL otherHttpAddr;
   private InetSocketAddress otherIpcAddr;
   private Collection<URI> dirsToFormat;
   private List<URI> editUrisToFormat;
@@ -85,23 +81,24 @@ public class BootstrapStandby implements Tool, Configurable {
   
   private boolean force = false;
   private boolean interactive = true;
+  private boolean skipSharedEditsCheck = false;
 
   // Exit/return codes.
   static final int ERR_CODE_FAILED_CONNECT = 2;
   static final int ERR_CODE_INVALID_VERSION = 3;
-  static final int ERR_CODE_OTHER_NN_NOT_ACTIVE = 4;
+  // Skip 4 - was used in previous versions, but no longer returned.
   static final int ERR_CODE_ALREADY_FORMATTED = 5;
   static final int ERR_CODE_LOGS_UNAVAILABLE = 6; 
 
+  @Override
   public int run(String[] args) throws Exception {
-    SecurityUtil.initKrb5CipherSuites();
     parseArgs(args);
     parseConfAndFindOtherNN();
     NameNode.checkAllowFormat(conf);
 
     InetSocketAddress myAddr = NameNode.getAddress(conf);
     SecurityUtil.login(conf, DFS_NAMENODE_KEYTAB_FILE_KEY,
-        DFS_NAMENODE_USER_NAME_KEY, myAddr.getHostName());
+        DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY, myAddr.getHostName());
 
     return SecurityUtil.doAsLoginUserOrFatal(new PrivilegedAction<Integer>() {
       @Override
@@ -121,6 +118,8 @@ public class BootstrapStandby implements Tool, Configurable {
         force = true;
       } else if ("-nonInteractive".equals(arg)) {
         interactive = false;
+      } else if ("-skipSharedEditsCheck".equals(arg)) {
+        skipSharedEditsCheck = true;
       } else {
         printUsage();
         throw new HadoopIllegalArgumentException(
@@ -131,7 +130,7 @@ public class BootstrapStandby implements Tool, Configurable {
 
   private void printUsage() {
     System.err.println("Usage: " + this.getClass().getSimpleName() +
-        "[-force] [-nonInteractive]");
+        " [-force] [-nonInteractive] [-skipSharedEditsCheck]");
   }
   
   private NamenodeProtocol createNNProtocolProxy()
@@ -142,12 +141,6 @@ public class BootstrapStandby implements Tool, Configurable {
         .getProxy();
   }
   
-  private HAServiceProtocol createHAProtocolProxy()
-      throws IOException {
-    return new NNHAServiceTarget(new HdfsConfiguration(conf),
-        nsId, otherNNId).getProxy(conf, 15000);
-  }
-
   private int doRun() throws IOException {
 
     NamenodeProtocol proxy = createNNProtocolProxy();
@@ -164,9 +157,9 @@ public class BootstrapStandby implements Tool, Configurable {
     }
 
     if (!checkLayoutVersion(nsInfo)) {
-      LOG.fatal("Layout version on remote node (" +
-          nsInfo.getLayoutVersion() + ") does not match " +
-          "this node's layout version (" + HdfsConstants.LAYOUT_VERSION + ")");
+      LOG.fatal("Layout version on remote node (" + nsInfo.getLayoutVersion()
+          + ") does not match " + "this node's layout version ("
+          + HdfsConstants.NAMENODE_LAYOUT_VERSION + ")");
       return ERR_CODE_INVALID_VERSION;
     }
 
@@ -184,95 +177,75 @@ public class BootstrapStandby implements Tool, Configurable {
         "           Layout version: " + nsInfo.getLayoutVersion() + "\n" +
         "=====================================================");
 
-    // Ensure the other NN is active - we can't force it to roll edit logs
-    // below if it's not active.
-    if (!isOtherNNActive()) {
-      String err = "NameNode " + nsId + "." + nnId + " at " + otherIpcAddr +
-          " is not currently in ACTIVE state.";
-      if (!interactive) {
-        LOG.fatal(err + " Please transition it to " +
-            "active before attempting to bootstrap a standby node.");
-        return ERR_CODE_OTHER_NN_NOT_ACTIVE;
-      }
-      
-      System.err.println(err);
-      if (ToolRunner.confirmPrompt(
-            "Do you want to automatically transition it to active now?")) {
-        transitionOtherNNActive();
-      } else {
-        LOG.fatal("User aborted. Exiting without bootstrapping standby.");
-        return ERR_CODE_OTHER_NN_NOT_ACTIVE;
-      }
-    }
+    long imageTxId = proxy.getMostRecentCheckpointTxId();
+    long curTxId = proxy.getTransactionID();
     
-
+    NNStorage storage = new NNStorage(conf, dirsToFormat, editUrisToFormat);
     
     // Check with the user before blowing away data.
-    if (!NameNode.confirmFormat(
-            Sets.union(Sets.newHashSet(dirsToFormat),
-                Sets.newHashSet(editUrisToFormat)),
+    if (!Storage.confirmFormat(storage.dirIterable(null),
             force, interactive)) {
+      storage.close();
       return ERR_CODE_ALREADY_FORMATTED;
     }
-
-    // Force the active to roll its log
-    CheckpointSignature csig = proxy.rollEditLog();
-    long imageTxId = csig.getMostRecentCheckpointTxId();
-    long rollTxId = csig.getCurSegmentTxId();
-
-
+    
     // Format the storage (writes VERSION file)
-    NNStorage storage = new NNStorage(conf, dirsToFormat, editUrisToFormat);
     storage.format(nsInfo);
 
     // Load the newly formatted image, using all of the directories (including shared
     // edits)
     FSImage image = new FSImage(conf);
-    assert image.getEditLog().isOpenForRead() :
+    try {
+      image.getStorage().setStorageInfo(storage);
+      image.initEditLog(StartupOption.REGULAR);
+      assert image.getEditLog().isOpenForRead() :
         "Expected edit log to be open for read";
-    
-    // Ensure that we have enough edits already in the shared directory to
-    // start up from the last checkpoint on the active.
-    if (!checkLogsAvailableForRead(image, imageTxId, rollTxId)) {
-      return ERR_CODE_LOGS_UNAVAILABLE;
-    }
-    
-    image.getStorage().writeTransactionIdFileToStorage(rollTxId);
 
-    // Download that checkpoint into our storage directories.
-    MD5Hash hash = TransferFsImage.downloadImageToStorage(
-        otherHttpAddr.toString(), imageTxId,
-        storage, true);
-    image.saveDigestAndRenameCheckpointImage(imageTxId, hash);
+      // Ensure that we have enough edits already in the shared directory to
+      // start up from the last checkpoint on the active.
+      if (!skipSharedEditsCheck && !checkLogsAvailableForRead(image, imageTxId, curTxId)) {
+        return ERR_CODE_LOGS_UNAVAILABLE;
+      }
+
+      image.getStorage().writeTransactionIdFileToStorage(curTxId);
+
+      // Download that checkpoint into our storage directories.
+      MD5Hash hash = TransferFsImage.downloadImageToStorage(
+        otherHttpAddr, imageTxId, storage, true);
+      image.saveDigestAndRenameCheckpointImage(NameNodeFile.IMAGE, imageTxId,
+          hash);
+    } catch (IOException ioe) {
+      image.close();
+      throw ioe;
+    }
     return 0;
   }
 
-  
-  private void transitionOtherNNActive()
-      throws AccessControlException, ServiceFailedException, IOException {
-    LOG.info("Transitioning the running namenode to active...");
-    createHAProtocolProxy().transitionToActive();    
-    LOG.info("Successful");
-  }
-
   private boolean checkLogsAvailableForRead(FSImage image, long imageTxId,
-      long rollTxId) {
-    
+      long curTxIdOnOtherNode) {
+
+    if (imageTxId == curTxIdOnOtherNode) {
+      // The other node hasn't written any logs since the last checkpoint.
+      // This can be the case if the NN was freshly formatted as HA, and
+      // then started in standby mode, so it has no edit logs at all.
+      return true;
+    }
     long firstTxIdInLogs = imageTxId + 1;
-    long lastTxIdInLogs = rollTxId - 1;
-    assert lastTxIdInLogs >= firstTxIdInLogs;
+    
+    assert curTxIdOnOtherNode >= firstTxIdInLogs :
+      "first=" + firstTxIdInLogs + " onOtherNode=" + curTxIdOnOtherNode;
     
     try {
       Collection<EditLogInputStream> streams =
         image.getEditLog().selectInputStreams(
-          firstTxIdInLogs, lastTxIdInLogs, false);
+          firstTxIdInLogs, curTxIdOnOtherNode, null, true);
       for (EditLogInputStream stream : streams) {
         IOUtils.closeStream(stream);
       }
       return true;
     } catch (IOException e) {
       String msg = "Unable to read transaction ids " +
-          firstTxIdInLogs + "-" + lastTxIdInLogs +
+          firstTxIdInLogs + "-" + curTxIdOnOtherNode +
           " from the configured shared edits storage " +
           Joiner.on(",").join(sharedEditsUris) + ". " +
           "Please copy these logs into the shared edits storage " + 
@@ -288,15 +261,9 @@ public class BootstrapStandby implements Tool, Configurable {
   }
 
   private boolean checkLayoutVersion(NamespaceInfo nsInfo) throws IOException {
-    return (nsInfo.getLayoutVersion() == HdfsConstants.LAYOUT_VERSION);
+    return (nsInfo.getLayoutVersion() == HdfsConstants.NAMENODE_LAYOUT_VERSION);
   }
   
-  private boolean isOtherNNActive()
-      throws AccessControlException, IOException {
-    HAServiceStatus status = createHAProtocolProxy().getServiceStatus();
-    return status.getState() == HAServiceState.ACTIVE;
-  }
-
   private void parseConfAndFindOtherNN() throws IOException {
     Configuration conf = getConf();
     nsId = DFSUtil.getNamenodeNameServiceId(conf);
@@ -321,11 +288,10 @@ public class BootstrapStandby implements Tool, Configurable {
         "Could not determine valid IPC address for other NameNode (%s)" +
         ", got: %s", otherNNId, otherIpcAddr);
 
-    otherHttpAddr = DFSUtil.getInfoServer(null, otherNode, true);
-    otherHttpAddr = DFSUtil.substituteForWildcardAddress(otherHttpAddr,
-        otherIpcAddr.getHostName());
-    
-    
+    final String scheme = DFSUtil.getHttpClientScheme(conf);
+    otherHttpAddr = DFSUtil.getInfoServerWithDefaultHost(
+        otherIpcAddr.getHostName(), otherNode, scheme).toURL();
+
     dirsToFormat = FSNamesystem.getNamespaceDirs(conf);
     editUrisToFormat = FSNamesystem.getNamespaceEditsDirs(
         conf, false);
@@ -334,7 +300,7 @@ public class BootstrapStandby implements Tool, Configurable {
 
   @Override
   public void setConf(Configuration conf) {
-    this.conf = conf;
+    this.conf = DFSHAAdmin.addSecurityConfiguration(conf);
   }
 
   @Override

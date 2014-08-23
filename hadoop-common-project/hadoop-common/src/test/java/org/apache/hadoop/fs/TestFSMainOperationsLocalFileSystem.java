@@ -28,19 +28,26 @@ import org.junit.Test;
 
 public class TestFSMainOperationsLocalFileSystem extends FSMainOperationsBaseTest {
 
+  @Override
+  protected FileSystem createFileSystem() throws IOException {
+    return FileSystem.getLocal(new Configuration());
+  }
+    
+  @Override
   @Before
   public void setUp() throws Exception {
-    fSys = FileSystem.getLocal(new Configuration());
     super.setUp();
   }
   
   static Path wd = null;
+  @Override
   protected Path getDefaultWorkingDirectory() throws IOException {
     if (wd == null)
       wd = FileSystem.getLocal(new Configuration()).getWorkingDirectory();
     return wd;
   }
   
+  @Override
   @After
   public void tearDown() throws Exception {
     super.tearDown();
@@ -49,8 +56,7 @@ public class TestFSMainOperationsLocalFileSystem extends FSMainOperationsBaseTes
   @Test
   @Override
   public void testWDAbsolute() throws IOException {
-    Path absoluteDir = FileSystemTestHelper.getTestRootPath(fSys,
-        "test/existingDir");
+    Path absoluteDir = getTestRootPath(fSys, "test/existingDir");
     fSys.mkdirs(absoluteDir);
     fSys.setWorkingDirectory(absoluteDir);
     Assert.assertEquals(absoluteDir, fSys.getWorkingDirectory());

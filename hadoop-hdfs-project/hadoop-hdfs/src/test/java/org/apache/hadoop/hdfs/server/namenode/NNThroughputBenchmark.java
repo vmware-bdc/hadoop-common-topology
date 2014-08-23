@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 
+import com.google.common.base.Preconditions;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.impl.Log4JLogger;
@@ -35,10 +36,12 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
+import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataStorage;
@@ -58,6 +61,9 @@ import org.apache.hadoop.net.DNS;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.security.Groups;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.util.Time;
+import org.apache.hadoop.util.Tool;
+import org.apache.hadoop.util.ToolRunner;
 import org.apache.hadoop.util.VersionInfo;
 import org.apache.log4j.Level;
 import org.apache.log4j.LogManager;
@@ -97,7 +103,7 @@ import org.apache.log4j.LogManager;
  * Then the benchmark executes the specified number of operations using 
  * the specified number of threads and outputs the resulting stats.
  */
-public class NNThroughputBenchmark {
+public class NNThroughputBenchmark implements Tool {
   private static final Log LOG = LogFactory.getLog(NNThroughputBenchmark.class);
   private static final int BLOCK_SIZE = 16;
   private static final String GENERAL_OPTIONS_USAGE = 
@@ -112,24 +118,27 @@ public class NNThroughputBenchmark {
     // We do not need many handlers, since each thread simulates a handler
     // by calling name-node methods directly
     config.setInt(DFSConfigKeys.DFS_DATANODE_HANDLER_COUNT_KEY, 1);
+    // Turn off minimum block size verification
+    config.setInt(DFSConfigKeys.DFS_NAMENODE_MIN_BLOCK_SIZE_KEY, 0);
     // set exclude file
     config.set(DFSConfigKeys.DFS_HOSTS_EXCLUDE,
       "${hadoop.tmp.dir}/dfs/hosts/exclude");
     File excludeFile = new File(config.get(DFSConfigKeys.DFS_HOSTS_EXCLUDE,
       "exclude"));
-    if(! excludeFile.exists()) {
-      if(!excludeFile.getParentFile().mkdirs())
+    if(!excludeFile.exists()) {
+      if(!excludeFile.getParentFile().exists() && !excludeFile.getParentFile().mkdirs())
         throw new IOException("NNThroughputBenchmark: cannot mkdir " + excludeFile);
     }
     new FileOutputStream(excludeFile).close();
-    // Start the NameNode
-    String[] argv = new String[] {};
-    nameNode = NameNode.createNameNode(argv, config);
-    nameNodeProto = nameNode.getRpcServer();
+    // set include file
+    config.set(DFSConfigKeys.DFS_HOSTS, "${hadoop.tmp.dir}/dfs/hosts/include");
+    File includeFile = new File(config.get(DFSConfigKeys.DFS_HOSTS, "include"));
+    new FileOutputStream(includeFile).close();
   }
 
   void close() {
-    nameNode.stop();
+    if(nameNode != null)
+      nameNode.stop();
   }
 
   static void setNameNodeLoggingLevel(Level logLevel) {
@@ -154,7 +163,7 @@ public class NNThroughputBenchmark {
     protected static final String OP_ALL_NAME = "all";
     protected static final String OP_ALL_USAGE = "-op all <other ops options>";
 
-    protected String baseDir;
+    protected final String baseDir;
     protected short replication;
     protected int  numThreads = 0;        // number of threads
     protected int  numOpsRequired = 0;    // number of operations requested
@@ -193,7 +202,7 @@ public class NNThroughputBenchmark {
      * {@link #executeOp(int, int, String)}, which can have different meanings
      * depending on the operation performed.
      * 
-     * @param daemonId
+     * @param daemonId id of the daemon calling this method
      * @return the argument
      */
     abstract String getExecutionArgument(int daemonId);
@@ -247,7 +256,7 @@ public class NNThroughputBenchmark {
         setNameNodeLoggingLevel(logLevel);
         for(tIdx=0; tIdx < numThreads; tIdx++)
           daemons.add(new StatsDaemon(tIdx, opsPerThread[tIdx], this));
-        start = System.currentTimeMillis();
+        start = Time.now();
         LOG.info("Starting " + numOpsRequired + " " + getOpName() + "(s).");
         for(StatsDaemon d : daemons)
           d.start();
@@ -255,7 +264,7 @@ public class NNThroughputBenchmark {
         while(isInPorgress()) {
           // try {Thread.sleep(500);} catch (InterruptedException e) {}
         }
-        elapsedTime = System.currentTimeMillis() - start;
+        elapsedTime = Time.now() - start;
         for(StatsDaemon d : daemons) {
           incrementStats(d.localNumOpsExecuted, d.localCumulativeTime);
           // System.out.println(d.toString() + ": ops Exec = " + d.localNumOpsExecuted);
@@ -271,7 +280,8 @@ public class NNThroughputBenchmark {
     }
 
     void cleanUp() throws IOException {
-      nameNodeProto.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_LEAVE);
+      nameNodeProto.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_LEAVE,
+          false);
       if(!keepResults)
         nameNodeProto.delete(getBaseDir(), true);
     }
@@ -312,11 +322,10 @@ public class NNThroughputBenchmark {
     /**
      * Parse first 2 arguments, corresponding to the "-op" option.
      * 
-     * @param args
+     * @param args argument list
      * @return true if operation is all, which means that options not related
      * to this operation should be ignored, or false otherwise, meaning
      * that usage should be printed when an unrelated option is encountered.
-     * @throws IOException
      */
     protected boolean verifyOpArgument(List<String> args) {
       if(args.size() < 2 || ! args.get(0).startsWith("-op"))
@@ -371,12 +380,12 @@ public class NNThroughputBenchmark {
    * One of the threads that perform stats operations.
    */
   private class StatsDaemon extends Thread {
-    private int daemonId;
+    private final int daemonId;
     private int opsPerThread;
     private String arg1;      // argument passed to executeOp()
     private volatile int  localNumOpsExecuted = 0;
     private volatile long localCumulativeTime = 0;
-    private OperationStatsBase statsOp;
+    private final OperationStatsBase statsOp;
 
     StatsDaemon(int daemonId, int nrOps, OperationStatsBase op) {
       this.daemonId = daemonId;
@@ -385,6 +394,7 @@ public class NNThroughputBenchmark {
       setName(toString());
     }
 
+    @Override
     public void run() {
       localNumOpsExecuted = 0;
       localCumulativeTime = 0;
@@ -397,6 +407,7 @@ public class NNThroughputBenchmark {
       }
     }
 
+    @Override
     public String toString() {
       return "StatsDaemon-" + daemonId;
     }
@@ -439,16 +450,19 @@ public class NNThroughputBenchmark {
       keepResults = true;
     }
 
+    @Override
     String getOpName() {
       return OP_CLEAN_NAME;
     }
 
+    @Override
     void parseArguments(List<String> args) {
       boolean ignoreUnrelatedOptions = verifyOpArgument(args);
       if(args.size() > 2 && !ignoreUnrelatedOptions)
         printUsage();
     }
 
+    @Override
     void generateInputs(int[] opsPerThread) throws IOException {
       // do nothing
     }
@@ -456,6 +470,7 @@ public class NNThroughputBenchmark {
     /**
      * Does not require the argument
      */
+    @Override
     String getExecutionArgument(int daemonId) {
       return null;
     }
@@ -463,15 +478,18 @@ public class NNThroughputBenchmark {
     /**
      * Remove entire benchmark directory.
      */
+    @Override
     long executeOp(int daemonId, int inputIdx, String ignore) 
     throws IOException {
-      nameNodeProto.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_LEAVE);
-      long start = System.currentTimeMillis();
+      nameNodeProto.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_LEAVE,
+          false);
+      long start = Time.now();
       nameNodeProto.delete(BASE_DIR_NAME, true);
-      long end = System.currentTimeMillis();
+      long end = Time.now();
       return end-start;
     }
 
+    @Override
     void printResults() {
       LOG.info("--- " + getOpName() + " inputs ---");
       LOG.info("Remove directory " + BASE_DIR_NAME);
@@ -501,10 +519,12 @@ public class NNThroughputBenchmark {
       parseArguments(args);
     }
 
+    @Override
     String getOpName() {
       return OP_CREATE_NAME;
     }
 
+    @Override
     void parseArguments(List<String> args) {
       boolean ignoreUnrelatedOptions = verifyOpArgument(args);
       int nrFilesPerDir = 4;
@@ -527,9 +547,11 @@ public class NNThroughputBenchmark {
       nameGenerator = new FileNameGenerator(getBaseDir(), nrFilesPerDir);
     }
 
+    @Override
     void generateInputs(int[] opsPerThread) throws IOException {
       assert opsPerThread.length == numThreads : "Error opsPerThread.length"; 
-      nameNodeProto.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_LEAVE);
+      nameNodeProto.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_LEAVE,
+          false);
       // int generatedFileIdx = 0;
       LOG.info("Generate " + numOpsRequired + " intputs for " + getOpName());
       fileNames = new String[numThreads][];
@@ -550,6 +572,7 @@ public class NNThroughputBenchmark {
     /**
      * returns client name
      */
+    @Override
     String getExecutionArgument(int daemonId) {
       return getClientName(daemonId);
     }
@@ -557,25 +580,120 @@ public class NNThroughputBenchmark {
     /**
      * Do file create.
      */
+    @Override
     long executeOp(int daemonId, int inputIdx, String clientName) 
     throws IOException {
-      long start = System.currentTimeMillis();
+      long start = Time.now();
       // dummyActionNoSynch(fileIdx);
       nameNodeProto.create(fileNames[daemonId][inputIdx], FsPermission.getDefault(),
                       clientName, new EnumSetWritable<CreateFlag>(EnumSet
-              .of(CreateFlag.CREATE, CreateFlag.OVERWRITE)), true, replication, BLOCK_SIZE);
-      long end = System.currentTimeMillis();
+              .of(CreateFlag.CREATE, CreateFlag.OVERWRITE)), true, 
+          replication, BLOCK_SIZE, null);
+      long end = Time.now();
       for(boolean written = !closeUponCreate; !written; 
         written = nameNodeProto.complete(fileNames[daemonId][inputIdx],
-                                    clientName, null));
+                                    clientName, null, INodeId.GRANDFATHER_INODE_ID));
       return end-start;
     }
 
+    @Override
     void printResults() {
       LOG.info("--- " + getOpName() + " inputs ---");
       LOG.info("nrFiles = " + numOpsRequired);
       LOG.info("nrThreads = " + numThreads);
       LOG.info("nrFilesPerDir = " + nameGenerator.getFilesPerDirectory());
+      printStats();
+    }
+  }
+
+  /**
+   * Directory creation statistics.
+   *
+   * Each thread creates the same (+ or -1) number of directories.
+   * Directory names are pre-generated during initialization.
+   */
+  class MkdirsStats extends OperationStatsBase {
+    // Operation types
+    static final String OP_MKDIRS_NAME = "mkdirs";
+    static final String OP_MKDIRS_USAGE = "-op mkdirs [-threads T] [-dirs N] " +
+        "[-dirsPerDir P]";
+
+    protected FileNameGenerator nameGenerator;
+    protected String[][] dirPaths;
+
+    MkdirsStats(List<String> args) {
+      super();
+      parseArguments(args);
+    }
+
+    @Override
+    String getOpName() {
+      return OP_MKDIRS_NAME;
+    }
+
+    @Override
+    void parseArguments(List<String> args) {
+      boolean ignoreUnrelatedOptions = verifyOpArgument(args);
+      int nrDirsPerDir = 2;
+      for (int i = 2; i < args.size(); i++) {       // parse command line
+        if(args.get(i).equals("-dirs")) {
+          if(i+1 == args.size())  printUsage();
+          numOpsRequired = Integer.parseInt(args.get(++i));
+        } else if(args.get(i).equals("-threads")) {
+          if(i+1 == args.size())  printUsage();
+          numThreads = Integer.parseInt(args.get(++i));
+        } else if(args.get(i).equals("-dirsPerDir")) {
+          if(i+1 == args.size())  printUsage();
+          nrDirsPerDir = Integer.parseInt(args.get(++i));
+        } else if(!ignoreUnrelatedOptions)
+          printUsage();
+      }
+      nameGenerator = new FileNameGenerator(getBaseDir(), nrDirsPerDir);
+    }
+
+    @Override
+    void generateInputs(int[] opsPerThread) throws IOException {
+      assert opsPerThread.length == numThreads : "Error opsPerThread.length";
+      nameNodeProto.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_LEAVE,
+          false);
+      LOG.info("Generate " + numOpsRequired + " inputs for " + getOpName());
+      dirPaths = new String[numThreads][];
+      for(int idx=0; idx < numThreads; idx++) {
+        int threadOps = opsPerThread[idx];
+        dirPaths[idx] = new String[threadOps];
+        for(int jdx=0; jdx < threadOps; jdx++)
+          dirPaths[idx][jdx] = nameGenerator.
+              getNextFileName("ThroughputBench");
+      }
+    }
+
+    /**
+     * returns client name
+     */
+    @Override
+    String getExecutionArgument(int daemonId) {
+      return getClientName(daemonId);
+    }
+
+    /**
+     * Do mkdirs operation.
+     */
+    @Override
+    long executeOp(int daemonId, int inputIdx, String clientName)
+        throws IOException {
+      long start = Time.now();
+      nameNodeProto.mkdirs(dirPaths[daemonId][inputIdx],
+          FsPermission.getDefault(), true);
+      long end = Time.now();
+      return end-start;
+    }
+
+    @Override
+    void printResults() {
+      LOG.info("--- " + getOpName() + " inputs ---");
+      LOG.info("nrDirs = " + numOpsRequired);
+      LOG.info("nrThreads = " + numThreads);
+      LOG.info("nrDirsPerDir = " + nameGenerator.getFilesPerDirectory());
       printStats();
     }
   }
@@ -600,10 +718,12 @@ public class NNThroughputBenchmark {
       super(args);
     }
 
+    @Override
     String getOpName() {
       return OP_OPEN_NAME;
     }
 
+    @Override
     void parseArguments(List<String> args) {
       int ueIndex = args.indexOf("-useExisting");
       useExisting = (ueIndex >= 0);
@@ -613,6 +733,7 @@ public class NNThroughputBenchmark {
       super.parseArguments(args);
     }
 
+    @Override
     void generateInputs(int[] opsPerThread) throws IOException {
       // create files using opsPerThread
       String[] createArgs = new String[] {
@@ -645,11 +766,12 @@ public class NNThroughputBenchmark {
     /**
      * Do file open.
      */
+    @Override
     long executeOp(int daemonId, int inputIdx, String ignore) 
     throws IOException {
-      long start = System.currentTimeMillis();
+      long start = Time.now();
       nameNodeProto.getBlockLocations(fileNames[daemonId][inputIdx], 0L, BLOCK_SIZE);
-      long end = System.currentTimeMillis();
+      long end = Time.now();
       return end-start;
     }
   }
@@ -669,15 +791,17 @@ public class NNThroughputBenchmark {
       super(args);
     }
 
+    @Override
     String getOpName() {
       return OP_DELETE_NAME;
     }
 
+    @Override
     long executeOp(int daemonId, int inputIdx, String ignore) 
     throws IOException {
-      long start = System.currentTimeMillis();
+      long start = Time.now();
       nameNodeProto.delete(fileNames[daemonId][inputIdx], false);
-      long end = System.currentTimeMillis();
+      long end = Time.now();
       return end-start;
     }
   }
@@ -697,15 +821,17 @@ public class NNThroughputBenchmark {
       super(args);
     }
 
+    @Override
     String getOpName() {
       return OP_FILE_STATUS_NAME;
     }
 
+    @Override
     long executeOp(int daemonId, int inputIdx, String ignore) 
     throws IOException {
-      long start = System.currentTimeMillis();
+      long start = Time.now();
       nameNodeProto.getFileInfo(fileNames[daemonId][inputIdx]);
-      long end = System.currentTimeMillis();
+      long end = Time.now();
       return end-start;
     }
   }
@@ -727,10 +853,12 @@ public class NNThroughputBenchmark {
       super(args);
     }
 
+    @Override
     String getOpName() {
       return OP_RENAME_NAME;
     }
 
+    @Override
     void generateInputs(int[] opsPerThread) throws IOException {
       super.generateInputs(opsPerThread);
       destNames = new String[fileNames.length][];
@@ -742,12 +870,13 @@ public class NNThroughputBenchmark {
       }
     }
 
+    @Override
     long executeOp(int daemonId, int inputIdx, String ignore) 
     throws IOException {
-      long start = System.currentTimeMillis();
+      long start = Time.now();
       nameNodeProto.rename(fileNames[daemonId][inputIdx],
                       destNames[daemonId][inputIdx]);
-      long end = System.currentTimeMillis();
+      long end = Time.now();
       return end-start;
     }
   }
@@ -762,33 +891,24 @@ public class NNThroughputBenchmark {
     NamespaceInfo nsInfo;
     DatanodeRegistration dnRegistration;
     DatanodeStorage storage; //only one storage 
-    ArrayList<Block> blocks;
+    final ArrayList<Block> blocks;
     int nrBlocks; // actual number of blocks
     long[] blockReportList;
+    final int dnIdx;
 
-    /**
-     * Return a a 6 digit integer port.
-     * This is necessary in order to provide lexocographic ordering.
-     * Host names are all the same, the ordering goes by port numbers.
-     */
     private static int getNodePort(int num) throws IOException {
-      int port = 100000 + num;
-      if (String.valueOf(port).length() > 6) {
-        throw new IOException("Too many data-nodes");
-      }
+      int port = 1 + num;
+      Preconditions.checkState(port < Short.MAX_VALUE);
       return port;
     }
 
     TinyDatanode(int dnIdx, int blockCapacity) throws IOException {
-      String ipAddr = DNS.getDefaultIP("default");
-      String hostName = DNS.getDefaultHost("default", "default");
-      dnRegistration = new DatanodeRegistration(ipAddr, getNodePort(dnIdx));
-      dnRegistration.setHostName(hostName);
-      dnRegistration.setSoftwareVersion(VersionInfo.getVersion());
+      this.dnIdx = dnIdx;
       this.blocks = new ArrayList<Block>(blockCapacity);
       this.nrBlocks = 0;
     }
 
+    @Override
     public String toString() {
       return dnRegistration.toString();
     }
@@ -800,12 +920,19 @@ public class NNThroughputBenchmark {
     void register() throws IOException {
       // get versions from the namenode
       nsInfo = nameNodeProto.versionRequest();
-      dnRegistration.setStorageInfo(new DataStorage(nsInfo, ""));
-      DataNode.setNewStorageID(dnRegistration);
+      dnRegistration = new DatanodeRegistration(
+          new DatanodeID(DNS.getDefaultIP("default"),
+              DNS.getDefaultHost("default", "default"),
+              DataNode.generateUuid(), getNodePort(dnIdx),
+              DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
+              DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
+              DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT),
+          new DataStorage(nsInfo),
+          new ExportedBlockKeys(), VersionInfo.getVersion());
       // register datanode
       dnRegistration = nameNodeProto.registerDatanode(dnRegistration);
       //first block reports
-      storage = new DatanodeStorage(dnRegistration.getStorageID());
+      storage = new DatanodeStorage(DatanodeStorage.generateUuid());
       final StorageBlockReport[] reports = {
           new StorageBlockReport(storage,
               new BlockListAsLongs(null, null).getBlockListAsLongs())
@@ -821,10 +948,10 @@ public class NNThroughputBenchmark {
     void sendHeartbeat() throws IOException {
       // register datanode
       // TODO:FEDERATION currently a single block pool is supported
-      StorageReport[] rep = { new StorageReport(dnRegistration.getStorageID(),
-          false, DF_CAPACITY, DF_USED, DF_CAPACITY - DF_USED, DF_USED) };
-      DatanodeCommand[] cmds = nameNodeProto.sendHeartbeat(dnRegistration,
-          rep, 0, 0, 0).getCommands();
+      StorageReport[] rep = { new StorageReport(storage, false,
+          DF_CAPACITY, DF_USED, DF_CAPACITY - DF_USED, DF_USED) };
+      DatanodeCommand[] cmds = nameNodeProto.sendHeartbeat(dnRegistration, rep,
+          0L, 0L, 0, 0, 0).getCommands();
       if(cmds != null) {
         for (DatanodeCommand cmd : cmds ) {
           if(LOG.isDebugEnabled()) {
@@ -857,6 +984,7 @@ public class NNThroughputBenchmark {
       return blockReportList;
     }
 
+    @Override
     public int compareTo(String xferAddr) {
       return getXferAddr().compareTo(xferAddr);
     }
@@ -867,16 +995,17 @@ public class NNThroughputBenchmark {
     @SuppressWarnings("unused") // keep it for future blockReceived benchmark
     int replicateBlocks() throws IOException {
       // register datanode
-      StorageReport[] rep = { new StorageReport(dnRegistration.getStorageID(),
+      StorageReport[] rep = { new StorageReport(storage,
           false, DF_CAPACITY, DF_USED, DF_CAPACITY - DF_USED, DF_USED) };
       DatanodeCommand[] cmds = nameNodeProto.sendHeartbeat(dnRegistration,
-          rep, 0, 0, 0).getCommands();
+          rep, 0L, 0L, 0, 0, 0).getCommands();
       if (cmds != null) {
         for (DatanodeCommand cmd : cmds) {
           if (cmd.getAction() == DatanodeProtocol.DNA_TRANSFER) {
             // Send a copy of a block to another datanode
             BlockCommand bcmd = (BlockCommand)cmd;
-            return transferBlocks(bcmd.getBlocks(), bcmd.getTargets());
+            return transferBlocks(bcmd.getBlocks(), bcmd.getTargets(),
+                                  bcmd.getTargetStorageIDs());
           }
         }
       }
@@ -889,25 +1018,24 @@ public class NNThroughputBenchmark {
      * that the blocks have been received.
      */
     private int transferBlocks( Block blocks[], 
-                                DatanodeInfo xferTargets[][] 
+                                DatanodeInfo xferTargets[][],
+                                String targetStorageIDs[][]
                               ) throws IOException {
       for(int i = 0; i < blocks.length; i++) {
         DatanodeInfo blockTargets[] = xferTargets[i];
         for(int t = 0; t < blockTargets.length; t++) {
           DatanodeInfo dnInfo = blockTargets[t];
+          String targetStorageID = targetStorageIDs[i][t];
           DatanodeRegistration receivedDNReg;
-          receivedDNReg =
-            new DatanodeRegistration(dnInfo.getIpAddr(), dnInfo.getXferPort());
-          receivedDNReg.setStorageInfo(
-            new DataStorage(nsInfo, dnInfo.getStorageID()));
-          receivedDNReg.setInfoPort(dnInfo.getInfoPort());
-          receivedDNReg.setIpcPort(dnInfo.getIpcPort());
+          receivedDNReg = new DatanodeRegistration(dnInfo,
+            new DataStorage(nsInfo),
+            new ExportedBlockKeys(), VersionInfo.getVersion());
           ReceivedDeletedBlockInfo[] rdBlocks = {
             new ReceivedDeletedBlockInfo(
                   blocks[i], ReceivedDeletedBlockInfo.BlockStatus.RECEIVED_BLOCK,
                   null) };
           StorageReceivedDeletedBlocks[] report = { new StorageReceivedDeletedBlocks(
-              receivedDNReg.getStorageID(), rdBlocks) };
+              targetStorageID, rdBlocks) };
           nameNodeProto.blockReceivedAndDeleted(receivedDNReg, nameNode
               .getNamesystem().getBlockPoolId(), report);
         }
@@ -951,10 +1079,12 @@ public class NNThroughputBenchmark {
       return numThreads;
     }
 
+    @Override
     String getOpName() {
       return OP_BLOCK_REPORT_NAME;
     }
 
+    @Override
     void parseArguments(List<String> args) {
       boolean ignoreUnrelatedOptions = verifyOpArgument(args);
       for (int i = 2; i < args.size(); i++) {       // parse command line
@@ -975,6 +1105,7 @@ public class NNThroughputBenchmark {
       }
     }
 
+    @Override
     void generateInputs(int[] ignore) throws IOException {
       int nrDatanodes = getNumDatanodes();
       int nrBlocks = (int)Math.ceil((double)blocksPerReport * nrDatanodes 
@@ -993,18 +1124,19 @@ public class NNThroughputBenchmark {
       }
 
       // create files 
-      LOG.info("Creating " + nrFiles + " with " + blocksPerFile + " blocks each.");
+      LOG.info("Creating " + nrFiles + " files with " + blocksPerFile + " blocks each.");
       FileNameGenerator nameGenerator;
       nameGenerator = new FileNameGenerator(getBaseDir(), 100);
       String clientName = getClientName(007);
-      nameNodeProto.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_LEAVE);
+      nameNodeProto.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_LEAVE,
+          false);
       for(int idx=0; idx < nrFiles; idx++) {
         String fileName = nameGenerator.getNextFileName("ThroughputBench");
         nameNodeProto.create(fileName, FsPermission.getDefault(), clientName,
             new EnumSetWritable<CreateFlag>(EnumSet.of(CreateFlag.CREATE, CreateFlag.OVERWRITE)), true, replication,
-            BLOCK_SIZE);
+            BLOCK_SIZE, null);
         ExtendedBlock lastBlock = addBlocks(fileName, clientName);
-        nameNodeProto.complete(fileName, clientName, lastBlock);
+        nameNodeProto.complete(fileName, clientName, lastBlock, INodeId.GRANDFATHER_INODE_ID);
       }
       // prepare block reports
       for(int idx=0; idx < nrDatanodes; idx++) {
@@ -1016,7 +1148,8 @@ public class NNThroughputBenchmark {
     throws IOException {
       ExtendedBlock prevBlock = null;
       for(int jdx = 0; jdx < blocksPerFile; jdx++) {
-        LocatedBlock loc = nameNodeProto.addBlock(fileName, clientName, prevBlock, null);
+        LocatedBlock loc = nameNodeProto.addBlock(fileName, clientName,
+            prevBlock, null, INodeId.GRANDFATHER_INODE_ID, null);
         prevBlock = loc.getBlock();
         for(DatanodeInfo dnInfo : loc.getLocations()) {
           int dnIdx = Arrays.binarySearch(datanodes, dnInfo.getXferAddr());
@@ -1025,7 +1158,7 @@ public class NNThroughputBenchmark {
               loc.getBlock().getLocalBlock(),
               ReceivedDeletedBlockInfo.BlockStatus.RECEIVED_BLOCK, null) };
           StorageReceivedDeletedBlocks[] report = { new StorageReceivedDeletedBlocks(
-              datanodes[dnIdx].dnRegistration.getStorageID(), rdBlocks) };
+              datanodes[dnIdx].storage.getStorageID(), rdBlocks) };
           nameNodeProto.blockReceivedAndDeleted(datanodes[dnIdx].dnRegistration, loc
               .getBlock().getBlockPoolId(), report);
         }
@@ -1036,22 +1169,25 @@ public class NNThroughputBenchmark {
     /**
      * Does not require the argument
      */
+    @Override
     String getExecutionArgument(int daemonId) {
       return null;
     }
 
+    @Override
     long executeOp(int daemonId, int inputIdx, String ignore) throws IOException {
       assert daemonId < numThreads : "Wrong daemonId.";
       TinyDatanode dn = datanodes[daemonId];
-      long start = System.currentTimeMillis();
+      long start = Time.now();
       StorageBlockReport[] report = { new StorageBlockReport(
           dn.storage, dn.getBlockReportList()) };
       nameNodeProto.blockReport(dn.dnRegistration, nameNode.getNamesystem()
           .getBlockPoolId(), report);
-      long end = System.currentTimeMillis();
+      long end = Time.now();
       return end-start;
     }
 
+    @Override
     void printResults() {
       String blockDistribution = "";
       String delim = "(";
@@ -1080,7 +1216,7 @@ public class NNThroughputBenchmark {
       "-op replication [-datanodes T] [-nodesToDecommission D] " +
       "[-nodeReplicationLimit C] [-totalBlocks B] [-replication R]";
 
-    private BlockReportStats blockReportObject;
+    private final BlockReportStats blockReportObject;
     private int numDatanodes;
     private int nodesToDecommission;
     private int nodeReplicationLimit;
@@ -1112,10 +1248,12 @@ public class NNThroughputBenchmark {
       numPendingBlocks = 0;
     }
 
+    @Override
     String getOpName() {
       return OP_REPLICATION_NAME;
     }
 
+    @Override
     void parseArguments(List<String> args) {
       boolean ignoreUnrelatedOptions = verifyOpArgument(args);
       for (int i = 2; i < args.size(); i++) {       // parse command line
@@ -1139,20 +1277,15 @@ public class NNThroughputBenchmark {
       }
     }
 
+    @Override
     void generateInputs(int[] ignore) throws IOException {
       final FSNamesystem namesystem = nameNode.getNamesystem();
 
       // start data-nodes; create a bunch of files; generate block reports.
       blockReportObject.generateInputs(ignore);
       // stop replication monitor
-      BlockManagerTestUtil.getReplicationThread(namesystem.getBlockManager())
-          .interrupt();
-      try {
-        BlockManagerTestUtil.getReplicationThread(namesystem.getBlockManager())
-            .join();
-      } catch(InterruptedException ei) {
-        return;
-      }
+      BlockManagerTestUtil.stopReplicationThread(namesystem.getBlockManager());
+
       // report blocks once
       int nrDatanodes = blockReportObject.getNumDatanodes();
       for(int idx=0; idx < nrDatanodes; idx++) {
@@ -1185,23 +1318,26 @@ public class NNThroughputBenchmark {
     /**
      * Does not require the argument
      */
+    @Override
     String getExecutionArgument(int daemonId) {
       return null;
     }
 
+    @Override
     long executeOp(int daemonId, int inputIdx, String ignore) throws IOException {
       assert daemonId < numThreads : "Wrong daemonId.";
-      long start = System.currentTimeMillis();
+      long start = Time.now();
       // compute data-node work
       int work = BlockManagerTestUtil.getComputedDatanodeWork(
           nameNode.getNamesystem().getBlockManager());
-      long end = System.currentTimeMillis();
+      long end = Time.now();
       numPendingBlocks += work;
       if(work == 0)
         daemons.get(daemonId).terminate();
       return end-start;
     }
 
+    @Override
     void printResults() {
       String blockDistribution = "";
       String delim = "(";
@@ -1232,6 +1368,7 @@ public class NNThroughputBenchmark {
     System.err.println("Usage: NNThroughputBenchmark"
         + "\n\t"    + OperationStatsBase.OP_ALL_USAGE
         + " | \n\t" + CreateFileStats.OP_CREATE_USAGE
+        + " | \n\t" + MkdirsStats.OP_MKDIRS_USAGE
         + " | \n\t" + OpenFileStats.OP_OPEN_USAGE
         + " | \n\t" + DeleteFileStats.OP_DELETE_USAGE
         + " | \n\t" + FileStatusStats.OP_FILE_STATUS_USAGE
@@ -1244,52 +1381,73 @@ public class NNThroughputBenchmark {
     System.exit(-1);
   }
 
+  public static void runBenchmark(Configuration conf, List<String> args)
+      throws Exception {
+    NNThroughputBenchmark bench = null;
+    try {
+      bench = new NNThroughputBenchmark(conf);
+      bench.run(args.toArray(new String[]{}));
+    } finally {
+      if(bench != null)
+        bench.close();
+    }
+  }
+
   /**
    * Main method of the benchmark.
-   * @param args command line parameters
+   * @param aArgs command line parameters
    */
-  public static void runBenchmark(Configuration conf, List<String> args) throws Exception {
+  @Override // Tool
+  public int run(String[] aArgs) throws Exception {
+    List<String> args = new ArrayList<String>(Arrays.asList(aArgs));
     if(args.size() < 2 || ! args.get(0).startsWith("-op"))
       printUsage();
 
     String type = args.get(1);
     boolean runAll = OperationStatsBase.OP_ALL_NAME.equals(type);
 
-    NNThroughputBenchmark bench = null;
+    // Start the NameNode
+    String[] argv = new String[] {};
+    nameNode = NameNode.createNameNode(argv, config);
+    nameNodeProto = nameNode.getRpcServer();
+
     List<OperationStatsBase> ops = new ArrayList<OperationStatsBase>();
     OperationStatsBase opStat = null;
     try {
-      bench = new NNThroughputBenchmark(conf);
       if(runAll || CreateFileStats.OP_CREATE_NAME.equals(type)) {
-        opStat = bench.new CreateFileStats(args);
+        opStat = new CreateFileStats(args);
+        ops.add(opStat);
+      }
+      if(runAll || MkdirsStats.OP_MKDIRS_NAME.equals(type)) {
+        opStat = new MkdirsStats(args);
         ops.add(opStat);
       }
       if(runAll || OpenFileStats.OP_OPEN_NAME.equals(type)) {
-        opStat = bench.new OpenFileStats(args);
+        opStat = new OpenFileStats(args);
         ops.add(opStat);
       }
       if(runAll || DeleteFileStats.OP_DELETE_NAME.equals(type)) {
-        opStat = bench.new DeleteFileStats(args);
+        opStat = new DeleteFileStats(args);
         ops.add(opStat);
       }
       if(runAll || FileStatusStats.OP_FILE_STATUS_NAME.equals(type)) {
-        opStat = bench.new FileStatusStats(args);
+        opStat = new FileStatusStats(args);
         ops.add(opStat);
       }
       if(runAll || RenameFileStats.OP_RENAME_NAME.equals(type)) {
-        opStat = bench.new RenameFileStats(args);
+        opStat = new RenameFileStats(args);
         ops.add(opStat);
       }
       if(runAll || BlockReportStats.OP_BLOCK_REPORT_NAME.equals(type)) {
-        opStat = bench.new BlockReportStats(args);
+        opStat = new BlockReportStats(args);
         ops.add(opStat);
       }
       if(runAll || ReplicationStats.OP_REPLICATION_NAME.equals(type)) {
-        opStat = bench.new ReplicationStats(args);
+        opStat = new ReplicationStats(args);
         ops.add(opStat);
       }
       if(runAll || CleanAllStats.OP_CLEAN_NAME.equals(type)) {
-        opStat = bench.new CleanAllStats(args);
+        opStat = new CleanAllStats(args);
         ops.add(opStat);
       }
       if(ops.size() == 0)
@@ -1308,14 +1466,28 @@ public class NNThroughputBenchmark {
     } catch(Exception e) {
       LOG.error(StringUtils.stringifyException(e));
       throw e;
+    }
+    return 0;
+  }
+
+  public static void main(String[] args) throws Exception {
+    NNThroughputBenchmark bench = null;
+    try {
+      bench = new NNThroughputBenchmark(new HdfsConfiguration());
+      ToolRunner.run(bench, args);
     } finally {
       if(bench != null)
         bench.close();
     }
   }
 
-  public static void main(String[] args) throws Exception {
-    runBenchmark(new HdfsConfiguration(), 
-                  new ArrayList<String>(Arrays.asList(args)));
+  @Override // Configurable
+  public void setConf(Configuration conf) {
+    config = conf;
+  }
+
+  @Override // Configurable
+  public Configuration getConf() {
+    return config;
   }
 }

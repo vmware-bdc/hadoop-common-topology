@@ -31,7 +31,6 @@ import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
-import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.ipc.RPC.Server;
@@ -55,7 +54,7 @@ import com.google.protobuf.BlockingService;
  * Benchmark for protobuf RPC.
  * Run with --help option for usage.
  */
-public class RPCCallBenchmark implements Tool, Configurable {
+public class RPCCallBenchmark implements Tool {
   private Configuration conf;
   private AtomicLong callCount = new AtomicLong(0);
   private static ThreadMXBean threadBean =
@@ -67,7 +66,7 @@ public class RPCCallBenchmark implements Tool, Configurable {
     private int serverReaderThreads = 1;
     private int clientThreads = 0;
     private String host = "0.0.0.0";
-    private int port = 12345;
+    private int port = 0;
     public int secondsToRun = 15;
     private int msgSize = 1024;
     public Class<? extends RpcEngine> rpcEngine =
@@ -201,11 +200,21 @@ public class RPCCallBenchmark implements Tool, Configurable {
       }
     }
     
+    public int getPort() {
+      if (port == 0) {
+        port = NetUtils.getFreeSocketPort();
+        if (port == 0) {
+          throw new RuntimeException("Could not find a free port");
+        }
+      }
+      return port;
+    }
+
     @Override
     public String toString() {
       return "rpcEngine=" + rpcEngine + "\nserverThreads=" + serverThreads
           + "\nserverReaderThreads=" + serverReaderThreads + "\nclientThreads="
-          + clientThreads + "\nhost=" + host + "\nport=" + port
+          + clientThreads + "\nhost=" + host + "\nport=" + getPort()
           + "\nsecondsToRun=" + secondsToRun + "\nmsgSize=" + msgSize;
     }
   }
@@ -227,11 +236,14 @@ public class RPCCallBenchmark implements Tool, Configurable {
       BlockingService service = TestProtobufRpcProto
           .newReflectiveBlockingService(serverImpl);
 
-      server = RPC.getServer(TestRpcService.class, service,
-          opts.host, opts.port, opts.serverThreads, false, conf, null);
+      server = new RPC.Builder(conf).setProtocol(TestRpcService.class)
+          .setInstance(service).setBindAddress(opts.host).setPort(opts.getPort())
+          .setNumHandlers(opts.serverThreads).setVerbose(false).build();
     } else if (opts.rpcEngine == WritableRpcEngine.class) {
-      server = RPC.getServer(TestProtocol.class, new TestRPC.TestImpl(),
-          opts.host, opts.port, opts.serverThreads, false, conf, null);
+      server = new RPC.Builder(conf).setProtocol(TestProtocol.class)
+          .setInstance(new TestRPC.TestImpl()).setBindAddress(opts.host)
+          .setPort(opts.getPort()).setNumHandlers(opts.serverThreads)
+          .setVerbose(false).build();
     } else {
       throw new RuntimeException("Bad engine: " + opts.rpcEngine);
     }
@@ -375,7 +387,7 @@ public class RPCCallBenchmark implements Tool, Configurable {
    * Create a client proxy for the specified engine.
    */
   private RpcServiceWrapper createRpcClient(MyOptions opts) throws IOException {
-    InetSocketAddress addr = NetUtils.createSocketAddr(opts.host, opts.port);
+    InetSocketAddress addr = NetUtils.createSocketAddr(opts.host, opts.getPort());
     
     if (opts.rpcEngine == ProtobufRpcEngine.class) {
       final TestRpcService proxy = RPC.getProxy(TestRpcService.class, 0, addr, conf);
@@ -390,7 +402,7 @@ public class RPCCallBenchmark implements Tool, Configurable {
         }
       };
     } else if (opts.rpcEngine == WritableRpcEngine.class) {
-      final TestProtocol proxy = (TestProtocol)RPC.getProxy(
+      final TestProtocol proxy = RPC.getProxy(
           TestProtocol.class, TestProtocol.versionID, addr, conf);
       return new RpcServiceWrapper() {
         @Override

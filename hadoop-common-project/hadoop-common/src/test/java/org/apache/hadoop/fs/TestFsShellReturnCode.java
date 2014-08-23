@@ -20,11 +20,13 @@ package org.apache.hadoop.fs;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.PrintStream;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -32,13 +34,13 @@ import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.ftpserver.command.impl.STAT;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.shell.CommandFactory;
 import org.apache.hadoop.fs.shell.FsCommand;
 import org.apache.hadoop.fs.shell.PathData;
 import org.apache.hadoop.io.IOUtils;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY;
+import org.apache.hadoop.util.Shell;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -122,20 +124,22 @@ public class TestFsShellReturnCode {
    * 
    * @throws Exception
    */
-  @Test
+  @Test (timeout = 30000)
   public void testChmod() throws Exception {
+    Path p1 = new Path(TEST_ROOT_DIR, "testChmod/fileExists");
 
-    final String f1 = TEST_ROOT_DIR + "/" + "testChmod/fileExists";
-    final String f2 = TEST_ROOT_DIR + "/" + "testChmod/fileDoesNotExist";
-    final String f3 = TEST_ROOT_DIR + "/" + "testChmod/nonExistingfiles*";
+    final String f1 = p1.toUri().getPath();
+    final String f2 = new Path(TEST_ROOT_DIR, "testChmod/fileDoesNotExist")
+      .toUri().getPath();
+    final String f3 = new Path(TEST_ROOT_DIR, "testChmod/nonExistingfiles*")
+      .toUri().getPath();
 
-    Path p1 = new Path(f1);
+    final Path p4 = new Path(TEST_ROOT_DIR, "testChmod/file1");
+    final Path p5 = new Path(TEST_ROOT_DIR, "testChmod/file2");
+    final Path p6 = new Path(TEST_ROOT_DIR, "testChmod/file3");
 
-    final Path p4 = new Path(TEST_ROOT_DIR + "/" + "testChmod/file1");
-    final Path p5 = new Path(TEST_ROOT_DIR + "/" + "testChmod/file2");
-    final Path p6 = new Path(TEST_ROOT_DIR + "/" + "testChmod/file3");
-
-    final String f7 = TEST_ROOT_DIR + "/" + "testChmod/file*";
+    final String f7 = new Path(TEST_ROOT_DIR, "testChmod/file*").toUri()
+      .getPath();
 
     // create and write test file
     writeFile(fileSys, p1);
@@ -176,20 +180,23 @@ public class TestFsShellReturnCode {
    * 
    * @throws Exception
    */
-  @Test
+  @Test (timeout = 30000)
   public void testChown() throws Exception {
+    Path p1 = new Path(TEST_ROOT_DIR, "testChown/fileExists");
 
-    final String f1 = TEST_ROOT_DIR + "/" + "testChown/fileExists";
-    final String f2 = TEST_ROOT_DIR + "/" + "testChown/fileDoesNotExist";
-    final String f3 = TEST_ROOT_DIR + "/" + "testChown/nonExistingfiles*";
+    final String f1 = p1.toUri().getPath();
+    final String f2 = new Path(TEST_ROOT_DIR, "testChown/fileDoesNotExist")
+      .toUri().getPath();
+    final String f3 = new Path(TEST_ROOT_DIR, "testChown/nonExistingfiles*")
+      .toUri().getPath();
 
-    Path p1 = new Path(f1);
 
-    final Path p4 = new Path(TEST_ROOT_DIR + "/" + "testChown/file1");
-    final Path p5 = new Path(TEST_ROOT_DIR + "/" + "testChown/file2");
-    final Path p6 = new Path(TEST_ROOT_DIR + "/" + "testChown/file3");
+    final Path p4 = new Path(TEST_ROOT_DIR, "testChown/file1");
+    final Path p5 = new Path(TEST_ROOT_DIR, "testChown/file2");
+    final Path p6 = new Path(TEST_ROOT_DIR, "testChown/file3");
 
-    final String f7 = TEST_ROOT_DIR + "/" + "testChown/file*";
+    final String f7 = new Path(TEST_ROOT_DIR, "testChown/file*").toUri()
+      .getPath();
 
     // create and write test file
     writeFile(fileSys, p1);
@@ -229,20 +236,22 @@ public class TestFsShellReturnCode {
    * 
    * @throws Exception
    */
-  @Test
+  @Test (timeout = 30000)
   public void testChgrp() throws Exception {
+    Path p1 = new Path(TEST_ROOT_DIR, "testChgrp/fileExists");
 
-    final String f1 = TEST_ROOT_DIR + "/" + "testChgrp/fileExists";
-    final String f2 = TEST_ROOT_DIR + "/" + "testChgrp/fileDoesNotExist";
-    final String f3 = TEST_ROOT_DIR + "/" + "testChgrp/nonExistingfiles*";
+    final String f1 = p1.toUri().getPath();
+    final String f2 = new Path(TEST_ROOT_DIR, "testChgrp/fileDoesNotExist")
+      .toUri().getPath();
+    final String f3 = new Path(TEST_ROOT_DIR, "testChgrp/nonExistingfiles*")
+      .toUri().getPath();
 
-    Path p1 = new Path(f1);
+    final Path p4 = new Path(TEST_ROOT_DIR, "testChgrp/file1");
+    final Path p5 = new Path(TEST_ROOT_DIR, "testChgrp/file2");
+    final Path p6 = new Path(TEST_ROOT_DIR, "testChgrp/file3");
 
-    final Path p4 = new Path(TEST_ROOT_DIR + "/" + "testChgrp/file1");
-    final Path p5 = new Path(TEST_ROOT_DIR + "/" + "testChgrp/file2");
-    final Path p6 = new Path(TEST_ROOT_DIR + "/" + "testChgrp/file3");
-
-    final String f7 = TEST_ROOT_DIR + "/" + "testChgrp/file*";
+    final String f7 = new Path(TEST_ROOT_DIR, "testChgrp/file*").toUri()
+      .getPath();
 
     // create and write test file
     writeFile(fileSys, p1);
@@ -272,7 +281,7 @@ public class TestFsShellReturnCode {
     change(1, null, "admin", f2, f7);
   }
   
-  @Test
+  @Test (timeout = 30000)
   public void testGetWithInvalidSourcePathShouldNotDisplayNullInConsole()
       throws Exception {
     Configuration conf = new Configuration();
@@ -289,8 +298,8 @@ public class TestFsShellReturnCode {
       fileSys.mkdirs(tdir);
       String[] args = new String[3];
       args[0] = "-get";
-      args[1] = tdir+"/invalidSrc";
-      args[2] = tdir+"/invalidDst";
+      args[1] = new Path(tdir.toUri().getPath(), "/invalidSrc").toString();
+      args[2] = new Path(tdir.toUri().getPath(), "/invalidDst").toString();
       assertTrue("file exists", !fileSys.exists(new Path(args[1])));
       assertTrue("file exists", !fileSys.exists(new Path(args[2])));
       int run = shell.run(args);
@@ -304,7 +313,47 @@ public class TestFsShellReturnCode {
     }
   }
   
-  @Test
+  @Test (timeout = 30000)
+  public void testRmWithNonexistentGlob() throws Exception {
+    Configuration conf = new Configuration();
+    FsShell shell = new FsShell();
+    shell.setConf(conf);
+    final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    final PrintStream err = new PrintStream(bytes);
+    final PrintStream oldErr = System.err;
+    System.setErr(err);
+    final String results;
+    try {
+      int exit = shell.run(new String[]{"-rm", "nomatch*"});
+      assertEquals(1, exit);
+      results = bytes.toString();
+      assertTrue(results.contains("rm: `nomatch*': No such file or directory"));
+    } finally {
+      IOUtils.closeStream(err);
+      System.setErr(oldErr);
+    }
+  }
+
+  @Test (timeout = 30000)
+  public void testRmForceWithNonexistentGlob() throws Exception {
+    Configuration conf = new Configuration();
+    FsShell shell = new FsShell();
+    shell.setConf(conf);
+    final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    final PrintStream err = new PrintStream(bytes);
+    final PrintStream oldErr = System.err;
+    System.setErr(err);
+    try {
+      int exit = shell.run(new String[]{"-rm", "-f", "nomatch*"});
+      assertEquals(0, exit);
+      assertTrue(bytes.toString().isEmpty());
+    } finally {
+      IOUtils.closeStream(err);
+      System.setErr(oldErr);
+    }
+  }
+
+  @Test (timeout = 30000)
   public void testInvalidDefaultFS() throws Exception {
     // if default fs doesn't exist or is invalid, but the path provided in 
     // arguments is valid - fsshell should work
@@ -335,7 +384,7 @@ public class TestFsShellReturnCode {
     
   }
   
-  @Test
+  @Test (timeout = 30000)
   public void testInterrupt() throws Exception {
     MyFsShell shell = new MyFsShell();
     shell.setConf(new Configuration());
@@ -360,6 +409,65 @@ public class TestFsShellReturnCode {
     // after descent into dir
     assertEquals(2, InterruptCommand.processed);
     assertEquals(130, exitCode);
+  }
+
+  /**
+   * Tests combinations of valid and invalid user and group arguments to chown.
+   */
+  @Test
+  public void testChownUserAndGroupValidity() {
+    // This test only covers argument parsing, so override to skip processing.
+    FsCommand chown = new FsShellPermissions.Chown() {
+      @Override
+      protected void processArgument(PathData item) {
+      }
+    };
+    chown.setConf(new Configuration());
+
+    // The following are valid (no exception expected).
+    chown.run("user", "/path");
+    chown.run("user:group", "/path");
+    chown.run(":group", "/path");
+
+    // The following are valid only on Windows.
+    assertValidArgumentsOnWindows(chown, "User With Spaces", "/path");
+    assertValidArgumentsOnWindows(chown, "User With Spaces:group", "/path");
+    assertValidArgumentsOnWindows(chown, "User With Spaces:Group With Spaces",
+      "/path");
+    assertValidArgumentsOnWindows(chown, "user:Group With Spaces", "/path");
+    assertValidArgumentsOnWindows(chown, ":Group With Spaces", "/path");
+
+    // The following are invalid (exception expected).
+    assertIllegalArguments(chown, "us!er", "/path");
+    assertIllegalArguments(chown, "us^er", "/path");
+    assertIllegalArguments(chown, "user:gr#oup", "/path");
+    assertIllegalArguments(chown, "user:gr%oup", "/path");
+    assertIllegalArguments(chown, ":gr#oup", "/path");
+    assertIllegalArguments(chown, ":gr%oup", "/path");
+  }
+
+  /**
+   * Tests valid and invalid group arguments to chgrp.
+   */
+  @Test
+  public void testChgrpGroupValidity() {
+    // This test only covers argument parsing, so override to skip processing.
+    FsCommand chgrp = new FsShellPermissions.Chgrp() {
+      @Override
+      protected void processArgument(PathData item) {
+      }
+    };
+    chgrp.setConf(new Configuration());
+
+    // The following are valid (no exception expected).
+    chgrp.run("group", "/path");
+
+    // The following are valid only on Windows.
+    assertValidArgumentsOnWindows(chgrp, "Group With Spaces", "/path");
+
+    // The following are invalid (exception expected).
+    assertIllegalArguments(chgrp, ":gr#oup", "/path");
+    assertIllegalArguments(chgrp, ":gr%oup", "/path");
   }
   
   static class LocalFileSystemExtn extends LocalFileSystem {
@@ -412,6 +520,7 @@ public class TestFsShellReturnCode {
   }
   
   static class MyFsShell extends FsShell {
+    @Override
     protected void registerCommands(CommandFactory factory) {
       factory.addClass(InterruptCommand.class, "-testInterrupt");
     }
@@ -433,4 +542,37 @@ public class TestFsShellReturnCode {
       }
     }
   }  
+
+  /**
+   * Asserts that for the given command, the given arguments are considered
+   * invalid.  The expectation is that the command will throw
+   * IllegalArgumentException.
+   * 
+   * @param cmd FsCommand to check
+   * @param args String... arguments to check
+   */
+  private static void assertIllegalArguments(FsCommand cmd, String... args) {
+    try {
+      cmd.run(args);
+      fail("Expected IllegalArgumentException from args: " +
+        Arrays.toString(args));
+    } catch (IllegalArgumentException e) {
+    }
+  }
+
+  /**
+   * Asserts that for the given command, the given arguments are considered valid
+   * on Windows, but invalid elsewhere.
+   * 
+   * @param cmd FsCommand to check
+   * @param args String... arguments to check
+   */
+  private static void assertValidArgumentsOnWindows(FsCommand cmd,
+      String... args) {
+    if (Shell.WINDOWS) {
+      cmd.run(args);
+    } else {
+      assertIllegalArguments(cmd, args);
+    }
+  }
 }

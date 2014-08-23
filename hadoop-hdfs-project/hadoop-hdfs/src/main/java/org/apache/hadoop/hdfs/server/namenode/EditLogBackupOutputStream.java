@@ -21,6 +21,8 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.Arrays;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.NameNodeProxies;
 import org.apache.hadoop.hdfs.server.common.Storage;
@@ -41,7 +43,8 @@ import org.apache.hadoop.security.UserGroupInformation;
  *  int, int, byte[])
  */
 class EditLogBackupOutputStream extends EditLogOutputStream {
-  static int DEFAULT_BUFFER_SIZE = 256;
+  private static final Log LOG = LogFactory.getLog(EditLogFileOutputStream.class);
+  static final int DEFAULT_BUFFER_SIZE = 256;
 
   private final JournalProtocol backupNode;  // RPC proxy to backup node
   private final NamenodeRegistration bnRegistration;  // backup node registration
@@ -83,7 +86,7 @@ class EditLogBackupOutputStream extends EditLogOutputStream {
    * There is no persistent storage. Just clear the buffers.
    */
   @Override // EditLogOutputStream
-  public void create() throws IOException {
+  public void create(int layoutVersion) throws IOException {
     assert doubleBuf.isFlushed() : "previous data is not flushed yet";
     this.doubleBuf = new EditsDoubleBuffer(DEFAULT_BUFFER_SIZE);
   }
@@ -114,9 +117,14 @@ class EditLogBackupOutputStream extends EditLogOutputStream {
   }
 
   @Override // EditLogOutputStream
-  protected void flushAndSync() throws IOException {
+  protected void flushAndSync(boolean durable) throws IOException {
     assert out.getLength() == 0 : "Output buffer is not empty";
     
+    if (doubleBuf.isFlushed()) {
+      LOG.info("Nothing to flush");
+      return;
+    }
+
     int numReadyTxns = doubleBuf.countReadyTxns();
     long firstTxToFlush = doubleBuf.getFirstReadyTxId();
     

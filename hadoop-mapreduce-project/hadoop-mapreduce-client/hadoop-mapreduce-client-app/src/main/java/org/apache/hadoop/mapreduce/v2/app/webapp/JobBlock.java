@@ -20,7 +20,6 @@ package org.apache.hadoop.mapreduce.v2.app.webapp;
 
 import static org.apache.hadoop.mapreduce.v2.app.webapp.AMParams.JOB_ID;
 import static org.apache.hadoop.yarn.util.StringHelper.join;
-import static org.apache.hadoop.yarn.util.StringHelper.ujoin;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI._EVEN;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI._INFO_WRAP;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI._ODD;
@@ -31,6 +30,7 @@ import static org.apache.hadoop.yarn.webapp.view.JQueryUI._TH;
 import java.util.Date;
 import java.util.List;
 
+import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.mapreduce.v2.api.records.AMInfo;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
@@ -39,9 +39,8 @@ import org.apache.hadoop.mapreduce.v2.app.webapp.dao.AMAttemptInfo;
 import org.apache.hadoop.mapreduce.v2.app.webapp.dao.JobInfo;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.mapreduce.v2.util.MRApps.TaskAttemptStateUI;
+import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.util.StringUtils;
-import org.apache.hadoop.yarn.api.records.NodeId;
-import org.apache.hadoop.yarn.util.BuilderUtils;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.DIV;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TABLE;
@@ -106,7 +105,8 @@ public class JobBlock extends HtmlBlock {
       table.tr().
         td(String.valueOf(attempt.getAttemptId())).
         td(new Date(attempt.getStartTime()).toString()).
-        td().a(".nodelink", url("http://", attempt.getNodeHttpAddress()), 
+        td().a(".nodelink", url(MRWebAppUtil.getYARNWebappScheme(),
+            attempt.getNodeHttpAddress()),
             attempt.getNodeHttpAddress())._().
         td().a(".logslink", url(attempt.getLogsLink()), 
             "logs")._().
@@ -127,31 +127,28 @@ public class JobBlock extends HtmlBlock {
             th(_TH, "Running").
             th(_TH, "Complete")._().
           tr(_ODD).
-            th().
-              a(url("tasks", jid, "m"), "Map")._().
+            th("Map").
             td().
               div(_PROGRESSBAR).
                 $title(join(jinfo.getMapProgressPercent(), '%')). // tooltip
                 div(_PROGRESSBAR_VALUE).
                   $style(join("width:", jinfo.getMapProgressPercent(), '%'))._()._()._().
-            td(String.valueOf(jinfo.getMapsTotal())).
-            td(String.valueOf(jinfo.getMapsPending())).
-            td(String.valueOf(jinfo.getMapsRunning())).
-            td(String.valueOf(jinfo.getMapsCompleted()))._().
+            td().a(url("tasks", jid, "m", "ALL"),String.valueOf(jinfo.getMapsTotal()))._().
+            td().a(url("tasks", jid, "m", "PENDING"),String.valueOf(jinfo.getMapsPending()))._().
+            td().a(url("tasks", jid, "m", "RUNNING"),String.valueOf(jinfo.getMapsRunning()))._().
+            td().a(url("tasks", jid, "m", "COMPLETED"),String.valueOf(jinfo.getMapsCompleted()))._()._().
           tr(_EVEN).
-            th().
-              a(url("tasks", jid, "r"), "Reduce")._().
+            th("Reduce").
             td().
               div(_PROGRESSBAR).
                 $title(join(jinfo.getReduceProgressPercent(), '%')). // tooltip
                 div(_PROGRESSBAR_VALUE).
                   $style(join("width:", jinfo.getReduceProgressPercent(), '%'))._()._()._().
-            td(String.valueOf(jinfo.getReducesTotal())).
-            td(String.valueOf(jinfo.getReducesPending())).
-            td(String.valueOf(jinfo.getReducesRunning())).
-            td(String.valueOf(jinfo.getReducesCompleted()))._()
+            td().a(url("tasks", jid, "r", "ALL"),String.valueOf(jinfo.getReducesTotal()))._().
+            td().a(url("tasks", jid, "r", "PENDING"),String.valueOf(jinfo.getReducesPending()))._().
+            td().a(url("tasks", jid, "r", "RUNNING"),String.valueOf(jinfo.getReducesRunning()))._().
+            td().a(url("tasks", jid, "r", "COMPLETED"),String.valueOf(jinfo.getReducesCompleted()))._()._()
           ._().
-
         // Attempts table
         table("#job").
         tr().

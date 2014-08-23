@@ -47,6 +47,7 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
       this.after = null;
     }
 
+    @Override
     public String toString() {
       return super.toString();
     }
@@ -54,6 +55,8 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
 
   private DoubleLinkedElement<T> head;
   private DoubleLinkedElement<T> tail;
+
+  private LinkedSetIterator bookmark;
 
   /**
    * @param initCapacity
@@ -68,6 +71,7 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
     super(initCapacity, maxLoadFactor, minLoadFactor);
     head = null;
     tail = null;
+    bookmark = new LinkedSetIterator();
   }
 
   public LightWeightLinkedSet() {
@@ -79,6 +83,7 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
    *
    * @return true if the element was not present in the table, false otherwise
    */
+  @Override
   protected boolean addElem(final T element) {
     // validate element
     if (element == null) {
@@ -88,7 +93,7 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
     final int hashCode = element.hashCode();
     final int index = getIndex(hashCode);
     // return false if already present
-    if (containsElem(index, element, hashCode)) {
+    if (getContainedElem(index, element, hashCode) != null) {
       return false;
     }
 
@@ -109,6 +114,12 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
     tail = le;
     if (head == null) {
       head = le;
+      bookmark.next = head;
+    }
+
+    // Update bookmark, if necessary.
+    if (bookmark.next == null) {
+      bookmark.next = le;
     }
     return true;
   }
@@ -118,6 +129,7 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
    *
    * @return Return the entry with the element if exists. Otherwise return null.
    */
+  @Override
   protected DoubleLinkedElement<T> removeElem(final T key) {
     DoubleLinkedElement<T> found = (DoubleLinkedElement<T>) (super
         .removeElem(key));
@@ -137,6 +149,11 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
     }
     if (tail == found) {
       tail = tail.before;
+    }
+
+    // Update bookmark, if necessary.
+    if (found == this.bookmark.next) {
+      this.bookmark.next = found.after;
     }
     return found;
   }
@@ -162,6 +179,7 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
    *
    * @return first element
    */
+  @Override
   public List<T> pollN(int n) {
     if (n >= size) {
       // if we need to remove all elements then do fast polling
@@ -182,6 +200,7 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
    * link list, don't worry about hashtable - faster version of the parent
    * method.
    */
+  @Override
   public List<T> pollAll() {
     List<T> retList = new ArrayList<T>(size);
     while (head != null) {
@@ -212,6 +231,7 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
     return a;
   }
 
+  @Override
   public Iterator<T> iterator() {
     return new LinkedSetIterator();
   }
@@ -251,9 +271,30 @@ public class LightWeightLinkedSet<T> extends LightWeightHashSet<T> {
   /**
    * Clear the set. Resize it to the original capacity.
    */
+  @Override
   public void clear() {
     super.clear();
     this.head = null;
     this.tail = null;
+    this.resetBookmark();
+  }
+
+  /**
+   * Returns a new iterator starting at the bookmarked element.
+   *
+   * @return the iterator to the bookmarked element.
+   */
+  public Iterator<T> getBookmark() {
+    LinkedSetIterator toRet = new LinkedSetIterator();
+    toRet.next = this.bookmark.next;
+    this.bookmark = toRet;
+    return toRet;
+  }
+
+  /**
+   * Resets the bookmark to the beginning of the list.
+   */
+  public void resetBookmark() {
+    this.bookmark.next = this.head;
   }
 }

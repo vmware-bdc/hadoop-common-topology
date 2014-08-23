@@ -43,6 +43,7 @@ abstract public class FsCommand extends Command {
    * @param factory where to register the class
    */
   public static void registerCommands(CommandFactory factory) {
+    factory.registerCommands(AclCommands.class);
     factory.registerCommands(CopyCommands.class);
     factory.registerCommands(Count.class);
     factory.registerCommands(Delete.class);
@@ -57,6 +58,8 @@ abstract public class FsCommand extends Command {
     factory.registerCommands(Tail.class);
     factory.registerCommands(Test.class);
     factory.registerCommands(Touch.class);
+    factory.registerCommands(SnapshotCommands.class);
+    factory.registerCommands(XAttrCommands.class);
   }
 
   protected FsCommand() {}
@@ -73,6 +76,7 @@ abstract public class FsCommand extends Command {
   
   // abstract method that normally is invoked by runall() which is
   // overridden below
+  @Override
   protected void run(Path path) throws IOException {
     throw new RuntimeException("not supposed to get here");
   }

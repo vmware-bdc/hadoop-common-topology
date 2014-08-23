@@ -35,24 +35,29 @@ import javax.servlet.http.HttpServletRequest;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.Test;
 
 public class TestServletFilter extends HttpServerFunctionalTest {
-  static final Log LOG = LogFactory.getLog(HttpServer.class);
+  static final Log LOG = LogFactory.getLog(HttpServer2.class);
   static volatile String uri = null; 
 
   /** A very simple filter which record the uri filtered. */
   static public class SimpleFilter implements Filter {
     private FilterConfig filterConfig = null;
 
+    @Override
     public void init(FilterConfig filterConfig) throws ServletException {
       this.filterConfig = filterConfig;
     }
 
+    @Override
     public void destroy() {
       this.filterConfig = null;
     }
 
+    @Override
     public void doFilter(ServletRequest request, ServletResponse response,
         FilterChain chain) throws IOException, ServletException {
       if (filterConfig == null)
@@ -67,6 +72,7 @@ public class TestServletFilter extends HttpServerFunctionalTest {
     static public class Initializer extends FilterInitializer {
       public Initializer() {}
 
+      @Override
       public void initFilter(FilterContainer container, Configuration conf) {
         container.addFilter("simple", SimpleFilter.class.getName(), null);
       }
@@ -99,9 +105,9 @@ public class TestServletFilter extends HttpServerFunctionalTest {
     Configuration conf = new Configuration();
     
     //start a http server with CountingFilter
-    conf.set(HttpServer.FILTER_INITIALIZER_PROPERTY,
+    conf.set(HttpServer2.FILTER_INITIALIZER_PROPERTY,
         SimpleFilter.Initializer.class.getName());
-    HttpServer http = createTestServer(conf);
+    HttpServer2 http = createTestServer(conf);
     http.start();
 
     final String fsckURL = "/fsck";
@@ -120,7 +126,8 @@ public class TestServletFilter extends HttpServerFunctionalTest {
     }
 
     //access the urls as the sequence
-    final String prefix = "http://localhost:" + http.getPort();
+    final String prefix = "http://"
+        + NetUtils.getHostPortString(http.getConnectorAddress(0));
     try {
       for(int i = 0; i < sequence.length; i++) {
         access(prefix + urls[sequence[i]]);
@@ -149,6 +156,7 @@ public class TestServletFilter extends HttpServerFunctionalTest {
       public Initializer() {
       }
 
+      @Override
       public void initFilter(FilterContainer container, Configuration conf) {
         container.addFilter("simple", ErrorFilter.class.getName(), null);
       }
@@ -158,10 +166,10 @@ public class TestServletFilter extends HttpServerFunctionalTest {
   @Test
   public void testServletFilterWhenInitThrowsException() throws Exception {
     Configuration conf = new Configuration();
-    // start a http server with CountingFilter
-    conf.set(HttpServer.FILTER_INITIALIZER_PROPERTY,
+    // start a http server with ErrorFilter
+    conf.set(HttpServer2.FILTER_INITIALIZER_PROPERTY,
         ErrorFilter.Initializer.class.getName());
-    HttpServer http = createTestServer(conf);
+    HttpServer2 http = createTestServer(conf);
     try {
       http.start();
       fail("expecting exception");
@@ -169,4 +177,25 @@ public class TestServletFilter extends HttpServerFunctionalTest {
       assertTrue( e.getMessage().contains("Problem in starting http server. Server handlers failed"));
     }
   }
+  
+  /**
+   * Similar to the above test case, except that it uses a different API to add the
+   * filter. Regression test for HADOOP-8786.
+   */
+  @Test
+  public void testContextSpecificServletFilterWhenInitThrowsException()
+      throws Exception {
+    Configuration conf = new Configuration();
+    HttpServer2 http = createTestServer(conf);
+    HttpServer2.defineFilter(http.webAppContext,
+        "ErrorFilter", ErrorFilter.class.getName(),
+        null, null);
+    try {
+      http.start();
+      fail("expecting exception");
+    } catch (IOException e) {
+      GenericTestUtils.assertExceptionContains("Unable to initialize WebAppContext", e);
+    }
+  }
+
 }

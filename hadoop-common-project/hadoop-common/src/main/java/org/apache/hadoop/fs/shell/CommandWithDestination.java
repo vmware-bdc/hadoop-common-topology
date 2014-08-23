@@ -18,19 +18,31 @@
 
 package org.apache.hadoop.fs.shell;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.EnumSet;
+import java.util.Iterator;
 import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.NoSuchElementException;
 
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FilterFileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.shell.PathExceptions.PathExistsException;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIOException;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIsDirectoryException;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIsNotDirectoryException;
-import org.apache.hadoop.fs.shell.PathExceptions.PathNotFoundException;
-import org.apache.hadoop.fs.shell.PathExceptions.PathOperationException;
+import org.apache.hadoop.fs.PathExistsException;
+import org.apache.hadoop.fs.PathIOException;
+import org.apache.hadoop.fs.PathIsDirectoryException;
+import org.apache.hadoop.fs.PathIsNotDirectoryException;
+import org.apache.hadoop.fs.PathNotFoundException;
+import org.apache.hadoop.fs.PathOperationException;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclUtil;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.IOUtils;
 
 /**
@@ -45,6 +57,17 @@ abstract class CommandWithDestination extends FsCommand {
   private boolean verifyChecksum = true;
   private boolean writeChecksum = true;
   
+  /**
+   * The name of the raw xattr namespace. It would be nice to use
+   * XAttr.RAW.name() but we can't reference the hadoop-hdfs project.
+   */
+  private static final String RAW = "raw.";
+
+  /**
+   * The name of the reserved raw directory.
+   */
+  private static final String RESERVED_RAW = "/.reserved/raw";
+
   /**
    * 
    * This method is used to enable the force(-f)  option while copying the files.
@@ -64,6 +87,63 @@ abstract class CommandWithDestination extends FsCommand {
   }
   
   /**
+   * If true, the last modified time, last access time,
+   * owner, group and permission information of the source
+   * file will be preserved as far as target {@link FileSystem}
+   * implementation allows.
+   */
+  protected void setPreserve(boolean preserve) {
+    if (preserve) {
+      preserve(FileAttribute.TIMESTAMPS);
+      preserve(FileAttribute.OWNERSHIP);
+      preserve(FileAttribute.PERMISSION);
+    } else {
+      preserveStatus.clear();
+    }
+  }
+  
+  protected static enum FileAttribute {
+    TIMESTAMPS, OWNERSHIP, PERMISSION, ACL, XATTR;
+
+    public static FileAttribute getAttribute(char symbol) {
+      for (FileAttribute attribute : values()) {
+        if (attribute.name().charAt(0) == Character.toUpperCase(symbol)) {
+          return attribute;
+        }
+      }
+      throw new NoSuchElementException("No attribute for " + symbol);
+    }
+  }
+  
+  private EnumSet<FileAttribute> preserveStatus = 
+      EnumSet.noneOf(FileAttribute.class);
+  
+  /**
+   * Checks if the input attribute should be preserved or not
+   *
+   * @param attribute - Attribute to check
+   * @return boolean true if attribute should be preserved, false otherwise
+   */
+  private boolean shouldPreserve(FileAttribute attribute) {
+    return preserveStatus.contains(attribute);
+  }
+  
+  /**
+   * Add file attributes that need to be preserved. This method may be
+   * called multiple times to add attributes.
+   *
+   * @param fileAttribute - Attribute to add, one at a time
+   */
+  protected void preserve(FileAttribute fileAttribute) {
+    for (FileAttribute attribute : preserveStatus) {
+      if (attribute.equals(fileAttribute)) {
+        return;
+      }
+    }
+    preserveStatus.add(fileAttribute);
+  }
+
+  /**
    *  The last arg is expected to be a local path, if only one argument is
    *  given then the destination will be the current directory 
    *  @param args is the list of arguments
@@ -71,7 +151,16 @@ abstract class CommandWithDestination extends FsCommand {
   protected void getLocalDestination(LinkedList<String> args)
   throws IOException {
     String pathString = (args.size() < 2) ? Path.CUR_DIR : args.removeLast();
-    dst = new PathData(new File(pathString), getConf());
+    try {
+      dst = new PathData(new URI(pathString), getConf());
+    } catch (URISyntaxException e) {
+      if (Path.WINDOWS) {
+        // Unlike URI, PathData knows how to parse Windows drive-letter paths.
+        dst = new PathData(pathString, getConf());
+      } else {
+        throw new IOException("unexpected URISyntaxException", e);
+      }
+    }
   }
 
   /**
@@ -153,7 +242,7 @@ abstract class CommandWithDestination extends FsCommand {
   /**
    * Called with a source and target destination pair
    * @param src for the operation
-   * @param target for the operation
+   * @param dst for the operation
    * @throws IOException if anything goes wrong
    */
   protected void processPath(PathData src, PathData dst) throws IOException {
@@ -175,6 +264,8 @@ abstract class CommandWithDestination extends FsCommand {
       // modify dst as we descend to append the basename of the
       // current directory being processed
       dst = getTargetPath(src);
+      final boolean preserveRawXattrs =
+          checkPathsForReservedRaw(src.path, dst.path);
       if (dst.exists) {
         if (!dst.stat.isDirectory()) {
           throw new PathIsNotDirectoryException(dst.toString());
@@ -189,6 +280,9 @@ abstract class CommandWithDestination extends FsCommand {
         dst.refreshStatus(); // need to update stat to know it exists now
       }      
       super.recursePath(src);
+      if (dst.stat.isDirectory()) {
+        preserveAttributes(src, dst, preserveRawXattrs);
+      }
     } finally {
       dst = savedDst;
     }
@@ -214,11 +308,60 @@ abstract class CommandWithDestination extends FsCommand {
    * @param target where to copy the item
    * @throws IOException if copy fails
    */ 
-  protected void copyFileToTarget(PathData src, PathData target) throws IOException {
+  protected void copyFileToTarget(PathData src, PathData target)
+      throws IOException {
+    final boolean preserveRawXattrs =
+        checkPathsForReservedRaw(src.path, target.path);
     src.fs.setVerifyChecksum(verifyChecksum);
-    copyStreamToTarget(src.fs.open(src.path), target);
+    InputStream in = null;
+    try {
+      in = src.fs.open(src.path);
+      copyStreamToTarget(in, target);
+      preserveAttributes(src, target, preserveRawXattrs);
+    } finally {
+      IOUtils.closeStream(in);
+    }
   }
   
+  /**
+   * Check the source and target paths to ensure that they are either both in
+   * /.reserved/raw or neither in /.reserved/raw. If neither src nor target are
+   * in /.reserved/raw, then return false, indicating not to preserve raw.*
+   * xattrs. If both src/target are in /.reserved/raw, then return true,
+   * indicating raw.* xattrs should be preserved. If only one of src/target is
+   * in /.reserved/raw then throw an exception.
+   *
+   * @param src The source path to check. This should be a fully-qualified
+   *            path, not relative.
+   * @param target The target path to check. This should be a fully-qualified
+   *               path, not relative.
+   * @return true if raw.* xattrs should be preserved.
+   * @throws PathOperationException is only one of src/target are in
+   * /.reserved/raw.
+   */
+  private boolean checkPathsForReservedRaw(Path src, Path target)
+      throws PathOperationException {
+    final boolean srcIsRR = Path.getPathWithoutSchemeAndAuthority(src).
+        toString().startsWith(RESERVED_RAW);
+    final boolean dstIsRR = Path.getPathWithoutSchemeAndAuthority(target).
+        toString().startsWith(RESERVED_RAW);
+    boolean preserveRawXattrs = false;
+    if (srcIsRR && !dstIsRR) {
+      final String s = "' copy from '" + RESERVED_RAW + "' to non '" +
+          RESERVED_RAW + "'. Either both source and target must be in '" +
+          RESERVED_RAW + "' or neither.";
+      throw new PathOperationException("'" + src.toString() + s);
+    } else if (!srcIsRR && dstIsRR) {
+      final String s = "' copy from non '" + RESERVED_RAW +"' to '" +
+          RESERVED_RAW + "'. Either both source and target must be in '" +
+          RESERVED_RAW + "' or neither.";
+      throw new PathOperationException("'" + dst.toString() + s);
+    } else if (srcIsRR && dstIsRR) {
+      preserveRawXattrs = true;
+    }
+    return preserveRawXattrs;
+  }
+
   /**
    * Copies the stream contents to a temporary file.  If the copy is
    * successful, the temporary file will be renamed to the real path,
@@ -232,31 +375,121 @@ abstract class CommandWithDestination extends FsCommand {
     if (target.exists && (target.stat.isDirectory() || !overwrite)) {
       throw new PathExistsException(target.toString());
     }
-    target.fs.setWriteChecksum(writeChecksum);
-    PathData tempFile = null;
+    TargetFileSystem targetFs = new TargetFileSystem(target.fs);
     try {
-      tempFile = target.createTempFile(target+"._COPYING_");
-      FSDataOutputStream out = target.fs.create(tempFile.path, true);
-      IOUtils.copyBytes(in, out, getConf(), true);
+      PathData tempTarget = target.suffix("._COPYING_");
+      targetFs.setWriteChecksum(writeChecksum);
+      targetFs.writeStreamToFile(in, tempTarget);
+      targetFs.rename(tempTarget, target);
+    } finally {
+      targetFs.close(); // last ditch effort to ensure temp file is removed
+    }
+  }
+
+  /**
+   * Preserve the attributes of the source to the target.
+   * The method calls {@link #shouldPreserve(FileAttribute)} to check what
+   * attribute to preserve.
+   * @param src source to preserve
+   * @param target where to preserve attributes
+   * @param preserveRawXAttrs true if raw.* xattrs should be preserved
+   * @throws IOException if fails to preserve attributes
+   */
+  protected void preserveAttributes(PathData src, PathData target,
+      boolean preserveRawXAttrs)
+      throws IOException {
+    if (shouldPreserve(FileAttribute.TIMESTAMPS)) {
+      target.fs.setTimes(
+          target.path,
+          src.stat.getModificationTime(),
+          src.stat.getAccessTime());
+    }
+    if (shouldPreserve(FileAttribute.OWNERSHIP)) {
+      target.fs.setOwner(
+          target.path,
+          src.stat.getOwner(),
+          src.stat.getGroup());
+    }
+    if (shouldPreserve(FileAttribute.PERMISSION) ||
+        shouldPreserve(FileAttribute.ACL)) {
+      target.fs.setPermission(
+          target.path,
+          src.stat.getPermission());
+    }
+    if (shouldPreserve(FileAttribute.ACL)) {
+      FsPermission perm = src.stat.getPermission();
+      if (perm.getAclBit()) {
+        List<AclEntry> srcEntries =
+            src.fs.getAclStatus(src.path).getEntries();
+        List<AclEntry> srcFullEntries =
+            AclUtil.getAclFromPermAndEntries(perm, srcEntries);
+        target.fs.setAcl(target.path, srcFullEntries);
+      }
+    }
+    final boolean preserveXAttrs = shouldPreserve(FileAttribute.XATTR);
+    if (preserveXAttrs || preserveRawXAttrs) {
+      Map<String, byte[]> srcXAttrs = src.fs.getXAttrs(src.path);
+      if (srcXAttrs != null) {
+        Iterator<Entry<String, byte[]>> iter = srcXAttrs.entrySet().iterator();
+        while (iter.hasNext()) {
+          Entry<String, byte[]> entry = iter.next();
+          final String xattrName = entry.getKey();
+          if (xattrName.startsWith(RAW) || preserveXAttrs) {
+            target.fs.setXAttr(target.path, entry.getKey(), entry.getValue());
+          }
+        }
+      }
+    }
+  }
+
+  // Helper filter filesystem that registers created files as temp files to
+  // be deleted on exit unless successfully renamed
+  private static class TargetFileSystem extends FilterFileSystem {
+    TargetFileSystem(FileSystem fs) {
+      super(fs);
+    }
+
+    void writeStreamToFile(InputStream in, PathData target) throws IOException {
+      FSDataOutputStream out = null;
+      try {
+        out = create(target);
+        IOUtils.copyBytes(in, out, getConf(), true);
+      } finally {
+        IOUtils.closeStream(out); // just in case copyBytes didn't
+      }
+    }
+    
+    // tag created files as temp files
+    FSDataOutputStream create(PathData item) throws IOException {
+      try {
+        return create(item.path, true);
+      } finally { // might have been created but stream was interrupted
+        deleteOnExit(item.path);
+      }
+    }
+
+    void rename(PathData src, PathData target) throws IOException {
       // the rename method with an option to delete the target is deprecated
-      if (target.exists && !target.fs.delete(target.path, false)) {
+      if (target.exists && !delete(target.path, false)) {
         // too bad we don't know why it failed
         PathIOException e = new PathIOException(target.toString());
         e.setOperation("delete");
         throw e;
       }
-      if (!tempFile.fs.rename(tempFile.path, target.path)) {
+      if (!rename(src.path, target.path)) {
         // too bad we don't know why it failed
-        PathIOException e = new PathIOException(tempFile.toString());
+        PathIOException e = new PathIOException(src.toString());
         e.setOperation("rename");
         e.setTargetPath(target.toString());
         throw e;
       }
-      tempFile = null;
-    } finally {
-      if (tempFile != null) {
-        tempFile.fs.delete(tempFile.path, false);
-      }
+      // cancel delete on exit if rename is successful
+      cancelDeleteOnExit(src.path);
+    }
+    @Override
+    public void close() {
+      // purge any remaining temp files, but don't close underlying fs
+      processDeleteOnExit();
     }
   }
 }

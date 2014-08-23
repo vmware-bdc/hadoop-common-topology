@@ -19,8 +19,9 @@ package org.apache.hadoop.hdfs.server.namenode.metrics;
 
 import static org.apache.hadoop.test.MetricsAsserts.assertCounter;
 import static org.apache.hadoop.test.MetricsAsserts.assertGauge;
+import static org.apache.hadoop.test.MetricsAsserts.assertQuantileGauges;
 import static org.apache.hadoop.test.MetricsAsserts.getMetrics;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertTrue;
 
 import java.io.DataInputStream;
 import java.io.IOException;
@@ -37,13 +38,19 @@ import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
+import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
+import org.apache.hadoop.hdfs.server.datanode.DataNode;
+import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
+import org.apache.hadoop.metrics2.MetricsSource;
+import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.test.MetricsAsserts;
+import org.apache.hadoop.util.Time;
 import org.apache.log4j.Level;
 import org.junit.After;
 import org.junit.Before;
@@ -63,6 +70,9 @@ public class TestNameNodeMetrics {
   // Number of datanodes in the cluster
   private static final int DATANODE_COUNT = 3; 
   private static final int WAIT_GAUGE_VALUE_RETRIES = 20;
+  
+  // Rollover interval of percentile metrics (in seconds)
+  private static final int PERCENTILES_INTERVAL = 1;
 
   static {
     CONF.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, 100);
@@ -71,14 +81,17 @@ public class TestNameNodeMetrics {
         DFS_REPLICATION_INTERVAL);
     CONF.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 
         DFS_REPLICATION_INTERVAL);
-
+    CONF.set(DFSConfigKeys.DFS_METRICS_PERCENTILES_INTERVALS_KEY, 
+        "" + PERCENTILES_INTERVAL);
+    // Enable stale DataNodes checking
+    CONF.setBoolean(DFSConfigKeys.DFS_NAMENODE_AVOID_STALE_DATANODE_FOR_READ_KEY, true);
     ((Log4JLogger)LogFactory.getLog(MetricsAsserts.class))
       .getLogger().setLevel(Level.DEBUG);
   }
   
   private MiniDFSCluster cluster;
   private DistributedFileSystem fs;
-  private Random rand = new Random();
+  private final Random rand = new Random();
   private FSNamesystem namesystem;
   private BlockManager bm;
 
@@ -92,11 +105,17 @@ public class TestNameNodeMetrics {
     cluster.waitActive();
     namesystem = cluster.getNamesystem();
     bm = namesystem.getBlockManager();
-    fs = (DistributedFileSystem) cluster.getFileSystem();
+    fs = cluster.getFileSystem();
   }
   
   @After
   public void tearDown() throws Exception {
+    MetricsSource source = DefaultMetricsSystem.instance().getSource("UgiMetrics");
+    if (source != null) {
+      // Run only once since the UGI metrics is cleaned up during teardown
+      MetricsRecordBuilder rb = getMetrics(source);
+      assertQuantileGauges("GetGroups1s", rb);
+    }
     cluster.shutdown();
   }
   
@@ -111,6 +130,58 @@ public class TestNameNodeMetrics {
     byte [] buffer = new byte[4];
     stm.read(buffer,0,4);
     stm.close();
+  }
+
+  /**
+   * Test that capacity metrics are exported and pass
+   * basic sanity tests.
+   */
+  @Test (timeout = 1800)
+  public void testCapacityMetrics() throws Exception {
+    MetricsRecordBuilder rb = getMetrics(NS_METRICS);
+    long capacityTotal = MetricsAsserts.getLongGauge("CapacityTotal", rb);
+    assert(capacityTotal != 0);
+    long capacityUsed = MetricsAsserts.getLongGauge("CapacityUsed", rb);
+    long capacityRemaining =
+        MetricsAsserts.getLongGauge("CapacityRemaining", rb);
+    long capacityUsedNonDFS =
+        MetricsAsserts.getLongGauge("CapacityUsedNonDFS", rb);
+    assert(capacityUsed + capacityRemaining + capacityUsedNonDFS ==
+        capacityTotal);
+  }
+
+  /** Test metrics indicating the number of stale DataNodes */
+  @Test
+  public void testStaleNodes() throws Exception {
+    // Set two datanodes as stale
+    for (int i = 0; i < 2; i++) {
+      DataNode dn = cluster.getDataNodes().get(i);
+      DataNodeTestUtils.setHeartbeatsDisabledForTests(dn, true);
+      long staleInterval = CONF.getLong(
+          DFSConfigKeys.DFS_NAMENODE_STALE_DATANODE_INTERVAL_KEY,
+          DFSConfigKeys.DFS_NAMENODE_STALE_DATANODE_INTERVAL_DEFAULT);
+      cluster.getNameNode().getNamesystem().getBlockManager()
+          .getDatanodeManager().getDatanode(dn.getDatanodeId())
+          .setLastUpdate(Time.now() - staleInterval - 1);
+    }
+    // Let HeartbeatManager to check heartbeat
+    BlockManagerTestUtil.checkHeartbeat(cluster.getNameNode().getNamesystem()
+        .getBlockManager());
+    assertGauge("StaleDataNodes", 2, getMetrics(NS_METRICS));
+    
+    // Reset stale datanodes
+    for (int i = 0; i < 2; i++) {
+      DataNode dn = cluster.getDataNodes().get(i);
+      DataNodeTestUtils.setHeartbeatsDisabledForTests(dn, false);
+      cluster.getNameNode().getNamesystem().getBlockManager()
+          .getDatanodeManager().getDatanode(dn.getDatanodeId())
+          .setLastUpdate(Time.now());
+    }
+    
+    // Let HeartbeatManager to refresh
+    BlockManagerTestUtil.checkHeartbeat(cluster.getNameNode().getNamesystem()
+        .getBlockManager());
+    assertGauge("StaleDataNodes", 0, getMetrics(NS_METRICS));
   }
   
   /** Test metrics associated with addition of a file */
@@ -129,17 +200,10 @@ public class TestNameNodeMetrics {
     assertCounter("CreateFileOps", 1L, rb);
     assertCounter("FilesCreated", (long)file.depth(), rb);
 
-    // Blocks are stored in a hashmap. Compute its capacity, which
-    // doubles every time the number of entries reach the threshold.
-    int threshold = (int)(blockCapacity * BlockManager.DEFAULT_MAP_LOAD_FACTOR);
-    while (threshold < blockCount) {
-      blockCapacity <<= 1;
-    }
     long filesTotal = file.depth() + 1; // Add 1 for root
     rb = getMetrics(NS_METRICS);
     assertGauge("FilesTotal", filesTotal, rb);
     assertGauge("BlocksTotal", blockCount, rb);
-    assertGauge("BlockCapacity", blockCapacity, rb);
     fs.delete(file, true);
     filesTotal--; // reduce the filecount for deleted file
 
@@ -160,22 +224,37 @@ public class TestNameNodeMetrics {
     final Path file = getTestPath("testCorruptBlock");
     createFile(file, 100, (short)2);
     
+    // Disable the heartbeats, so that no corrupted replica
+    // can be fixed
+    for (DataNode dn : cluster.getDataNodes()) {
+      DataNodeTestUtils.setHeartbeatsDisabledForTests(dn, true);
+    }
+    
     // Corrupt first replica of the block
     LocatedBlock block = NameNodeAdapter.getBlockLocations(
         cluster.getNameNode(), file.toString(), 0, 1).get(0);
     cluster.getNamesystem().writeLock();
     try {
       bm.findAndMarkBlockAsCorrupt(block.getBlock(), block.getLocations()[0],
-          "TEST");
+          "STORAGE_ID", "TEST");
     } finally {
       cluster.getNamesystem().writeUnlock();
     }
-    Thread.sleep(1000); // Wait for block to be marked corrupt
+    BlockManagerTestUtil.getComputedDatanodeWork(bm);
     MetricsRecordBuilder rb = getMetrics(NS_METRICS);
     assertGauge("CorruptBlocks", 1L, rb);
     assertGauge("PendingReplicationBlocks", 1L, rb);
-    assertGauge("ScheduledReplicationBlocks", 1L, rb);
+    
     fs.delete(file, true);
+    // During the file deletion, both BlockManager#corruptReplicas and
+    // BlockManager#pendingReplications will be updated, i.e., the records
+    // for the blocks of the deleted file will be removed from both
+    // corruptReplicas and pendingReplications. The corresponding
+    // metrics (CorruptBlocks and PendingReplicationBlocks) will only be updated
+    // when BlockManager#computeDatanodeWork is run where the
+    // BlockManager#updateState is called. And in
+    // BlockManager#computeDatanodeWork the metric ScheduledReplicationBlocks
+    // will also be updated.
     rb = waitForDnMetricValue(NS_METRICS, "CorruptBlocks", 0L);
     assertGauge("PendingReplicationBlocks", 0L, rb);
     assertGauge("ScheduledReplicationBlocks", 0L, rb);
@@ -208,7 +287,7 @@ public class TestNameNodeMetrics {
     cluster.getNamesystem().writeLock();
     try {
       bm.findAndMarkBlockAsCorrupt(block.getBlock(), block.getLocations()[0],
-          "TEST");
+          "STORAGE_ID", "TEST");
     } finally {
       cluster.getNamesystem().writeUnlock();
     }
@@ -341,9 +420,9 @@ public class TestNameNodeMetrics {
     assertGauge("TransactionsSinceLastCheckpoint", 4L, getMetrics(NS_METRICS));
     assertGauge("TransactionsSinceLastLogRoll", 1L, getMetrics(NS_METRICS));
     
-    cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+    cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
     cluster.getNameNodeRpc().saveNamespace();
-    cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+    cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
     
     long newLastCkptTime = MetricsAsserts.getLongGauge("LastCheckpointTime",
         getMetrics(NS_METRICS));
@@ -351,5 +430,26 @@ public class TestNameNodeMetrics {
     assertGauge("LastWrittenTransactionId", 6L, getMetrics(NS_METRICS));
     assertGauge("TransactionsSinceLastCheckpoint", 1L, getMetrics(NS_METRICS));
     assertGauge("TransactionsSinceLastLogRoll", 1L, getMetrics(NS_METRICS));
+  }
+  
+  /**
+   * Tests that the sync and block report metrics get updated on cluster
+   * startup.
+   */
+  @Test
+  public void testSyncAndBlockReportMetric() throws Exception {
+    MetricsRecordBuilder rb = getMetrics(NN_METRICS);
+    // We have one sync when the cluster starts up, just opening the journal
+    assertCounter("SyncsNumOps", 1L, rb);
+    // Each datanode reports in when the cluster comes up
+    assertCounter("BlockReportNumOps",
+                  (long)DATANODE_COUNT * cluster.getStoragesPerDatanode(), rb);
+    
+    // Sleep for an interval+slop to let the percentiles rollover
+    Thread.sleep((PERCENTILES_INTERVAL+1)*1000);
+    
+    // Check that the percentiles were updated
+    assertQuantileGauges("Syncs1s", rb);
+    assertQuantileGauges("BlockReport1s", rb);
   }
 }

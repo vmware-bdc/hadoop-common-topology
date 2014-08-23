@@ -22,7 +22,9 @@ import static org.apache.hadoop.mapreduce.v2.app.webapp.AMParams.TASK_TYPE;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI.ACCORDION;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI.DATATABLES;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI.DATATABLES_ID;
+import static org.apache.hadoop.yarn.webapp.view.JQueryUI.DATATABLES_SELECTOR;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI.initID;
+import static org.apache.hadoop.yarn.webapp.view.JQueryUI.initSelector;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI.postInitID;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI.tableInit;
 
@@ -42,6 +44,8 @@ public class HsTasksPage extends HsView {
   @Override protected void preHead(Page.HTML<_> html) {
     commonPreHead(html);
     set(DATATABLES_ID, "tasks");
+    set(DATATABLES_SELECTOR, ".dt-tasks" );
+    set(initSelector(DATATABLES), tasksTableInit());
     set(initID(ACCORDION, "nav"), "{autoHeight:false, active:1}");
     set(initID(DATATABLES, "tasks"), tasksTableInit());
     set(postInitID(DATATABLES, "tasks"), jobsPostTableInit());
@@ -67,19 +71,25 @@ public class HsTasksPage extends HsView {
       type = MRApps.taskType(symbol);
     }
     StringBuilder b = tableInit().
-    append(",aoColumnDefs:[");
-    b.append("{'sType':'title-numeric', 'aTargets': [ 0, 4");
-    if(type == TaskType.REDUCE) {
-      b.append(", 9, 10, 11, 12");
-    } else { //MAP
-      b.append(", 7");
-    }
-    b.append(" ] }]");
+    append(", 'aaData': tasksTableData")
+    .append(", bDeferRender: true")
+    .append(", bProcessing: true")
+
+    .append("\n, aoColumnDefs: [\n")
+    .append("{'sType':'numeric', 'aTargets': [ 0 ]")
+    .append(", 'mRender': parseHadoopID }")
+
+    .append(", {'sType':'numeric', 'aTargets': [ 4")
+    .append(type == TaskType.REDUCE ? ", 9, 10, 11, 12" : ", 7")
+    .append(" ], 'mRender': renderHadoopElapsedTime }")
+
+    .append("\n, {'sType':'numeric', 'aTargets': [ 2, 3, 5")
+    .append(type == TaskType.REDUCE ? ", 6, 7, 8" : ", 6")
+    .append(" ], 'mRender': renderHadoopDate }]")
 
     // Sort by id upon page load
-    b.append(", aaSorting: [[0, 'asc']]");
-
-    b.append("}");
+    .append("\n, aaSorting: [[0, 'asc']]")
+    .append("}");
     return b.toString();
   }
   

@@ -18,6 +18,7 @@
 package org.apache.hadoop.mapreduce.tools;
 
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,6 +26,7 @@ import java.util.Set;
 import java.util.HashSet;
 import java.util.Arrays;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -49,9 +51,12 @@ import org.apache.hadoop.mapreduce.TaskType;
 import org.apache.hadoop.mapreduce.jobhistory.HistoryViewer;
 import org.apache.hadoop.mapreduce.v2.LogParams;
 import org.apache.hadoop.security.AccessControlException;
+import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
-import org.apache.hadoop.yarn.logaggregation.LogDumper;
+import org.apache.hadoop.yarn.logaggregation.LogCLIHelpers;
+
+import com.google.common.base.Charsets;
 
 /**
  * Interprets the map reduce cli options 
@@ -61,11 +66,11 @@ import org.apache.hadoop.yarn.logaggregation.LogDumper;
 public class CLI extends Configured implements Tool {
   private static final Log LOG = LogFactory.getLog(CLI.class);
   protected Cluster cluster;
-  private final Set<String> taskTypes = new HashSet<String>(
-              Arrays.asList("map", "reduce", "setup", "cleanup"));
   private final Set<String> taskStates = new HashSet<String>(
               Arrays.asList("pending", "running", "completed", "failed", "killed"));
-
+  private static final Set<String> taskTypes = new HashSet<String>(
+      Arrays.asList("MAP", "REDUCE"));
+  
   public CLI() {
   }
   
@@ -217,6 +222,16 @@ public class CLI extends Configured implements Tool {
       taskType = argv[2];
       taskState = argv[3];
       displayTasks = true;
+      if (!taskTypes.contains(taskType.toUpperCase())) {
+        System.out.println("Error: Invalid task-type: " + taskType);
+        displayUsage(cmd);
+        return exitCode;
+      }
+      if (!taskStates.contains(taskState.toLowerCase())) {
+        System.out.println("Error: Invalid task-state: " + taskState);
+        displayUsage(cmd);
+        return exitCode;
+      }
     } else if ("-logs".equals(cmd)) {
       if (argv.length == 2 || argv.length ==3) {
         logs = true;
@@ -236,7 +251,7 @@ public class CLI extends Configured implements Tool {
     }
 
     // initialize cluster
-    cluster = new Cluster(getConf());
+    cluster = createCluster();
         
     // Submit the request
     try {
@@ -314,12 +329,13 @@ public class CLI extends Configured implements Tool {
         exitCode = 0;
       } else if (displayTasks) {
         displayTasks(cluster.getJob(JobID.forName(jobid)), taskType, taskState);
+        exitCode = 0;
       } else if(killTask) {
         TaskAttemptID taskID = TaskAttemptID.forName(taskid);
         Job job = cluster.getJob(taskID.getJobID());
         if (job == null) {
           System.out.println("Could not find job " + jobid);
-        } else if (job.killTask(taskID)) {
+        } else if (job.killTask(taskID, false)) {
           System.out.println("Killed task " + taskid);
           exitCode = 0;
         } else {
@@ -331,7 +347,7 @@ public class CLI extends Configured implements Tool {
         Job job = cluster.getJob(taskID.getJobID());
         if (job == null) {
             System.out.println("Could not find job " + jobid);
-        } else if(job.failTask(taskID)) {
+        } else if(job.killTask(taskID, true)) {
           System.out.println("Killed task " + taskID + " by failing it");
           exitCode = 0;
         } else {
@@ -343,7 +359,7 @@ public class CLI extends Configured implements Tool {
         JobID jobID = JobID.forName(jobid);
         TaskAttemptID taskAttemptID = TaskAttemptID.forName(taskid);
         LogParams logParams = cluster.getLogParams(jobID, taskAttemptID);
-        LogDumper logDumper = new LogDumper();
+        LogCLIHelpers logDumper = new LogCLIHelpers();
         logDumper.setConf(getConf());
         exitCode = logDumper.dumpAContainersLogs(logParams.getApplicationId(),
             logParams.getContainerId(), logParams.getNodeId(),
@@ -368,6 +384,10 @@ public class CLI extends Configured implements Tool {
     return exitCode;
   }
 
+  Cluster createCluster() throws IOException {
+    return new Cluster(getConf());
+  }
+  
   private String getJobPriorityNames() {
     StringBuffer sb = new StringBuffer();
     for (JobPriority p : JobPriority.values()) {
@@ -376,22 +396,18 @@ public class CLI extends Configured implements Tool {
     return sb.substring(0, sb.length()-1);
   }
 
-  private String getTaskTypess() {
-    StringBuffer sb = new StringBuffer();
-    for (TaskType t : TaskType.values()) {
-      sb.append(t.name()).append(" ");
-    }
-    return sb.substring(0, sb.length()-1);
+  private String getTaskTypes() {
+    return StringUtils.join(taskTypes, " ");
   }
-
+  
   /**
    * Display usage of the command-line tool and terminate execution.
    */
   private void displayUsage(String cmd) {
     String prefix = "Usage: CLI ";
     String jobPriorityValues = getJobPriorityNames();
-    String taskTypes = getTaskTypess();
     String taskStates = "running, completed";
+    
     if ("-submit".equals(cmd)) {
       System.err.println(prefix + "[" + cmd + " <job-file>]");
     } else if ("-status".equals(cmd) || "-kill".equals(cmd)) {
@@ -419,32 +435,32 @@ public class CLI extends Configured implements Tool {
     } else if ("-list-attempt-ids".equals(cmd)) {
       System.err.println(prefix + "[" + cmd + 
           " <job-id> <task-type> <task-state>]. " +
-          "Valid values for <task-type> are " + taskTypes + ". " +
+          "Valid values for <task-type> are " + getTaskTypes() + ". " +
           "Valid values for <task-state> are " + taskStates);
     } else if ("-logs".equals(cmd)) {
       System.err.println(prefix + "[" + cmd +
           " <job-id> <task-attempt-id>]. " +
           " <task-attempt-id> is optional to get task attempt logs.");      
     } else {
-      System.err.printf(prefix + "<command> <args>\n");
-      System.err.printf("\t[-submit <job-file>]\n");
-      System.err.printf("\t[-status <job-id>]\n");
-      System.err.printf("\t[-counter <job-id> <group-name> <counter-name>]\n");
-      System.err.printf("\t[-kill <job-id>]\n");
+      System.err.printf(prefix + "<command> <args>%n");
+      System.err.printf("\t[-submit <job-file>]%n");
+      System.err.printf("\t[-status <job-id>]%n");
+      System.err.printf("\t[-counter <job-id> <group-name> <counter-name>]%n");
+      System.err.printf("\t[-kill <job-id>]%n");
       System.err.printf("\t[-set-priority <job-id> <priority>]. " +
-        "Valid values for priorities are: " + jobPriorityValues + "\n");
-      System.err.printf("\t[-events <job-id> <from-event-#> <#-of-events>]\n");
-      System.err.printf("\t[-history <jobHistoryFile>]\n");
-      System.err.printf("\t[-list [all]]\n");
-      System.err.printf("\t[-list-active-trackers]\n");
-      System.err.printf("\t[-list-blacklisted-trackers]\n");
+        "Valid values for priorities are: " + jobPriorityValues + "%n");
+      System.err.printf("\t[-events <job-id> <from-event-#> <#-of-events>]%n");
+      System.err.printf("\t[-history <jobHistoryFile>]%n");
+      System.err.printf("\t[-list [all]]%n");
+      System.err.printf("\t[-list-active-trackers]%n");
+      System.err.printf("\t[-list-blacklisted-trackers]%n");
       System.err.println("\t[-list-attempt-ids <job-id> <task-type> " +
         "<task-state>]. " +
-        "Valid values for <task-type> are " + taskTypes + ". " +
+        "Valid values for <task-type> are " + getTaskTypes() + ". " +
         "Valid values for <task-state> are " + taskStates);
-      System.err.printf("\t[-kill-task <task-attempt-id>]\n");
-      System.err.printf("\t[-fail-task <task-attempt-id>]\n");
-      System.err.printf("\t[-logs <job-id> <task-attempt-id>]\n\n");
+      System.err.printf("\t[-kill-task <task-attempt-id>]%n");
+      System.err.printf("\t[-fail-task <task-attempt-id>]%n");
+      System.err.printf("\t[-logs <job-id> <task-attempt-id>]%n%n");
       ToolRunner.printGenericCommandUsage(System.out);
     }
   }
@@ -560,23 +576,16 @@ public class CLI extends Configured implements Tool {
    */
   protected void displayTasks(Job job, String type, String state) 
   throws IOException, InterruptedException {
-    if (!taskTypes.contains(type)) {
-      throw new IllegalArgumentException("Invalid type: " + type + 
-          ". Valid types for task are: map, reduce, setup, cleanup.");
-    }
-    if (!taskStates.contains(state)) {
-      throw new java.lang.IllegalArgumentException("Invalid state: " + state + 
-          ". Valid states for task are: pending, running, completed, failed, killed.");
-    }
-
-    TaskReport[] reports = job.getTaskReports(TaskType.valueOf(type));
+	  
+    TaskReport[] reports=null;
+    reports = job.getTaskReports(TaskType.valueOf(type.toUpperCase()));
     for (TaskReport report : reports) {
       TIPStatus status = report.getCurrentStatus();
-      if ((state.equals("pending") && status ==TIPStatus.PENDING) ||
-          (state.equals("running") && status ==TIPStatus.RUNNING) ||
-          (state.equals("completed") && status == TIPStatus.COMPLETE) ||
-          (state.equals("failed") && status == TIPStatus.FAILED) ||
-          (state.equals("killed") && status == TIPStatus.KILLED)) {
+      if ((state.equalsIgnoreCase("pending") && status ==TIPStatus.PENDING) ||
+          (state.equalsIgnoreCase("running") && status ==TIPStatus.RUNNING) ||
+          (state.equalsIgnoreCase("completed") && status == TIPStatus.COMPLETE) ||
+          (state.equalsIgnoreCase("failed") && status == TIPStatus.FAILED) ||
+          (state.equalsIgnoreCase("killed") && status == TIPStatus.KILLED)) {
         printTaskAttempts(report);
       }
     }
@@ -584,7 +593,8 @@ public class CLI extends Configured implements Tool {
 
   public void displayJobList(JobStatus[] jobs) 
       throws IOException, InterruptedException {
-    displayJobList(jobs, new PrintWriter(System.out));
+    displayJobList(jobs, new PrintWriter(new OutputStreamWriter(System.out,
+        Charsets.UTF_8)));
   }
 
   @Private
@@ -622,6 +632,6 @@ public class CLI extends Configured implements Tool {
   
   public static void main(String[] argv) throws Exception {
     int res = ToolRunner.run(new CLI(), argv);
-    System.exit(res);
+    ExitUtil.terminate(res);
   }
 }

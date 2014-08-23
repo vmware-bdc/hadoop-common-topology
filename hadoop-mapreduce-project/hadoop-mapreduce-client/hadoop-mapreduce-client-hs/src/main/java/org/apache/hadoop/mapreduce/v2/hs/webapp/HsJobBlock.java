@@ -18,31 +18,26 @@
 
 package org.apache.hadoop.mapreduce.v2.hs.webapp;
 
-import com.google.inject.Inject;
+import static org.apache.hadoop.mapreduce.v2.app.webapp.AMParams.JOB_ID;
+import static org.apache.hadoop.yarn.webapp.view.JQueryUI._EVEN;
+import static org.apache.hadoop.yarn.webapp.view.JQueryUI._INFO_WRAP;
+import static org.apache.hadoop.yarn.webapp.view.JQueryUI._ODD;
+import static org.apache.hadoop.yarn.webapp.view.JQueryUI._TH;
+
 import java.util.Date;
 import java.util.List;
-import java.util.Map;
 
-import org.apache.hadoop.mapreduce.JobACL;
 import org.apache.hadoop.mapreduce.v2.api.records.AMInfo;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
-import org.apache.hadoop.mapreduce.v2.api.records.JobReport;
-import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId;
-import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptState;
-import org.apache.hadoop.mapreduce.v2.api.records.TaskId;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
-import org.apache.hadoop.mapreduce.v2.app.job.Task;
-import org.apache.hadoop.mapreduce.v2.app.job.TaskAttempt;
 import org.apache.hadoop.mapreduce.v2.app.webapp.dao.ConfEntryInfo;
 import org.apache.hadoop.mapreduce.v2.hs.webapp.dao.AMAttemptInfo;
 import org.apache.hadoop.mapreduce.v2.hs.webapp.dao.JobInfo;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.mapreduce.v2.util.MRApps.TaskAttemptStateUI;
-import org.apache.hadoop.security.authorize.AccessControlList;
+import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.util.StringUtils;
-import org.apache.hadoop.yarn.api.records.NodeId;
-import org.apache.hadoop.yarn.util.BuilderUtils;
 import org.apache.hadoop.yarn.util.Times;
 import org.apache.hadoop.yarn.webapp.ResponseInfo;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet;
@@ -50,8 +45,8 @@ import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.DIV;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TABLE;
 import org.apache.hadoop.yarn.webapp.view.HtmlBlock;
 import org.apache.hadoop.yarn.webapp.view.InfoBlock;
-import static org.apache.hadoop.mapreduce.v2.app.webapp.AMWebApp.*;
-import static org.apache.hadoop.yarn.webapp.view.JQueryUI.*;
+
+import com.google.inject.Inject;
 
 /**
  * Render a block of HTML for a give job.
@@ -89,6 +84,7 @@ public class HsJobBlock extends HtmlBlock {
         _("Queue:", job.getQueueName()).
         _("State:", job.getState()).
         _("Uberized:", job.isUber()).
+        _("Submitted:", new Date(job.getSubmitTime())).
         _("Started:", new Date(job.getStartTime())).
         _("Finished:", new Date(job.getFinishTime())).
         _("Elapsed:", StringUtils.formatTime(
@@ -111,9 +107,9 @@ public class HsJobBlock extends HtmlBlock {
       infoBlock._("Average Map Time", StringUtils.formatTime(job.getAvgMapTime()));
     }
     if(job.getNumReduces() > 0) {
-      infoBlock._("Average Reduce Time", StringUtils.formatTime(job.getAvgReduceTime()));
       infoBlock._("Average Shuffle Time", StringUtils.formatTime(job.getAvgShuffleTime()));
       infoBlock._("Average Merge Time", StringUtils.formatTime(job.getAvgMergeTime()));
+      infoBlock._("Average Reduce Time", StringUtils.formatTime(job.getAvgReduceTime()));
     }
 
     for (ConfEntryInfo entry : job.getAcls()) {
@@ -135,13 +131,15 @@ public class HsJobBlock extends HtmlBlock {
             th(_TH, "Node").
             th(_TH, "Logs").
             _();
+        boolean odd = false;
           for (AMInfo amInfo : amInfos) {
             AMAttemptInfo attempt = new AMAttemptInfo(amInfo,
                 job.getId(), job.getUserName(), "", "");
-            table.tr().
+            table.tr((odd = !odd) ? _ODD : _EVEN).
               td(String.valueOf(attempt.getAttemptId())).
               td(new Date(attempt.getStartTime()).toString()).
-              td().a(".nodelink", url("http://", attempt.getNodeHttpAddress()), 
+              td().a(".nodelink", url(MRWebAppUtil.getYARNWebappScheme(),
+                  attempt.getNodeHttpAddress()),
                   attempt.getNodeHttpAddress())._().
               td().a(".logslink", url(attempt.getShortLogsLink()), 
                       "logs")._().

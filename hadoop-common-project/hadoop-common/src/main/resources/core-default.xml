@@ -63,6 +63,15 @@
 </property>
 
 <property>
+  <name>hadoop.security.instrumentation.requires.admin</name>
+  <value>false</value>
+  <description>
+    Indicates if administrator ACLs are required to access
+    instrumentation servlets (JMX, METRICS, CONF, STACKS).
+  </description>
+</property>
+
+<property>
   <name>hadoop.security.authentication</name>
   <value>simple</value>
   <description>Possible values are simple (no authentication), and kerberos
@@ -71,12 +80,112 @@
 
 <property>
   <name>hadoop.security.group.mapping</name>
-  <value>org.apache.hadoop.security.ShellBasedUnixGroupsMapping</value>
+  <value>org.apache.hadoop.security.JniBasedUnixGroupsMappingWithFallback</value>
   <description>
-    Class for user to group mapping (get groups for a given user) for ACL
+    Class for user to group mapping (get groups for a given user) for ACL. 
+    The default implementation,
+    org.apache.hadoop.security.JniBasedUnixGroupsMappingWithFallback, 
+    will determine if the Java Native Interface (JNI) is available. If JNI is 
+    available the implementation will use the API within hadoop to resolve a 
+    list of groups for a user. If JNI is not available then the shell 
+    implementation, ShellBasedUnixGroupsMapping, is used.  This implementation 
+    shells out to the Linux/Unix environment with the 
+    <code>bash -c groups</code> command to resolve a list of groups for a user.
   </description>
 </property>
 
+<!-- 
+=== Multiple group mapping providers configuration sample === 
+  This sample illustrates a typical use case for CompositeGroupsMapping where
+Hadoop authentication uses MIT Kerberos which trusts an AD realm. In this case, service
+principals such as hdfs, mapred, hbase, hive, oozie and etc can be placed in In MIT Kerberos,
+but end users are just from the trusted AD. For the service principals, ShellBasedUnixGroupsMapping
+provider can be used to query their groups for efficiency, and for end users, LdapGroupsMapping 
+provider can be used. This avoids to add group entries in AD for service principals when only using 
+LdapGroupsMapping provider.
+  In case multiple ADs are involved and trusted by the MIT Kerberos in this use case, LdapGroupsMapping
+provider can be used more times with different AD specific configurations. This sample also shows how
+to do that. Here are the necessary configurations.
+
+<property>
+  <name>hadoop.security.group.mapping</name>
+  <value>org.apache.hadoop.security.CompositeGroupsMapping</value>
+  <description>
+    Class for user to group mapping (get groups for a given user) for ACL, which 
+    makes use of other multiple providers to provide the service.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.group.mapping.providers</name>
+  <value>shell4services,ad4usersX,ad4usersY</value>
+  <description>
+    Comma separated of names of other providers to provide user to group mapping. 
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.group.mapping.providers.combined</name>
+  <value>true</value>
+  <description>
+    true or false to indicate whether groups from the providers are combined or not. The default value is true
+    If true, then all the providers will be tried to get groups and all the groups are combined to return as
+    the final results. Otherwise, providers are tried one by one in the configured list order, and if any
+    groups are retrieved from any provider, then the groups will be returned without trying the left ones.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.group.mapping.provider.shell4services</name>
+  <value>org.apache.hadoop.security.ShellBasedUnixGroupsMapping</value>
+  <description>
+    Class for group mapping provider named by 'shell4services'. The name can then be referenced 
+    by hadoop.security.group.mapping.providers property.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.group.mapping.provider.ad4usersX</name>
+  <value>org.apache.hadoop.security.LdapGroupsMapping</value>
+  <description>
+    Class for group mapping provider named by 'ad4usersX'. The name can then be referenced 
+    by hadoop.security.group.mapping.providers property.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.group.mapping.provider.ad4usersY</name>
+  <value>org.apache.hadoop.security.LdapGroupsMapping</value>
+  <description>
+    Class for group mapping provider named by 'ad4usersY'. The name can then be referenced 
+    by hadoop.security.group.mapping.providers property.
+  </description>
+</property>
+
+<property>
+<name>hadoop.security.group.mapping.provider.ad4usersX.ldap.url</name>
+<value>ldap://ad-host-for-users-X:389</value>
+  <description>
+    ldap url for the provider named by 'ad4usersX'. Note this property comes from 
+    'hadoop.security.group.mapping.ldap.url'.
+  </description>
+</property>
+
+<property>
+<name>hadoop.security.group.mapping.provider.ad4usersY.ldap.url</name>
+<value>ldap://ad-host-for-users-Y:389</value>
+  <description>
+    ldap url for the provider named by 'ad4usersY'. Note this property comes from 
+    'hadoop.security.group.mapping.ldap.url'.
+  </description>
+</property>
+
+You also need to configure other properties like
+  hadoop.security.group.mapping.ldap.bind.password.file and etc.
+for ldap providers in the same way as above does.
+
+-->
+ 
 <property>
   <name>hadoop.security.groups.cache.secs</name>
   <value>300</value>
@@ -85,6 +194,29 @@
     containing the user->group mapping. When this duration has expired,
     then the implementation of the group mapping provider is invoked to get
     the groups of the user and then cached back.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.groups.negative-cache.secs</name>
+  <value>30</value>
+  <description>
+    Expiration time for entries in the the negative user-to-group mapping
+    caching, in seconds. This is useful when invalid users are retrying
+    frequently. It is suggested to set a small value for this expiration, since
+    a transient error in group lookup could temporarily lock out a legitimate
+    user.
+
+    Set this to zero or negative value to disable negative user-to-group caching.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.groups.cache.warn.after.ms</name>
+  <value>5000</value>
+  <description>
+    If looking up a single user to group takes longer than this amount of
+    milliseconds, we will log a warning message.
   </description>
 </property>
 
@@ -156,7 +288,7 @@
 
 <property>
   <name>hadoop.security.group.mapping.ldap.search.filter.user</name>
-  <value>(&amp;(objectClass=user)(sAMAccountName={0})</value>
+  <value>(&amp;(objectClass=user)(sAMAccountName={0}))</value>
   <description>
     An additional filter to use when searching for LDAP users. The default will
     usually be appropriate for Active Directory installations. If connecting to
@@ -196,6 +328,17 @@
 </property>
 
 <property>
+  <name>hadoop.security.group.mapping.ldap.directory.search.timeout</name>
+  <value>10000</value>
+  <description>
+    The attribute applied to the LDAP SearchControl properties to set a
+    maximum time limit when searching and awaiting a result.
+    Set to 0 if infinite wait period is desired.
+    Default is 10 seconds. Units in milliseconds.
+  </description>
+</property>
+
+<property>
   <name>hadoop.security.service.user.name.key</name>
   <value></value>
   <description>
@@ -205,14 +348,38 @@
   </description>
 </property>
 
+
+<property>
+    <name>hadoop.security.uid.cache.secs</name>
+    <value>14400</value>
+    <description>
+        This is the config controlling the validity of the entries in the cache
+        containing the userId to userName and groupId to groupName used by
+        NativeIO getFstat().
+    </description>
+</property>
+
 <property>
   <name>hadoop.rpc.protection</name>
   <value>authentication</value>
-  <description>This field sets the quality of protection for secured sasl 
+  <description>A comma-separated list of protection values for secured sasl 
       connections. Possible values are authentication, integrity and privacy.
       authentication means authentication only and no integrity or privacy; 
       integrity implies authentication and integrity are enabled; and privacy 
       implies all of authentication, integrity and privacy are enabled.
+      hadoop.security.saslproperties.resolver.class can be used to override
+      the hadoop.rpc.protection for a connection at the server side.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.saslproperties.resolver.class</name>
+  <value></value>
+  <description>SaslPropertiesResolver used to resolve the QOP used for a 
+      connection. If not specified, the full set of values specified in 
+      hadoop.rpc.protection is used while determining the QOP used for the 
+      connection. If a class is specified, then the QOP values returned by 
+      the class will be used while determining the QOP used for the connection.
   </description>
 </property>
 
@@ -239,6 +406,20 @@
   running the Hadoop client. Change this to the absolute path to kinit if this
   is not the case.
   </description>
+</property>
+
+<property>
+    <name>hadoop.kerberos.min.seconds.before.relogin</name>
+    <value>60</value>
+    <description>The minimum time between relogin attempts for Kerberos, in
+    seconds.
+    </description>
+</property>
+
+<property>
+  <name>hadoop.security.auth_to_local</name>
+  <value></value>
+  <description>Maps kerberos principals to local user names</description>
 </property>
 
 <!-- i/o properties -->
@@ -268,9 +449,25 @@
 
 <property>
   <name>io.compression.codecs</name>
-  <value>org.apache.hadoop.io.compress.DefaultCodec,org.apache.hadoop.io.compress.GzipCodec,org.apache.hadoop.io.compress.BZip2Codec,org.apache.hadoop.io.compress.DeflateCodec,org.apache.hadoop.io.compress.SnappyCodec,org.apache.hadoop.io.compress.Lz4Codec</value>
-  <description>A list of the compression codec classes that can be used 
-               for compression/decompression.</description>
+  <value></value>
+  <description>A comma-separated list of the compression codec classes that can
+  be used for compression/decompression. In addition to any classes specified
+  with this property (which take precedence), codec classes on the classpath
+  are discovered using a Java ServiceLoader.</description>
+</property>
+
+<property>
+  <name>io.compression.codec.bzip2.library</name>
+  <value>system-native</value>
+  <description>The native-code library to be used for compression and
+  decompression by the bzip2 codec.  This library could be specified
+  either by by name or the full pathname.  In the former case, the
+  library is located by the dynamic linker, usually searching the
+  directories specified in the environment variable LD_LIBRARY_PATH.
+  
+  The value of "system-native" indicates that the default system
+  library should be used.  To indicate that the algorithm should
+  operate entirely in Java, specify "java-builtin".</description>
 </property>
 
 <property>
@@ -334,8 +531,12 @@
   <name>fs.trash.interval</name>
   <value>0</value>
   <description>Number of minutes after which the checkpoint
-  gets deleted.
-  If zero, the trash feature is disabled.
+  gets deleted.  If zero, the trash feature is disabled.
+  This option may be configured both on the server and the
+  client. If trash is disabled server side then the client
+  side configuration is checked. If trash is enabled on the
+  server side then the value configured on the server is
+  used and the client configuration value is ignored.
   </description>
 </property>
 
@@ -343,30 +544,12 @@
   <name>fs.trash.checkpoint.interval</name>
   <value>0</value>
   <description>Number of minutes between trash checkpoints.
-  Should be smaller or equal to fs.trash.interval.
+  Should be smaller or equal to fs.trash.interval. If zero,
+  the value is set to the value of fs.trash.interval.
   Every time the checkpointer runs it creates a new checkpoint 
   out of current and removes checkpoints created more than 
   fs.trash.interval minutes ago.
   </description>
-</property>
-
-<property>
-  <name>fs.file.impl</name>
-  <value>org.apache.hadoop.fs.LocalFileSystem</value>
-  <description>The FileSystem for file: uris.</description>
-</property>
-
-<property>
-  <name>fs.hdfs.impl</name>
-  <value>org.apache.hadoop.hdfs.DistributedFileSystem</value>
-  <description>The FileSystem for hdfs: uris.</description>
-</property>
-
-<property>
-  <name>fs.viewfs.impl</name>
-  <value>org.apache.hadoop.fs.viewfs.ViewFileSystem</value>
-  <description>The FileSystem for view file system for viewfs: uris
-  (ie client side mount table:).</description>
 </property>
 
 <property>
@@ -375,6 +558,11 @@
   <description>The AbstractFileSystem for file: uris.</description>
 </property>
 
+<property>
+  <name>fs.AbstractFileSystem.har.impl</name>
+  <value>org.apache.hadoop.fs.HarFs</value>
+  <description>The AbstractFileSystem for har: uris.</description>
+</property> 
 
 <property>
   <name>fs.AbstractFileSystem.hdfs.impl</name>
@@ -387,45 +575,6 @@
   <value>org.apache.hadoop.fs.viewfs.ViewFs</value>
   <description>The AbstractFileSystem for view file system for viewfs: uris
   (ie client side mount table:).</description>
-</property>
-
-<property>
-  <name>fs.s3.impl</name>
-  <value>org.apache.hadoop.fs.s3.S3FileSystem</value>
-  <description>The FileSystem for s3: uris.</description>
-</property>
-
-<property>
-  <name>fs.s3n.impl</name>
-  <value>org.apache.hadoop.fs.s3native.NativeS3FileSystem</value>
-  <description>The FileSystem for s3n: (Native S3) uris.</description>
-</property>
-
-<property>
-  <name>fs.kfs.impl</name>
-  <value>org.apache.hadoop.fs.kfs.KosmosFileSystem</value>
-  <description>The FileSystem for kfs: uris.</description>
-</property>
-
-<property>
-  <name>fs.hftp.impl</name>
-  <value>org.apache.hadoop.hdfs.HftpFileSystem</value>
-</property>
-
-<property>
-  <name>fs.hsftp.impl</name>
-  <value>org.apache.hadoop.hdfs.HsftpFileSystem</value>
-</property>
-
-<property>
-  <name>fs.webhdfs.impl</name>
-  <value>org.apache.hadoop.hdfs.web.WebHdfsFileSystem</value>
-</property>
-
-<property>
-  <name>fs.ftp.impl</name>
-  <value>org.apache.hadoop.fs.ftp.FTPFileSystem</value>
-  <description>The FileSystem for ftp: uris.</description>
 </property>
 
 <property>
@@ -443,21 +592,15 @@
 </property>
 
 <property>
-  <name>fs.har.impl</name>
-  <value>org.apache.hadoop.fs.HarFileSystem</value>
-  <description>The filesystem for Hadoop archives. </description>
-</property>
-
-<property>
-  <name>fs.har.impl.disable.cache</name>
-  <value>true</value>
-  <description>Don't cache 'har' filesystem instances.</description>
-</property>
-
-<property>
   <name>fs.df.interval</name>
   <value>60000</value>
   <description>Disk usage statistics refresh interval in msec.</description>
+</property>
+
+<property>
+  <name>fs.du.interval</name>
+  <value>600000</value>
+  <description>File space usage statistics refresh interval in msec.</description>
 </property>
 
 <property>
@@ -490,6 +633,11 @@
   </description>
 </property>
 
+<property>
+  <name>fs.swift.impl</name>
+  <value>org.apache.hadoop.fs.swift.snative.SwiftNativeFileSystem</value>
+  <description>The implementation class of the OpenStack Swift Filesystem</description>
+</property>
 
 <property>
   <name>fs.automatic.close</name>
@@ -506,6 +654,39 @@
   <value>67108864</value>
   <description>Block size to use when reading files using the native S3
   filesystem (s3n: URIs).</description>
+</property>
+
+<property>
+  <name>fs.s3n.multipart.uploads.enabled</name>
+  <value>false</value>
+  <description>Setting this property to true enables multiple uploads to
+  native S3 filesystem. When uploading a file, it is split into blocks
+  if the size is larger than fs.s3n.multipart.uploads.block.size.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3n.multipart.uploads.block.size</name>
+  <value>67108864</value>
+  <description>The block size for multipart uploads to native S3 filesystem.
+  Default size is 64MB.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3n.multipart.copy.block.size</name>
+  <value>5368709120</value>
+  <description>The block size for multipart copy in native S3 filesystem.
+  Default size is 5GB.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3n.server-side-encryption-algorithm</name>
+  <value></value>
+  <description>Specify a server-side encryption algorithm for S3.
+  The default is NULL, and the only other currently allowable value is AES256.
+  </description>
 </property>
 
 <property>
@@ -595,6 +776,22 @@
 </property>
 
 <property>
+  <name>ipc.client.connect.retry.interval</name>
+  <value>1000</value>
+  <description>Indicates the number of milliseconds a client will wait for
+    before retrying to establish a server connection.
+  </description>
+</property>
+
+<property>
+  <name>ipc.client.connect.timeout</name>
+  <value>20000</value>
+  <description>Indicates the number of milliseconds a client will wait for the 
+               socket to establish a server connection.
+  </description>
+</property>
+
+<property>
   <name>ipc.client.connect.max.retries.on.timeouts</name>
   <value>45</value>
   <description>Indicates the number of retries a client will make on socket timeout
@@ -610,26 +807,18 @@
   </description>
 </property>
 
-<property>
-  <name>ipc.server.tcpnodelay</name>
-  <value>false</value>
-  <description>Turn on/off Nagle's algorithm for the TCP socket connection on 
-  the server. Setting to true disables the algorithm and may decrease latency
-  with a cost of more/smaller packets. 
-  </description>
-</property>
-
-<property>
-  <name>ipc.client.tcpnodelay</name>
-  <value>false</value>
-  <description>Turn on/off Nagle's algorithm for the TCP socket connection on 
-  the client. Setting to true disables the algorithm and may decrease latency
-  with a cost of more/smaller packets. 
-  </description>
-</property>
-
-
 <!-- Proxy Configuration -->
+
+<property>
+  <name>hadoop.security.impersonation.provider.class</name>
+  <value></value>
+  <description>A class which implements ImpersonationProvider interface, used to 
+       authorize whether one user can impersonate a specific user. 
+       If not specified, the DefaultImpersonationProvider will be used. 
+       If a class is specified, then that class will be used to determine 
+       the impersonation capability.
+  </description>
+</property>
 
 <property>
   <name>hadoop.rpc.socket.factory.class.default</name>
@@ -658,15 +847,21 @@
   </description>
 </property>
 
-<!-- Rack Configuration -->
-
+<!-- Topology Configuration -->
 <property>
-	<name>net.topology.node.switch.mapping.impl</name>
+  <name>net.topology.node.switch.mapping.impl</name>
   <value>org.apache.hadoop.net.ScriptBasedMapping</value>
   <description> The default implementation of the DNSToSwitchMapping. It
     invokes a script specified in net.topology.script.file.name to resolve
     node names. If the value for net.topology.script.file.name is not set, the
     default value of DEFAULT_RACK is returned for all node names.
+  </description>
+</property>
+
+<property>
+  <name>net.topology.impl</name>
+  <value>org.apache.hadoop.net.NetworkTopology</value>
+  <description> The default implementation of NetworkTopology which is classic three layer one.
   </description>
 </property>
 
@@ -692,7 +887,7 @@
   <name>net.topology.table.file.name</name>
   <value></value>
   <description> The file name for a topology file, which is used when the
-    net.topology.script.file.name property is set to
+    net.topology.node.switch.mapping.impl property is set to
     org.apache.hadoop.net.TableMapping. The file format is a two column text
     file, with columns separated by whitespace. The first column is a DNS or
     IP address and the second column specifies the rack where the address maps.
@@ -808,42 +1003,6 @@
   <description>Replication factor</description>
 </property>
 
-<!-- Kosmos File System -->
-
-<property>
-  <name>kfs.stream-buffer-size</name>
-  <value>4096</value>
-  <description>The size of buffer to stream files.
-  The size of this buffer should probably be a multiple of hardware
-  page size (4096 on Intel x86), and it determines how much data is
-  buffered during read and write operations.</description>
-</property>
-
-<property>
-  <name>kfs.bytes-per-checksum</name>
-  <value>512</value>
-  <description>The number of bytes per checksum.  Must not be larger than
-  kfs.stream-buffer-size</description>
-</property>
-
-<property>
-  <name>kfs.client-write-packet-size</name>
-  <value>65536</value>
-  <description>Packet size for clients to write</description>
-</property>
-
-<property>
-  <name>kfs.blocksize</name>
-  <value>67108864</value>
-  <description>Block size</description>
-</property>
-
-<property>
-  <name>kfs.replication</name>
-  <value>3</value>
-  <description>Replication factor</description>
-</property>
-
 <!-- FTP file system -->
 <property>
   <name>ftp.stream-buffer-size</name>
@@ -933,7 +1092,6 @@
   <value>${user.home}/hadoop-http-auth-signature-secret</value>
   <description>
     The signature secret for signing the authentication tokens.
-    If not set a random secret is generated at startup time.
     The same secret should be used for JT/NN/DN/TT configurations.
   </description>
 </property>
@@ -1000,6 +1158,397 @@
   <value></value>
   <description>
     The SSH private key files to use with the builtin sshfence fencer.
+  </description>
+</property>
+
+<property>
+  <name>ha.zookeeper.quorum</name>
+  <description>
+    A list of ZooKeeper server addresses, separated by commas, that are
+    to be used by the ZKFailoverController in automatic failover.
+  </description>
+</property>
+
+<property>
+  <name>ha.zookeeper.session-timeout.ms</name>
+  <value>5000</value>
+  <description>
+    The session timeout to use when the ZKFC connects to ZooKeeper.
+    Setting this value to a lower value implies that server crashes
+    will be detected more quickly, but risks triggering failover too
+    aggressively in the case of a transient error or network blip.
+  </description>
+</property>
+
+<property>
+  <name>ha.zookeeper.parent-znode</name>
+  <value>/hadoop-ha</value>
+  <description>
+    The ZooKeeper znode under which the ZK failover controller stores
+    its information. Note that the nameservice ID is automatically
+    appended to this znode, so it is not normally necessary to
+    configure this, even in a federated environment.
+  </description>
+</property>
+
+<property>
+  <name>ha.zookeeper.acl</name>
+  <value>world:anyone:rwcda</value>
+  <description>
+    A comma-separated list of ZooKeeper ACLs to apply to the znodes
+    used by automatic failover. These ACLs are specified in the same
+    format as used by the ZooKeeper CLI.
+
+    If the ACL itself contains secrets, you may instead specify a
+    path to a file, prefixed with the '@' symbol, and the value of
+    this configuration will be loaded from within.
+  </description>
+</property>
+
+<property>
+  <name>ha.zookeeper.auth</name>
+  <value></value>
+  <description>
+    A comma-separated list of ZooKeeper authentications to add when
+    connecting to ZooKeeper. These are specified in the same format
+    as used by the &quot;addauth&quot; command in the ZK CLI. It is
+    important that the authentications specified here are sufficient
+    to access znodes with the ACL specified in ha.zookeeper.acl.
+
+    If the auths contain secrets, you may instead specify a
+    path to a file, prefixed with the '@' symbol, and the value of
+    this configuration will be loaded from within.
+  </description>
+</property>
+
+<!-- Static Web User Filter properties. -->
+<property>
+  <description>
+    The user name to filter as, on static web filters
+    while rendering content. An example use is the HDFS
+    web UI (user to be used for browsing files).
+  </description>
+  <name>hadoop.http.staticuser.user</name>
+  <value>dr.who</value>
+</property>
+
+<!-- SSLFactory configuration -->
+
+<property>
+  <name>hadoop.ssl.keystores.factory.class</name>
+  <value>org.apache.hadoop.security.ssl.FileBasedKeyStoresFactory</value>
+  <description>
+    The keystores factory to use for retrieving certificates.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.ssl.require.client.cert</name>
+  <value>false</value>
+  <description>Whether client certificates are required</description>
+</property>
+
+<property>
+  <name>hadoop.ssl.hostname.verifier</name>
+  <value>DEFAULT</value>
+  <description>
+    The hostname verifier to provide for HttpsURLConnections.
+    Valid values are: DEFAULT, STRICT, STRICT_I6, DEFAULT_AND_LOCALHOST and
+    ALLOW_ALL
+  </description>
+</property>
+
+<property>
+  <name>hadoop.ssl.server.conf</name>
+  <value>ssl-server.xml</value>
+  <description>
+    Resource file from which ssl server keystore information will be extracted.
+    This file is looked up in the classpath, typically it should be in Hadoop
+    conf/ directory.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.ssl.client.conf</name>
+  <value>ssl-client.xml</value>
+  <description>
+    Resource file from which ssl client keystore information will be extracted
+    This file is looked up in the classpath, typically it should be in Hadoop
+    conf/ directory.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.ssl.enabled</name>
+  <value>false</value>
+  <description>
+    Deprecated. Use dfs.http.policy and yarn.http.policy instead.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.jetty.logs.serve.aliases</name>
+  <value>true</value>
+  <description>
+    Enable/Disable aliases serving from jetty
+  </description>
+</property>
+
+<property>
+  <name>fs.permissions.umask-mode</name>
+  <value>022</value>
+  <description>
+    The umask used when creating files and directories.
+    Can be in octal or in symbolic. Examples are:
+    "022" (octal for u=rwx,g=r-x,o=r-x in symbolic),
+    or "u=rwx,g=rwx,o=" (symbolic for 007 in octal).
+  </description>
+</property>
+
+<!-- ha properties -->
+
+<property>
+  <name>ha.health-monitor.connect-retry-interval.ms</name>
+  <value>1000</value>
+  <description>
+    How often to retry connecting to the service.
+  </description>
+</property>
+
+<property>
+  <name>ha.health-monitor.check-interval.ms</name>
+  <value>1000</value>
+  <description>
+    How often to check the service.
+  </description>
+</property>
+
+<property>
+  <name>ha.health-monitor.sleep-after-disconnect.ms</name>
+  <value>1000</value>
+  <description>
+    How long to sleep after an unexpected RPC error.
+  </description>
+</property>
+
+<property>
+  <name>ha.health-monitor.rpc-timeout.ms</name>
+  <value>45000</value>
+  <description>
+    Timeout for the actual monitorHealth() calls.
+  </description>
+</property>
+
+<property>
+  <name>ha.failover-controller.new-active.rpc-timeout.ms</name>
+  <value>60000</value>
+  <description>
+    Timeout that the FC waits for the new active to become active
+  </description>
+</property>
+
+<property>
+  <name>ha.failover-controller.graceful-fence.rpc-timeout.ms</name>
+  <value>5000</value>
+  <description>
+    Timeout that the FC waits for the old active to go to standby
+  </description>
+</property>
+
+<property>
+  <name>ha.failover-controller.graceful-fence.connection.retries</name>
+  <value>1</value>
+  <description>
+    FC connection retries for graceful fencing
+  </description>
+</property>
+
+<property>
+  <name>ha.failover-controller.cli-check.rpc-timeout.ms</name>
+  <value>20000</value>
+  <description>
+    Timeout that the CLI (manual) FC waits for monitorHealth, getServiceState
+  </description>
+</property>
+
+<property>
+  <name>ipc.client.fallback-to-simple-auth-allowed</name>
+  <value>false</value>
+  <description>
+    When a client is configured to attempt a secure connection, but attempts to
+    connect to an insecure server, that server may instruct the client to
+    switch to SASL SIMPLE (unsecure) authentication. This setting controls
+    whether or not the client will accept this instruction from the server.
+    When false (the default), the client will not allow the fallback to SIMPLE
+    authentication, and will abort the connection.
+  </description>
+</property>
+
+<property>
+  <name>fs.client.resolve.remote.symlinks</name>
+  <value>true</value>
+  <description>
+      Whether to resolve symlinks when accessing a remote Hadoop filesystem.
+      Setting this to false causes an exception to be thrown upon encountering
+      a symlink. This setting does not apply to local filesystems, which
+      automatically resolve local symlinks.
+  </description>
+</property>
+
+<property>
+  <name>nfs.exports.allowed.hosts</name>
+  <value>* rw</value>
+  <description>
+    By default, the export can be mounted by any client. The value string 
+    contains machine name and access privilege, separated by whitespace 
+    characters. The machine name format can be a single host, a Java regular 
+    expression, or an IPv4 address. The access privilege uses rw or ro to 
+    specify read/write or read-only access of the machines to exports. If the 
+    access privilege is not provided, the default is read-only. Entries are separated by ";".
+    For example: "192.168.0.0/22 rw ; host.*\.example\.com ; host1.test.org ro;".
+    Only the NFS gateway needs to restart after this property is updated. 
+  </description>
+</property>
+
+<property>
+  <name>hadoop.user.group.static.mapping.overrides</name>
+  <value>dr.who=;</value>
+  <description>
+    Static mapping of user to groups. This will override the groups if
+    available in the system for the specified user. In otherwords, groups
+    look-up will not happen for these users, instead groups mapped in this
+    configuration will be used.
+    Mapping should be in this format.
+    user1=group1,group2;user2=;user3=group2;
+    Default, "dr.who=;" will consider "dr.who" as user without groups.
+  </description>
+</property>
+
+<property>
+  <name>rpc.metrics.quantile.enable</name>
+  <value>false</value>
+  <description>
+    Setting this property to true and rpc.metrics.percentiles.intervals
+    to a comma-separated list of the granularity in seconds, the
+    50/75/90/95/99th percentile latency for rpc queue/processing time in
+    milliseconds are added to rpc metrics.
+  </description>
+</property>
+
+<property>
+  <name>rpc.metrics.percentiles.intervals</name>
+  <value></value>
+  <description>
+    A comma-separated list of the granularity in seconds for the metrics which
+    describe the 50/75/90/95/99th percentile latency for rpc queue/processing
+    time. The metrics are outputted if rpc.metrics.quantile.enable is set to
+    true.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.crypto.codec.classes.EXAMPLECIPHERSUITE</name>
+  <value></value>
+  <description>
+    The prefix for a given crypto codec, contains a comma-separated
+    list of implementation classes for a given crypto codec (eg EXAMPLECIPHERSUITE).
+    The first implementation will be used if available, others are fallbacks.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.crypto.codec.classes.aes.ctr.nopadding</name>
+  <value>org.apache.hadoop.crypto.OpensslAesCtrCryptoCodec,org.apache.hadoop.crypto.JceAesCtrCryptoCodec</value>
+  <description>
+    Comma-separated list of crypto codec implementations for AES/CTR/NoPadding. 
+    The first implementation will be used if available, others are fallbacks.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.crypto.cipher.suite</name>
+  <value>AES/CTR/NoPadding</value>
+  <description>
+    Cipher suite for crypto codec.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.crypto.jce.provider</name>
+  <value></value>
+  <description>
+    The JCE provider name used in CryptoCodec. 
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.crypto.buffer.size</name>
+  <value>8192</value>
+  <description>
+    The buffer size used by CryptoInputStream and CryptoOutputStream. 
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.java.secure.random.algorithm</name>
+  <value>SHA1PRNG</value>
+  <description>
+    The java secure random algorithm. 
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.secure.random.impl</name>
+  <value></value>
+  <description>
+    Implementation of secure random. 
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.random.device.file.path</name>
+  <value>/dev/urandom</value>
+  <description>
+    OS security random device file path.
+  </description>
+</property>
+
+<property>
+  <name>fs.har.impl.disable.cache</name>
+  <value>true</value>
+  <description>Don't cache 'har' filesystem instances.</description>
+</property>
+
+<!--- KMSClientProvider configurations -->
+<property>
+  <name>hadoop.security.kms.client.encrypted.key.cache.size</name>
+  <value>500</value>
+  <description>
+    Size of the EncryptedKeyVersion cache Queue for each key
+  </description>
+</property>
+<property>
+  <name>hadoop.security.kms.client.encrypted.key.cache.low-watermark</name>
+  <value>0.3f</value>
+  <description>
+    If size of the EncryptedKeyVersion cache Queue falls below the
+    low watermark, this cache queue will be scheduled for a refill
+  </description>
+</property>
+<property>
+  <name>hadoop.security.kms.client.encrypted.key.cache.num.refill.threads</name>
+  <value>2</value>
+  <description>
+    Number of threads to use for refilling depleted EncryptedKeyVersion
+    cache Queues
+  </description>
+</property>
+<property>
+  <name>"hadoop.security.kms.client.encrypted.key.cache.expiry</name>
+  <value>43200000</value>
+  <description>
+    Cache expiry time for a Key, after which the cache Queue for this
+    key will be dropped. Default = 12hrs
   </description>
 </property>
 

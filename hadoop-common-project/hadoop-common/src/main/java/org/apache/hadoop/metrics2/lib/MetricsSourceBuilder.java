@@ -33,9 +33,19 @@ import org.apache.hadoop.metrics2.MetricsInfo;
 import org.apache.hadoop.metrics2.MetricsSource;
 import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.annotation.Metrics;
+import org.apache.hadoop.util.ReflectionUtils;
 
 /**
- * Helper class to build metrics source object from annotations
+ * Helper class to build {@link MetricsSource} object from annotations.
+ * <p>
+ * For a given source object:
+ * <ul>
+ * <li>Sets the {@link Field}s annotated with {@link Metric} to
+ * {@link MutableMetric} and adds it to the {@link MetricsRegistry}.</li>
+ * <li>
+ * For {@link Method}s annotated with {@link Metric} creates
+ * {@link MutableMetric} and adds it to the {@link MetricsRegistry}.</li>
+ * </ul>
  */
 @InterfaceAudience.Private
 public class MetricsSourceBuilder {
@@ -54,10 +64,10 @@ public class MetricsSourceBuilder {
     Class<?> cls = source.getClass();
     registry = initRegistry(source);
 
-    for (Field field : cls.getDeclaredFields()) {
+    for (Field field : ReflectionUtils.getDeclaredFieldsIncludingInherited(cls)) {
       add(source, field);
     }
-    for (Method method : cls.getDeclaredMethods()) {
+    for (Method method : ReflectionUtils.getDeclaredMethodsIncludingInherited(cls)) {
       add(source, method);
     }
   }
@@ -88,15 +98,14 @@ public class MetricsSourceBuilder {
     Class<?> cls = source.getClass();
     MetricsRegistry r = null;
     // Get the registry if it already exists.
-    for (Field field : cls.getDeclaredFields()) {
+    for (Field field : ReflectionUtils.getDeclaredFieldsIncludingInherited(cls)) {
       if (field.getType() != MetricsRegistry.class) continue;
       try {
         field.setAccessible(true);
         r = (MetricsRegistry) field.get(source);
         hasRegistry = r != null;
         break;
-      }
-      catch (Exception e) {
+      } catch (Exception e) {
         LOG.warn("Error accessing field "+ field, e);
         continue;
       }
@@ -116,15 +125,20 @@ public class MetricsSourceBuilder {
     return r;
   }
 
+  /**
+   * Change the declared field {@code field} in {@code source} Object to
+   * {@link MutableMetric}
+   */
   private void add(Object source, Field field) {
     for (Annotation annotation : field.getAnnotations()) {
-      if (!(annotation instanceof Metric)) continue;
+      if (!(annotation instanceof Metric)) {
+        continue;
+      }
       try {
         // skip fields already set
         field.setAccessible(true);
         if (field.get(source) != null) continue;
-      }
-      catch (Exception e) {
+      } catch (Exception e) {
         LOG.warn("Error accessing field "+ field +" annotated with"+
                  annotation, e);
         continue;
@@ -133,10 +147,9 @@ public class MetricsSourceBuilder {
                                                   registry);
       if (mutable != null) {
         try {
-          field.set(source, mutable);
+          field.set(source, mutable); // Set the source field to MutableMetric
           hasAtMetric = true;
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
           throw new MetricsException("Error setting field "+ field +
                                      " annotated with "+ annotation, e);
         }
@@ -144,9 +157,12 @@ public class MetricsSourceBuilder {
     }
   }
 
+  /** Add {@link MutableMetric} for a method annotated with {@link Metric} */
   private void add(Object source, Method method) {
     for (Annotation annotation : method.getAnnotations()) {
-      if (!(annotation instanceof Metric)) continue;
+      if (!(annotation instanceof Metric)) {
+        continue;
+      }
       factory.newForMethod(source, method, (Metric) annotation, registry);
       hasAtMetric = true;
     }

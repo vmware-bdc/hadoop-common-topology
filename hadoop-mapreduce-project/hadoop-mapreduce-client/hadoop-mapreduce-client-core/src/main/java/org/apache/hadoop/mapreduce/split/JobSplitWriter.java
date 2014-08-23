@@ -20,6 +20,7 @@ package org.apache.hadoop.mapreduce.split;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.util.Arrays;
 import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
@@ -34,9 +35,13 @@ import org.apache.hadoop.io.serializer.Serializer;
 import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.JobSubmissionFiles;
+import org.apache.hadoop.mapreduce.MRConfig;
 import org.apache.hadoop.mapreduce.split.JobSplit.SplitMetaInfo;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 /**
  * The class that is used by the Job clients to write splits (both the meta
@@ -46,8 +51,10 @@ import org.apache.hadoop.classification.InterfaceStability;
 @InterfaceStability.Unstable
 public class JobSplitWriter {
 
+  private static final Log LOG = LogFactory.getLog(JobSplitWriter.class);
   private static final int splitVersion = JobSplit.META_SPLIT_VERSION;
   private static final byte[] SPLIT_FILE_HEADER;
+
   static {
     try {
       SPLIT_FILE_HEADER = "SPL".getBytes("UTF-8");
@@ -82,7 +89,7 @@ public class JobSplitWriter {
   throws IOException {
     FSDataOutputStream out = createFile(fs, 
         JobSubmissionFiles.getJobSplitFile(jobSubmitDir), conf);
-    SplitMetaInfo[] info = writeOldSplits(splits, out);
+    SplitMetaInfo[] info = writeOldSplits(splits, out, conf);
     out.close();
     writeJobSplitMetaInfo(fs,JobSubmissionFiles.getJobSplitMetaFile(jobSubmitDir), 
         new FsPermission(JobSubmissionFiles.JOB_FILE_PERMISSION), splitVersion,
@@ -114,6 +121,8 @@ public class JobSplitWriter {
     if (array.length != 0) {
       SerializationFactory factory = new SerializationFactory(conf);
       int i = 0;
+      int maxBlockLocations = conf.getInt(MRConfig.MAX_BLOCK_LOCATIONS_KEY,
+          MRConfig.MAX_BLOCK_LOCATIONS_DEFAULT);
       long offset = out.getPos();
       for(T split: array) {
         long prevCount = out.getPos();
@@ -123,9 +132,16 @@ public class JobSplitWriter {
         serializer.open(out);
         serializer.serialize(split);
         long currCount = out.getPos();
+        String[] locations = split.getLocations();
+        if (locations.length > maxBlockLocations) {
+          LOG.warn("Max block location exceeded for split: "
+              + split + " splitsize: " + locations.length +
+              " maxsize: " + maxBlockLocations);
+          locations = Arrays.copyOf(locations, maxBlockLocations);
+        }
         info[i++] = 
           new JobSplit.SplitMetaInfo( 
-              split.getLocations(), offset,
+              locations, offset,
               split.getLength());
         offset += currCount - prevCount;
       }
@@ -135,18 +151,27 @@ public class JobSplitWriter {
   
   private static SplitMetaInfo[] writeOldSplits(
       org.apache.hadoop.mapred.InputSplit[] splits,
-      FSDataOutputStream out) throws IOException {
+      FSDataOutputStream out, Configuration conf) throws IOException {
     SplitMetaInfo[] info = new SplitMetaInfo[splits.length];
     if (splits.length != 0) {
       int i = 0;
       long offset = out.getPos();
+      int maxBlockLocations = conf.getInt(MRConfig.MAX_BLOCK_LOCATIONS_KEY,
+          MRConfig.MAX_BLOCK_LOCATIONS_DEFAULT);
       for(org.apache.hadoop.mapred.InputSplit split: splits) {
         long prevLen = out.getPos();
         Text.writeString(out, split.getClass().getName());
         split.write(out);
         long currLen = out.getPos();
+        String[] locations = split.getLocations();
+        if (locations.length > maxBlockLocations) {
+          LOG.warn("Max block location exceeded for split: "
+              + split + " splitsize: " + locations.length +
+              " maxsize: " + maxBlockLocations);
+          locations = Arrays.copyOf(locations,maxBlockLocations);
+        }
         info[i++] = new JobSplit.SplitMetaInfo( 
-            split.getLocations(), offset,
+            locations, offset,
             split.getLength());
         offset += currLen - prevLen;
       }

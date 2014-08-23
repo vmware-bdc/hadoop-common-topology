@@ -17,18 +17,14 @@
  */
 package org.apache.hadoop.hdfs;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
-import static org.mockito.Mockito.*;
-
-import java.net.InetSocketAddress;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
 import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
@@ -37,14 +33,79 @@ import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.VersionInfo;
 import org.junit.Test;
 
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.security.Permission;
+
+import static org.junit.Assert.*;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+
 /**
- * This class tests that a file need not be closed before its
- * data can be read by another client.
+ * This class tests data node registration.
  */
 public class TestDatanodeRegistration {
   
   public static final Log LOG = LogFactory.getLog(TestDatanodeRegistration.class);
 
+  private static class MonitorDNS extends SecurityManager {
+    int lookups = 0;
+    @Override
+    public void checkPermission(Permission perm) {}    
+    @Override
+    public void checkConnect(String host, int port) {
+      if (port == -1) {
+        lookups++;
+      }
+    }
+  }
+
+  /**
+   * Ensure the datanode manager does not do host lookup after registration,
+   * especially for node reports.
+   * @throws Exception
+   */
+  @Test
+  public void testDNSLookups() throws Exception {
+    MonitorDNS sm = new MonitorDNS();
+    System.setSecurityManager(sm);
+    
+    MiniDFSCluster cluster = null;
+    try {
+      HdfsConfiguration conf = new HdfsConfiguration();
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(8).build();
+      cluster.waitActive();
+      
+      int initialLookups = sm.lookups;
+      assertTrue("dns security manager is active", initialLookups != 0);
+      
+      DatanodeManager dm =
+          cluster.getNamesystem().getBlockManager().getDatanodeManager();
+      
+      // make sure no lookups occur
+      dm.refreshNodes(conf);
+      assertEquals(initialLookups, sm.lookups);
+
+      dm.refreshNodes(conf);
+      assertEquals(initialLookups, sm.lookups);
+      
+      // ensure none of the reports trigger lookups
+      dm.getDatanodeListForReport(DatanodeReportType.ALL);
+      assertEquals(initialLookups, sm.lookups);
+      
+      dm.getDatanodeListForReport(DatanodeReportType.LIVE);
+      assertEquals(initialLookups, sm.lookups);
+      
+      dm.getDatanodeListForReport(DatanodeReportType.DEAD);
+      assertEquals(initialLookups, sm.lookups);
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+      System.setSecurityManager(null);
+    }
+  }
+  
   /**
    * Regression test for HDFS-894 ensures that, when datanodes
    * are restarted, the new IPC port is registered with the
@@ -92,6 +153,61 @@ public class TestDatanodeRegistration {
   }
   
   @Test
+  public void testChangeStorageID() throws Exception {
+    final String DN_IP_ADDR = "127.0.0.1";
+    final String DN_HOSTNAME = "localhost";
+    final int DN_XFER_PORT = 12345;
+    final int DN_INFO_PORT = 12346;
+    final int DN_INFO_SECURE_PORT = 12347;
+    final int DN_IPC_PORT = 12348;
+    Configuration conf = new HdfsConfiguration();
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf)
+          .numDataNodes(0)
+          .build();
+      InetSocketAddress addr = new InetSocketAddress(
+        "localhost",
+        cluster.getNameNodePort());
+      DFSClient client = new DFSClient(addr, conf);
+      NamenodeProtocols rpcServer = cluster.getNameNodeRpc();
+
+      // register a datanode
+      DatanodeID dnId = new DatanodeID(DN_IP_ADDR, DN_HOSTNAME,
+          "fake-datanode-id", DN_XFER_PORT, DN_INFO_PORT, DN_INFO_SECURE_PORT,
+          DN_IPC_PORT);
+      long nnCTime = cluster.getNamesystem().getFSImage().getStorage()
+          .getCTime();
+      StorageInfo mockStorageInfo = mock(StorageInfo.class);
+      doReturn(nnCTime).when(mockStorageInfo).getCTime();
+      doReturn(HdfsConstants.DATANODE_LAYOUT_VERSION).when(mockStorageInfo)
+          .getLayoutVersion();
+      DatanodeRegistration dnReg = new DatanodeRegistration(dnId,
+          mockStorageInfo, null, VersionInfo.getVersion());
+      rpcServer.registerDatanode(dnReg);
+
+      DatanodeInfo[] report = client.datanodeReport(DatanodeReportType.ALL);
+      assertEquals("Expected a registered datanode", 1, report.length);
+
+      // register the same datanode again with a different storage ID
+      dnId = new DatanodeID(DN_IP_ADDR, DN_HOSTNAME,
+          "changed-fake-datanode-id", DN_XFER_PORT, DN_INFO_PORT,
+          DN_INFO_SECURE_PORT, DN_IPC_PORT);
+      dnReg = new DatanodeRegistration(dnId,
+          mockStorageInfo, null, VersionInfo.getVersion());
+      rpcServer.registerDatanode(dnReg);
+
+      report = client.datanodeReport(DatanodeReportType.ALL);
+      assertEquals("Datanode with changed storage ID not recognized",
+          1, report.length);
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
+  @Test
   public void testRegistrationWithDifferentSoftwareVersions() throws Exception {
     Configuration conf = new HdfsConfiguration();
     conf.set(DFSConfigKeys.DFS_DATANODE_MIN_SUPPORTED_NAMENODE_VERSION_KEY, "3.0.0");
@@ -109,8 +225,10 @@ public class TestDatanodeRegistration {
       doReturn(nnCTime).when(mockStorageInfo).getCTime();
       
       DatanodeRegistration mockDnReg = mock(DatanodeRegistration.class);
-      doReturn(HdfsConstants.LAYOUT_VERSION).when(mockDnReg).getVersion();
-      doReturn("fake-storage-id").when(mockDnReg).getStorageID();
+      doReturn(HdfsConstants.DATANODE_LAYOUT_VERSION).when(mockDnReg).getVersion();
+      doReturn("127.0.0.1").when(mockDnReg).getIpAddr();
+      doReturn(123).when(mockDnReg).getXferPort();
+      doReturn("fake-storage-id").when(mockDnReg).getDatanodeUuid();
       doReturn(mockStorageInfo).when(mockDnReg).getStorageInfo();
       
       // Should succeed when software versions are the same.
@@ -156,13 +274,15 @@ public class TestDatanodeRegistration {
       doReturn(nnCTime).when(mockStorageInfo).getCTime();
       
       DatanodeRegistration mockDnReg = mock(DatanodeRegistration.class);
-      doReturn(HdfsConstants.LAYOUT_VERSION).when(mockDnReg).getVersion();
-      doReturn("fake-storage-id").when(mockDnReg).getStorageID();
+      doReturn(HdfsConstants.DATANODE_LAYOUT_VERSION).when(mockDnReg).getVersion();
+      doReturn("fake-storage-id").when(mockDnReg).getDatanodeUuid();
       doReturn(mockStorageInfo).when(mockDnReg).getStorageInfo();
       
       // Should succeed when software versions are the same and CTimes are the
       // same.
       doReturn(VersionInfo.getVersion()).when(mockDnReg).getSoftwareVersion();
+      doReturn("127.0.0.1").when(mockDnReg).getIpAddr();
+      doReturn(123).when(mockDnReg).getXferPort();
       rpcServer.registerDatanode(mockDnReg);
       
       // Should succeed when software versions are the same and CTimes are

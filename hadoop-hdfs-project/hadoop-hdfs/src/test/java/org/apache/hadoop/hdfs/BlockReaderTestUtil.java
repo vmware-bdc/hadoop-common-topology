@@ -18,29 +18,55 @@
 
 package org.apache.hadoop.hdfs;
 
-import java.net.Socket;
-import java.net.InetSocketAddress;
-import java.io.DataOutputStream;
-import java.util.Random;
-import java.util.List;
-import java.io.IOException;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.util.List;
+import java.util.Random;
+
+import org.apache.commons.io.IOUtils;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.net.Peer;
+import org.apache.hadoop.hdfs.net.TcpPeerServer;
+import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
+import org.apache.hadoop.hdfs.server.blockmanagement.CacheReplicationMonitor;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.hdfs.server.datanode.ShortCircuitRegistry;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetCache;
+import org.apache.hadoop.hdfs.server.namenode.CacheManager;
+import org.apache.hadoop.hdfs.shortcircuit.DfsClientShmManager;
+import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitCache;
+import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitReplica;
+import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitShm;
 import org.apache.hadoop.net.NetUtils;
-
-import static org.junit.Assert.*;
+import org.apache.hadoop.security.token.Token;
+import org.apache.log4j.Level;
+import org.apache.log4j.LogManager;
 
 /**
  * A helper class to setup the cluster, and get to BlockReader and DataNode for a block.
  */
 public class BlockReaderTestUtil {
+  /**
+   * Returns true if we should run tests that generate large files (> 1GB)
+   */
+  static public boolean shouldTestLargeFiles() {
+    String property = System.getProperty("hdfs.test.large.files");
+    if (property == null) return false;
+    if (property.isEmpty()) return true;
+    return Boolean.parseBoolean(property);
+  }
 
   private HdfsConfiguration conf = null;
   private MiniDFSCluster cluster = null;
@@ -139,22 +165,55 @@ public class BlockReaderTestUtil {
    */
   public BlockReader getBlockReader(LocatedBlock testBlock, int offset, int lenToRead)
       throws IOException {
+    return getBlockReader(cluster, testBlock, offset, lenToRead);
+  }
+
+  /**
+   * Get a BlockReader for the given block.
+   */
+  public static BlockReader getBlockReader(MiniDFSCluster cluster,
+      LocatedBlock testBlock, int offset, int lenToRead) throws IOException {
     InetSocketAddress targetAddr = null;
-    Socket sock = null;
     ExtendedBlock block = testBlock.getBlock();
     DatanodeInfo[] nodes = testBlock.getLocations();
     targetAddr = NetUtils.createSocketAddr(nodes[0].getXferAddr());
-    sock = NetUtils.getDefaultSocketFactory(conf).createSocket();
-    sock.connect(targetAddr, HdfsServerConstants.READ_TIMEOUT);
-    sock.setSoTimeout(HdfsServerConstants.READ_TIMEOUT);
 
-    return BlockReaderFactory.newBlockReader(
-      new DFSClient.Conf(conf),
-      sock, targetAddr.toString()+ ":" + block.getBlockId(), block,
-      testBlock.getBlockToken(), 
-      offset, lenToRead,
-      conf.getInt(CommonConfigurationKeys.IO_FILE_BUFFER_SIZE_KEY, 4096),
-      true, "");
+    final DistributedFileSystem fs = cluster.getFileSystem();
+    return new BlockReaderFactory(fs.getClient().getConf()).
+      setInetSocketAddress(targetAddr).
+      setBlock(block).
+      setFileName(targetAddr.toString()+ ":" + block.getBlockId()).
+      setBlockToken(testBlock.getBlockToken()).
+      setStartOffset(offset).
+      setLength(lenToRead).
+      setVerifyChecksum(true).
+      setClientName("BlockReaderTestUtil").
+      setDatanodeInfo(nodes[0]).
+      setClientCacheContext(ClientContext.getFromConf(fs.getConf())).
+      setCachingStrategy(CachingStrategy.newDefaultStrategy()).
+      setConfiguration(fs.getConf()).
+      setAllowShortCircuitLocalReads(true).
+      setRemotePeerFactory(new RemotePeerFactory() {
+        @Override
+        public Peer newConnectedPeer(InetSocketAddress addr,
+            Token<BlockTokenIdentifier> blockToken, DatanodeID datanodeId)
+            throws IOException {
+          Peer peer = null;
+          Socket sock = NetUtils.
+              getDefaultSocketFactory(fs.getConf()).createSocket();
+          try {
+            sock.connect(addr, HdfsServerConstants.READ_TIMEOUT);
+            sock.setSoTimeout(HdfsServerConstants.READ_TIMEOUT);
+            peer = TcpPeerServer.peerFromSocket(sock);
+          } finally {
+            if (peer == null) {
+              IOUtils.closeQuietly(sock);
+            }
+          }
+          return peer;
+        }
+      }).
+      build();
   }
 
   /**
@@ -165,5 +224,35 @@ public class BlockReaderTestUtil {
     int ipcport = nodes[0].getIpcPort();
     return cluster.getDataNode(ipcport);
   }
+  
+  public static void enableHdfsCachingTracing() {
+    LogManager.getLogger(CacheReplicationMonitor.class.getName()).setLevel(
+        Level.TRACE);
+    LogManager.getLogger(CacheManager.class.getName()).setLevel(
+        Level.TRACE);
+    LogManager.getLogger(FsDatasetCache.class.getName()).setLevel(
+        Level.TRACE);
+  }
 
+  public static void enableBlockReaderFactoryTracing() {
+    LogManager.getLogger(BlockReaderFactory.class.getName()).setLevel(
+        Level.TRACE);
+    LogManager.getLogger(ShortCircuitCache.class.getName()).setLevel(
+        Level.TRACE);
+    LogManager.getLogger(ShortCircuitReplica.class.getName()).setLevel(
+        Level.TRACE);
+    LogManager.getLogger(BlockReaderLocal.class.getName()).setLevel(
+        Level.TRACE);
+  }
+
+  public static void enableShortCircuitShmTracing() {
+    LogManager.getLogger(DfsClientShmManager.class.getName()).setLevel(
+        Level.TRACE);
+    LogManager.getLogger(ShortCircuitRegistry.class.getName()).setLevel(
+        Level.TRACE);
+    LogManager.getLogger(ShortCircuitShm.class.getName()).setLevel(
+        Level.TRACE);
+    LogManager.getLogger(DataNode.class.getName()).setLevel(
+        Level.TRACE);
+  }
 }

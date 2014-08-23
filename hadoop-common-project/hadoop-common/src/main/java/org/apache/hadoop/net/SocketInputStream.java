@@ -19,6 +19,7 @@
 package org.apache.hadoop.net;
 
 import java.io.IOException;
+import org.apache.hadoop.classification.InterfaceAudience;
 import java.io.InputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -27,9 +28,6 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.SelectableChannel;
 import java.nio.channels.SelectionKey;
-
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
 
 /**
  * This implements an input stream that can have a timeout while reading.
@@ -40,8 +38,7 @@ import org.apache.hadoop.classification.InterfaceStability;
  * IllegalBlockingModeException. 
  * Please use {@link SocketOutputStream} for writing.
  */
-@InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
-@InterfaceStability.Unstable
+@InterfaceAudience.LimitedPrivate("HDFS")
 public class SocketInputStream extends InputStream
                                implements ReadableByteChannel {
 
@@ -55,6 +52,7 @@ public class SocketInputStream extends InputStream
       this.channel = channel;
     }
     
+    @Override
     int performIO(ByteBuffer buf) throws IOException {
       return channel.read(buf);
     }
@@ -128,10 +126,12 @@ public class SocketInputStream extends InputStream
     return ret;
   }
 
+  @Override
   public int read(byte[] b, int off, int len) throws IOException {
     return read(ByteBuffer.wrap(b, off, len));
   }
 
+  @Override
   public synchronized void close() throws IOException {
     /* close the channel since Socket.getInputStream().close()
      * closes the socket.
@@ -151,10 +151,12 @@ public class SocketInputStream extends InputStream
   
   //ReadableByteChannel interface
     
+  @Override
   public boolean isOpen() {
     return reader.isOpen();
   }
     
+  @Override
   public int read(ByteBuffer dst) throws IOException {
     return reader.doIO(dst, SelectionKey.OP_READ);
   }
@@ -170,5 +172,9 @@ public class SocketInputStream extends InputStream
    */
   public void waitForReadable() throws IOException {
     reader.waitForIO(SelectionKey.OP_READ);
+  }
+
+  public void setTimeout(long timeoutMs) {
+    reader.setTimeout(timeoutMs);
   }
 }

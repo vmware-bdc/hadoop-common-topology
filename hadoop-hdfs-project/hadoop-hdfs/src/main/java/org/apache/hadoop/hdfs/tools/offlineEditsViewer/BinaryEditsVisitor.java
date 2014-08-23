@@ -22,8 +22,10 @@ import java.io.IOException;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp;
 import org.apache.hadoop.hdfs.server.namenode.EditLogFileOutputStream;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeLayoutVersion;
 
 /**
  * BinaryEditsVisitor implements a binary EditsVisitor
@@ -35,12 +37,12 @@ public class BinaryEditsVisitor implements OfflineEditsVisitor {
 
   /**
    * Create a processor that writes to a given file
-   *
-   * @param filename Name of file to write output to
+   * @param outputName Name of file to write output to
    */
   public BinaryEditsVisitor(String outputName) throws IOException {
-    this.elfos = new EditLogFileOutputStream(new File(outputName), 0);
-    elfos.create();
+    this.elfos = new EditLogFileOutputStream(new Configuration(),
+      new File(outputName), 0);
+    elfos.create(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
   }
 
   /**
@@ -56,7 +58,7 @@ public class BinaryEditsVisitor implements OfflineEditsVisitor {
   @Override
   public void close(Throwable error) throws IOException {
     elfos.setReadyToFlush();
-    elfos.flushAndSync();
+    elfos.flushAndSync(true);
     elfos.close();
   }
 

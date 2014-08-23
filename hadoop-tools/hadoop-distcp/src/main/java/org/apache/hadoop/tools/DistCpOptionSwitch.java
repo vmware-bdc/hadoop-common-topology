@@ -37,15 +37,22 @@ public enum DistCpOptionSwitch {
   /**
    * Preserves status of file/path in the target.
    * Default behavior with -p, is to preserve replication,
-   * block size, user, group and permission on the target file
+   * block size, user, group, permission and checksum type on the target file.
+   * Note that when preserving checksum type, block size is also preserved.
    *
-   * If any of the optional switches are present among rbugp, then
-   * only the corresponding file attribute is preserved
+   * If any of the optional switches are present among rbugpc, then
+   * only the corresponding file attribute is preserved.
    *
    */
   PRESERVE_STATUS(DistCpConstants.CONF_LABEL_PRESERVE_STATUS,
-      new Option("p", true, "preserve status (rbugp)" +
-          "(replication, block-size, user, group, permission)")),
+      new Option("p", true, "preserve status (rbugpcax)(replication, " +
+          "block-size, user, group, permission, checksum-type, ACL, XATTR).  " +
+          "If -p is specified with no <arg>, then preserves replication, " +
+          "block size, user, group, permission and checksum type." +
+          "raw.* xattrs are preserved when both the source and destination " +
+          "paths are in the /.reserved/raw hierarchy (HDFS only). raw.* xattr" +
+          "preservation is independent of the -p flag." +
+          "Refer to the DistCp documentation for more details.")),
 
   /**
    * Update target location by copying only files that are missing
@@ -53,7 +60,7 @@ public enum DistCpOptionSwitch {
    * across source and target. Typically used with DELETE_MISSING
    * Incompatible with ATOMIC_COMMIT
    */
-  SYNC_FOLDERS(DistCpConstants.CONF_LABEL_SYNC_FOLDERS, 
+  SYNC_FOLDERS(DistCpConstants.CONF_LABEL_SYNC_FOLDERS,
       new Option("update", false, "Update target, copying only missing" +
           "files or directories")),
 
@@ -80,7 +87,7 @@ public enum DistCpOptionSwitch {
    * Max number of maps to use during copy. DistCp will split work
    * as equally as possible among these maps
    */
-  MAX_MAPS(DistCpConstants.CONF_LABEL_MAX_MAPS, 
+  MAX_MAPS(DistCpConstants.CONF_LABEL_MAX_MAPS,
       new Option("m", true, "Max number of concurrent maps to use for copy")),
 
   /**
@@ -135,6 +142,10 @@ public enum DistCpOptionSwitch {
       new Option("overwrite", false, "Choose to overwrite target files " +
           "unconditionally, even if they exist.")),
 
+  APPEND(DistCpConstants.CONF_LABEL_APPEND,
+      new Option("append", false,
+          "Reuse existing data in target files and append new data to them if possible")),
+
   /**
    * Should DisctpExecution be blocking
    */
@@ -155,6 +166,7 @@ public enum DistCpOptionSwitch {
   BANDWIDTH(DistCpConstants.CONF_LABEL_BANDWIDTH_MB,
       new Option("bandwidth", true, "Specify bandwidth per map in MB"));
 
+  static final String PRESERVE_STATUS_DEFAULT = "-prbugpc";
   private final String confLabel;
   private final Option option;
 

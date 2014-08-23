@@ -17,35 +17,31 @@
  */
 package org.apache.hadoop.hdfs.web;
 
-import java.io.ByteArrayInputStream;
-import java.io.DataInputStream;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
-
-import org.apache.hadoop.fs.ContentSummary;
-import org.apache.hadoop.fs.FileChecksum;
-import org.apache.hadoop.fs.FileStatus;
-import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+import org.apache.hadoop.fs.*;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSUtil;
-import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.XAttrHelper;
+import org.apache.hadoop.hdfs.protocol.*;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo.AdminStates;
-import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
-import org.apache.hadoop.hdfs.protocol.LocatedBlock;
-import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
-import org.apache.hadoop.io.MD5Hash;
+import org.apache.hadoop.hdfs.server.namenode.INodeId;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
+import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.StringUtils;
 import org.mortbay.util.ajax.JSON;
+
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.IOException;
+import java.util.*;
 
 /** JSON Utilities */
 public class JsonUtil {
@@ -184,8 +180,9 @@ public class JsonUtil {
   }
 
   /** Convert a string to a FsPermission object. */
-  private static FsPermission toFsPermission(final String s) {
-    return new FsPermission(Short.parseShort(s, 8));
+  private static FsPermission toFsPermission(final String s, Boolean aclBit) {
+    FsPermission perm = new FsPermission(Short.parseShort(s, 8));
+    return (aclBit != null && aclBit) ? new FsAclPermission(perm) : perm;
   }
 
   static enum PathType {
@@ -212,11 +209,17 @@ public class JsonUtil {
     m.put("length", status.getLen());
     m.put("owner", status.getOwner());
     m.put("group", status.getGroup());
-    m.put("permission", toString(status.getPermission()));
+    FsPermission perm = status.getPermission();
+    m.put("permission", toString(perm));
+    if (perm.getAclBit()) {
+      m.put("aclBit", true);
+    }
     m.put("accessTime", status.getAccessTime());
     m.put("modificationTime", status.getModificationTime());
     m.put("blockSize", status.getBlockSize());
     m.put("replication", status.getReplication());
+    m.put("fileId", status.getFileId());
+    m.put("childrenNum", status.getChildrenNum());
     return includeType ? toJsonString(FileStatus.class, m): JSON.toString(m);
   }
 
@@ -236,14 +239,21 @@ public class JsonUtil {
     final long len = (Long) m.get("length");
     final String owner = (String) m.get("owner");
     final String group = (String) m.get("group");
-    final FsPermission permission = toFsPermission((String) m.get("permission"));
+    final FsPermission permission = toFsPermission((String) m.get("permission"),
+      (Boolean)m.get("aclBit"));
     final long aTime = (Long) m.get("accessTime");
     final long mTime = (Long) m.get("modificationTime");
     final long blockSize = (Long) m.get("blockSize");
     final short replication = (short) (long) (Long) m.get("replication");
+    final long fileId = m.containsKey("fileId") ? (Long) m.get("fileId")
+        : INodeId.GRANDFATHER_INODE_ID;
+    Long childrenNumLong = (Long) m.get("childrenNum");
+    final int childrenNum = (childrenNumLong == null) ? -1
+            : childrenNumLong.intValue();
     return new HdfsFileStatus(len, type == PathType.DIRECTORY, replication,
         blockSize, mTime, aTime, permission, owner, group,
-        symlink, DFSUtil.string2Bytes(localName));
+        symlink, DFSUtil.string2Bytes(localName), fileId, childrenNum,
+        null);
   }
 
   /** Convert an ExtendedBlock to a Json map. */
@@ -274,23 +284,30 @@ public class JsonUtil {
   }
   
   /** Convert a DatanodeInfo to a Json map. */
-  private static Map<String, Object> toJsonMap(final DatanodeInfo datanodeinfo) {
+  static Map<String, Object> toJsonMap(final DatanodeInfo datanodeinfo) {
     if (datanodeinfo == null) {
       return null;
     }
 
+    // TODO: Fix storageID
     final Map<String, Object> m = new TreeMap<String, Object>();
     m.put("ipAddr", datanodeinfo.getIpAddr());
+    // 'name' is equivalent to ipAddr:xferPort. Older clients (1.x, 0.23.x) 
+    // expects this instead of the two fields.
+    m.put("name", datanodeinfo.getXferAddr());
     m.put("hostName", datanodeinfo.getHostName());
-    m.put("storageID", datanodeinfo.getStorageID());
+    m.put("storageID", datanodeinfo.getDatanodeUuid());
     m.put("xferPort", datanodeinfo.getXferPort());
     m.put("infoPort", datanodeinfo.getInfoPort());
+    m.put("infoSecurePort", datanodeinfo.getInfoSecurePort());
     m.put("ipcPort", datanodeinfo.getIpcPort());
 
     m.put("capacity", datanodeinfo.getCapacity());
     m.put("dfsUsed", datanodeinfo.getDfsUsed());
     m.put("remaining", datanodeinfo.getRemaining());
     m.put("blockPoolUsed", datanodeinfo.getBlockPoolUsed());
+    m.put("cacheCapacity", datanodeinfo.getCacheCapacity());
+    m.put("cacheUsed", datanodeinfo.getCacheUsed());
     m.put("lastUpdate", datanodeinfo.getLastUpdate());
     m.put("xceiverCount", datanodeinfo.getXceiverCount());
     m.put("networkLocation", datanodeinfo.getNetworkLocation());
@@ -298,28 +315,89 @@ public class JsonUtil {
     return m;
   }
 
+  private static int getInt(Map<?, ?> m, String key, final int defaultValue) {
+    Object value = m.get(key);
+    if (value == null) {
+      return defaultValue;
+    }
+    return (int) (long) (Long) value;
+  }
+
+  private static long getLong(Map<?, ?> m, String key, final long defaultValue) {
+    Object value = m.get(key);
+    if (value == null) {
+      return defaultValue;
+    }
+    return (Long) value;
+  }
+
+  private static String getString(Map<?, ?> m, String key,
+      final String defaultValue) {
+    Object value = m.get(key);
+    if (value == null) {
+      return defaultValue;
+    }
+    return (String) value;
+  }
+
   /** Convert a Json map to an DatanodeInfo object. */
-  private static DatanodeInfo toDatanodeInfo(final Map<?, ?> m) {
+  static DatanodeInfo toDatanodeInfo(final Map<?, ?> m) 
+    throws IOException {
     if (m == null) {
       return null;
     }
 
+    // ipAddr and xferPort are the critical fields for accessing data.
+    // If any one of the two is missing, an exception needs to be thrown.
+
+    // Handle the case of old servers (1.x, 0.23.x) sending 'name' instead
+    //  of ipAddr and xferPort.
+    String ipAddr = getString(m, "ipAddr", null);
+    int xferPort = getInt(m, "xferPort", -1);
+    if (ipAddr == null) {
+      String name = getString(m, "name", null);
+      if (name != null) {
+        int colonIdx = name.indexOf(':');
+        if (colonIdx > 0) {
+          ipAddr = name.substring(0, colonIdx);
+          xferPort = Integer.parseInt(name.substring(colonIdx +1));
+        } else {
+          throw new IOException(
+              "Invalid value in server response: name=[" + name + "]");
+        }
+      } else {
+        throw new IOException(
+            "Missing both 'ipAddr' and 'name' in server response.");
+      }
+      // ipAddr is non-null & non-empty string at this point.
+    }
+
+    // Check the validity of xferPort.
+    if (xferPort == -1) {
+      throw new IOException(
+          "Invalid or missing 'xferPort' in server response.");
+    }
+
+    // TODO: Fix storageID
     return new DatanodeInfo(
-        (String)m.get("ipAddr"),
+        ipAddr,
         (String)m.get("hostName"),
         (String)m.get("storageID"),
-        (int)(long)(Long)m.get("xferPort"),
+        xferPort,
         (int)(long)(Long)m.get("infoPort"),
+        getInt(m, "infoSecurePort", 0),
         (int)(long)(Long)m.get("ipcPort"),
 
-        (Long)m.get("capacity"),
-        (Long)m.get("dfsUsed"),
-        (Long)m.get("remaining"),
-        (Long)m.get("blockPoolUsed"),
-        (Long)m.get("lastUpdate"),
-        (int)(long)(Long)m.get("xceiverCount"),
-        (String)m.get("networkLocation"),
-        AdminStates.valueOf((String)m.get("adminState")));
+        getLong(m, "capacity", 0l),
+        getLong(m, "dfsUsed", 0l),
+        getLong(m, "remaining", 0l),
+        getLong(m, "blockPoolUsed", 0l),
+        getLong(m, "cacheCapacity", 0l),
+        getLong(m, "cacheUsed", 0l),
+        getLong(m, "lastUpdate", 0l),
+        getInt(m, "xceiverCount", 0),
+        getString(m, "networkLocation", ""),
+        AdminStates.valueOf(getString(m, "adminState", "NORMAL")));
   }
 
   /** Convert a DatanodeInfo[] to a Json array. */
@@ -338,7 +416,8 @@ public class JsonUtil {
   }
 
   /** Convert an Object[] to a DatanodeInfo[]. */
-  private static DatanodeInfo[] toDatanodeInfoArray(final Object[] objects) {
+  private static DatanodeInfo[] toDatanodeInfoArray(final Object[] objects) 
+      throws IOException {
     if (objects == null) {
       return null;
     } else if (objects.length == 0) {
@@ -365,6 +444,7 @@ public class JsonUtil {
     m.put("startOffset", locatedblock.getStartOffset());
     m.put("block", toJsonMap(locatedblock.getBlock()));
     m.put("locations", toJsonArray(locatedblock.getLocations()));
+    m.put("cachedLocations", toJsonArray(locatedblock.getCachedLocations()));
     return m;
   }
 
@@ -379,8 +459,11 @@ public class JsonUtil {
         (Object[])m.get("locations"));
     final long startOffset = (Long)m.get("startOffset");
     final boolean isCorrupt = (Boolean)m.get("isCorrupt");
+    final DatanodeInfo[] cachedLocations = toDatanodeInfoArray(
+        (Object[])m.get("cachedLocations"));
 
-    final LocatedBlock locatedblock = new LocatedBlock(b, locations, startOffset, isCorrupt);
+    final LocatedBlock locatedblock = new LocatedBlock(b, locations,
+        null, null, startOffset, isCorrupt, cachedLocations);
     locatedblock.setBlockToken(toBlockToken((Map<?, ?>)m.get("blockToken")));
     return locatedblock;
   }
@@ -450,7 +533,7 @@ public class JsonUtil {
         (Map<?, ?>)m.get("lastLocatedBlock"));
     final boolean isLastBlockComplete = (Boolean)m.get("isLastBlockComplete");
     return new LocatedBlocks(fileLength, isUnderConstruction, locatedBlocks,
-        lastLocatedBlock, isLastBlockComplete);
+        lastLocatedBlock, isLastBlockComplete, null);
   }
 
   /** Convert a ContentSummary to a Json string. */
@@ -513,7 +596,21 @@ public class JsonUtil {
     final byte[] bytes = StringUtils.hexStringToByte((String)m.get("bytes"));
 
     final DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes));
-    final MD5MD5CRC32FileChecksum checksum = new MD5MD5CRC32FileChecksum();
+    final DataChecksum.Type crcType = 
+        MD5MD5CRC32FileChecksum.getCrcTypeFromAlgorithmName(algorithm);
+    final MD5MD5CRC32FileChecksum checksum;
+
+    // Recreate what DFSClient would have returned.
+    switch(crcType) {
+      case CRC32:
+        checksum = new MD5MD5CRC32GzipFileChecksum();
+        break;
+      case CRC32C:
+        checksum = new MD5MD5CRC32CastagnoliFileChecksum();
+        break;
+      default:
+        throw new IOException("Unknown algorithm: " + algorithm);
+    }
     checksum.readFields(in);
 
     //check algorithm name
@@ -528,5 +625,158 @@ public class JsonUtil {
     }
 
     return checksum;
+  }
+  /** Convert a AclStatus object to a Json string. */
+  public static String toJsonString(final AclStatus status) {
+    if (status == null) {
+      return null;
+    }
+
+    final Map<String, Object> m = new TreeMap<String, Object>();
+    m.put("owner", status.getOwner());
+    m.put("group", status.getGroup());
+    m.put("stickyBit", status.isStickyBit());
+    m.put("entries", status.getEntries());
+    final Map<String, Map<String, Object>> finalMap =
+        new TreeMap<String, Map<String, Object>>();
+    finalMap.put(AclStatus.class.getSimpleName(), m);
+    return JSON.toString(finalMap);
+  }
+
+  /** Convert a Json map to a AclStatus object. */
+  public static AclStatus toAclStatus(final Map<?, ?> json) {
+    if (json == null) {
+      return null;
+    }
+
+    final Map<?, ?> m = (Map<?, ?>) json.get(AclStatus.class.getSimpleName());
+
+    AclStatus.Builder aclStatusBuilder = new AclStatus.Builder();
+    aclStatusBuilder.owner((String) m.get("owner"));
+    aclStatusBuilder.group((String) m.get("group"));
+    aclStatusBuilder.stickyBit((Boolean) m.get("stickyBit"));
+
+    final Object[] entries = (Object[]) m.get("entries");
+
+    List<AclEntry> aclEntryList = new ArrayList<AclEntry>();
+    for (int i = 0; i < entries.length; i++) {
+      AclEntry aclEntry = AclEntry.parseAclEntry((String) entries[i], true);
+      aclEntryList.add(aclEntry);
+    }
+    aclStatusBuilder.addEntries(aclEntryList);
+    return aclStatusBuilder.build();
+  }
+  
+  private static Map<String, Object> toJsonMap(final XAttr xAttr,
+      final XAttrCodec encoding) throws IOException {
+    if (xAttr == null) {
+      return null;
+    }
+ 
+    final Map<String, Object> m = new TreeMap<String, Object>();
+    m.put("name", XAttrHelper.getPrefixName(xAttr));
+    m.put("value", xAttr.getValue() != null ? 
+        XAttrCodec.encodeValue(xAttr.getValue(), encoding) : null);
+    return m;
+  }
+  
+  private static Object[] toJsonArray(final List<XAttr> array,
+      final XAttrCodec encoding) throws IOException {
+    if (array == null) {
+      return null;
+    } else if (array.size() == 0) {
+      return EMPTY_OBJECT_ARRAY;
+    } else {
+      final Object[] a = new Object[array.size()];
+      for(int i = 0; i < array.size(); i++) {
+        a[i] = toJsonMap(array.get(i), encoding);
+      }
+      return a;
+    }
+  }
+  
+  public static String toJsonString(final List<XAttr> xAttrs, 
+      final XAttrCodec encoding) throws IOException {
+    final Map<String, Object> finalMap = new TreeMap<String, Object>();
+    finalMap.put("XAttrs", toJsonArray(xAttrs, encoding));
+    return JSON.toString(finalMap);
+  }
+  
+  public static String toJsonString(final List<XAttr> xAttrs)
+    throws IOException {
+    final List<String> names = Lists.newArrayListWithCapacity(xAttrs.size());
+    for (XAttr xAttr : xAttrs) {
+      names.add(XAttrHelper.getPrefixName(xAttr));
+    }
+    String ret = JSON.toString(names);
+    final Map<String, Object> finalMap = new TreeMap<String, Object>();
+    finalMap.put("XAttrNames", ret);
+    return JSON.toString(finalMap);
+  }
+
+  public static byte[] getXAttr(final Map<?, ?> json, final String name) 
+      throws IOException {
+    if (json == null) {
+      return null;
+    }
+    
+    Map<String, byte[]> xAttrs = toXAttrs(json);
+    if (xAttrs != null) {
+      return xAttrs.get(name);
+    }
+    
+    return null;
+  }
+  
+  public static Map<String, byte[]> toXAttrs(final Map<?, ?> json) 
+      throws IOException {
+    if (json == null) {
+      return null;
+    }
+    
+    return toXAttrMap((Object[])json.get("XAttrs"));
+  }
+  
+  public static List<String> toXAttrNames(final Map<?, ?> json)
+      throws IOException {
+    if (json == null) {
+      return null;
+    }
+
+    final String namesInJson = (String) json.get("XAttrNames");
+    final Object[] xattrs = (Object[]) JSON.parse(namesInJson);
+    final List<String> names =
+      Lists.newArrayListWithCapacity(json.keySet().size());
+
+    for (int i = 0; i < xattrs.length; i++) {
+        names.add((String) (xattrs[i]));
+    }
+    return names;
+  }
+
+  private static Map<String, byte[]> toXAttrMap(final Object[] objects) 
+      throws IOException {
+    if (objects == null) {
+      return null;
+    } else if (objects.length == 0) {
+      return Maps.newHashMap();
+    } else {
+      final Map<String, byte[]> xAttrs = Maps.newHashMap();
+      for(int i = 0; i < objects.length; i++) {
+        Map<?, ?> m = (Map<?, ?>) objects[i];
+        String name = (String) m.get("name");
+        String value = (String) m.get("value");
+        xAttrs.put(name, decodeXAttrValue(value));
+      }
+      return xAttrs;
+    }
+  }
+  
+  private static byte[] decodeXAttrValue(String value) throws IOException {
+    if (value != null) {
+      return XAttrCodec.decodeValue(value);
+    } else {
+      return new byte[0];
+    }
   }
 }

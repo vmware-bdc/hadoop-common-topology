@@ -47,6 +47,7 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
@@ -85,12 +86,54 @@ public class TestPipelinesFailover {
   
   private static final int STRESS_NUM_THREADS = 25;
   private static final int STRESS_RUNTIME = 40000;
+  
+  enum TestScenario {
+    GRACEFUL_FAILOVER {
+      @Override
+      void run(MiniDFSCluster cluster) throws IOException {
+        cluster.transitionToStandby(0);
+        cluster.transitionToActive(1);
+      }
+    },
+    ORIGINAL_ACTIVE_CRASHED {
+      @Override
+      void run(MiniDFSCluster cluster) throws IOException {
+        cluster.restartNameNode(0);
+        cluster.transitionToActive(1);
+      }
+    };
+
+    abstract void run(MiniDFSCluster cluster) throws IOException;
+  }
+  
+  enum MethodToTestIdempotence {
+    ALLOCATE_BLOCK,
+    COMPLETE_FILE;
+  }
 
   /**
    * Tests continuing a write pipeline over a failover.
    */
   @Test(timeout=30000)
-  public void testWriteOverFailover() throws Exception {
+  public void testWriteOverGracefulFailover() throws Exception {
+    doWriteOverFailoverTest(TestScenario.GRACEFUL_FAILOVER,
+        MethodToTestIdempotence.ALLOCATE_BLOCK);
+  }
+  
+  @Test(timeout=30000)
+  public void testAllocateBlockAfterCrashFailover() throws Exception {
+    doWriteOverFailoverTest(TestScenario.ORIGINAL_ACTIVE_CRASHED,
+        MethodToTestIdempotence.ALLOCATE_BLOCK);
+  }
+
+  @Test(timeout=30000)
+  public void testCompleteFileAfterCrashFailover() throws Exception {
+    doWriteOverFailoverTest(TestScenario.ORIGINAL_ACTIVE_CRASHED,
+        MethodToTestIdempotence.COMPLETE_FILE);
+  }
+  
+  private void doWriteOverFailoverTest(TestScenario scenario,
+      MethodToTestIdempotence methodToTest) throws Exception {
     Configuration conf = new Configuration();
     conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
     // Don't check replication periodically.
@@ -102,6 +145,8 @@ public class TestPipelinesFailover {
       .numDataNodes(3)
       .build();
     try {
+      int sizeWritten = 0;
+      
       cluster.waitActive();
       cluster.transitionToActive(0);
       Thread.sleep(500);
@@ -112,28 +157,39 @@ public class TestPipelinesFailover {
       
       // write a block and a half
       AppendTestUtil.write(stm, 0, BLOCK_AND_A_HALF);
+      sizeWritten += BLOCK_AND_A_HALF;
       
       // Make sure all of the blocks are written out before failover.
       stm.hflush();
 
       LOG.info("Failing over to NN 1");
-      cluster.transitionToStandby(0);
-      cluster.transitionToActive(1);
+      scenario.run(cluster);
 
-      assertTrue(fs.exists(TEST_PATH));
+      // NOTE: explicitly do *not* make any further metadata calls
+      // to the NN here. The next IPC call should be to allocate the next
+      // block. Any other call would notice the failover and not test
+      // idempotence of the operation (HDFS-3031)
+      
       FSNamesystem ns1 = cluster.getNameNode(1).getNamesystem();
       BlockManagerTestUtil.updateState(ns1.getBlockManager());
       assertEquals(0, ns1.getPendingReplicationBlocks());
       assertEquals(0, ns1.getCorruptReplicaBlocks());
       assertEquals(0, ns1.getMissingBlocksCount());
 
-      // write another block and a half
-      AppendTestUtil.write(stm, BLOCK_AND_A_HALF, BLOCK_AND_A_HALF);
-
+      // If we're testing allocateBlock()'s idempotence, write another
+      // block and a half, so we have to allocate a new block.
+      // Otherise, don't write anything, so our next RPC will be
+      // completeFile() if we're testing idempotence of that operation.
+      if (methodToTest == MethodToTestIdempotence.ALLOCATE_BLOCK) {
+        // write another block and a half
+        AppendTestUtil.write(stm, sizeWritten, BLOCK_AND_A_HALF);
+        sizeWritten += BLOCK_AND_A_HALF;
+      }
+      
       stm.close();
       stm = null;
       
-      AppendTestUtil.check(fs, TEST_PATH, BLOCK_SIZE * 3);
+      AppendTestUtil.check(fs, TEST_PATH, sizeWritten);
     } finally {
       IOUtils.closeStream(stm);
       cluster.shutdown();
@@ -146,7 +202,18 @@ public class TestPipelinesFailover {
    * even when the pipeline was constructed on a different NN.
    */
   @Test(timeout=30000)
-  public void testWriteOverFailoverWithDnFail() throws Exception {
+  public void testWriteOverGracefulFailoverWithDnFail() throws Exception {
+    doTestWriteOverFailoverWithDnFail(TestScenario.GRACEFUL_FAILOVER);
+  }
+  
+  @Test(timeout=30000)
+  public void testWriteOverCrashFailoverWithDnFail() throws Exception {
+    doTestWriteOverFailoverWithDnFail(TestScenario.ORIGINAL_ACTIVE_CRASHED);
+  }
+
+  
+  private void doTestWriteOverFailoverWithDnFail(TestScenario scenario)
+      throws Exception {
     Configuration conf = new Configuration();
     conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
     
@@ -171,8 +238,7 @@ public class TestPipelinesFailover {
       stm.hflush();
 
       LOG.info("Failing over to NN 1");
-      cluster.transitionToStandby(0);
-      cluster.transitionToActive(1);
+      scenario.run(cluster);
 
       assertTrue(fs.exists(TEST_PATH));
       
@@ -183,8 +249,8 @@ public class TestPipelinesFailover {
       stm.hflush();
       
       LOG.info("Failing back to NN 0");
-      cluster.transitionToStandby(0);
-      cluster.transitionToActive(1);
+      cluster.transitionToStandby(1);
+      cluster.transitionToActive(0);
       
       cluster.stopDataNode(1);
       
@@ -290,7 +356,8 @@ public class TestPipelinesFailover {
       
       NameNode nn0 = cluster.getNameNode(0);
       ExtendedBlock blk = DFSTestUtil.getFirstBlock(fs, TEST_PATH);
-      DatanodeDescriptor expectedPrimary = getExpectedPrimaryNode(nn0, blk);
+      DatanodeDescriptor expectedPrimary =
+          DFSTestUtil.getExpectedPrimaryNode(nn0, blk);
       LOG.info("Expecting block recovery to be triggered on DN " +
           expectedPrimary);
       
@@ -357,6 +424,11 @@ public class TestPipelinesFailover {
     // Disable permissions so that another user can recover the lease.
     harness.conf.setBoolean(
         DFSConfigKeys.DFS_PERMISSIONS_ENABLED_KEY, false);
+    // This test triggers rapid NN failovers.  The client retry policy uses an
+    // exponential backoff.  This can quickly lead to long sleep times and even
+    // timeout the whole test.  Cap the sleep time at 1s to prevent this.
+    harness.conf.setInt(DFSConfigKeys.DFS_CLIENT_FAILOVER_SLEEPTIME_MAX_KEY,
+      1000);
 
     final MiniDFSCluster cluster = harness.startCluster();
     try {
@@ -435,28 +507,6 @@ public class TestPipelinesFailover {
     }
   }
 
-
-
-  /**
-   * @return the node which is expected to run the recovery of the
-   * given block, which is known to be under construction inside the
-   * given NameNOde.
-   */
-  private DatanodeDescriptor getExpectedPrimaryNode(NameNode nn,
-      ExtendedBlock blk) {
-    BlockManager bm0 = nn.getNamesystem().getBlockManager();
-    BlockInfo storedBlock = bm0.getStoredBlock(blk.getLocalBlock());
-    assertTrue("Block " + blk + " should be under construction, " +
-        "got: " + storedBlock,
-        storedBlock instanceof BlockInfoUnderConstruction);
-    BlockInfoUnderConstruction ucBlock =
-      (BlockInfoUnderConstruction)storedBlock;
-    // We expect that the first indexed replica will be the one
-    // to be in charge of the synchronization / recovery protocol.
-    DatanodeDescriptor expectedPrimary = ucBlock.getExpectedLocations()[0];
-    return expectedPrimary;
-  }
-
   private DistributedFileSystem createFsAsOtherUser(
       final MiniDFSCluster cluster, final Configuration conf)
       throws IOException, InterruptedException {
@@ -472,11 +522,10 @@ public class TestPipelinesFailover {
   }
   
   /**
-   * Try to cover the lease on the given file for up to 30
-   * seconds.
+   * Try to recover the lease on the given file for up to 60 seconds.
    * @param fsOtherUser the filesystem to use for the recoverLease call
    * @param testPath the path on which to run lease recovery
-   * @throws TimeoutException if lease recover does not succeed within 30
+   * @throws TimeoutException if lease recover does not succeed within 60
    * seconds
    * @throws InterruptedException if the thread is interrupted
    */
@@ -499,7 +548,7 @@ public class TestPipelinesFailover {
           }
           return success;
         }
-      }, 1000, 30000);
+      }, 1000, 60000);
     } catch (TimeoutException e) {
       throw new TimeoutException("Timed out recovering lease for " +
           testPath);

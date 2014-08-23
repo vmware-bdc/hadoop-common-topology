@@ -27,17 +27,14 @@ import static org.apache.hadoop.yarn.webapp.view.JQueryUI.tableInit;
 
 import java.util.Collection;
 
+import org.apache.commons.lang.StringEscapeUtils;
 import org.apache.hadoop.mapreduce.v2.app.job.TaskAttempt;
 import org.apache.hadoop.mapreduce.v2.app.webapp.dao.TaskAttemptInfo;
-import org.apache.hadoop.util.StringUtils;
-import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.util.Times;
+import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.yarn.webapp.SubView;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TABLE;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TBODY;
-import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TD;
-import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TR;
 import org.apache.hadoop.yarn.webapp.view.HtmlBlock;
 
 import com.google.inject.Inject;
@@ -66,47 +63,58 @@ public class TaskPage extends AppView {
             th(".id", "Attempt").
             th(".progress", "Progress").
             th(".state", "State").
-            th(".node", "node").
+            th(".status", "Status").
+            th(".node", "Node").
+            th(".logs", "Logs").
             th(".tsh", "Started").
             th(".tsh", "Finished").
             th(".tsh", "Elapsed").
             th(".note", "Note")._()._().
-        tbody();
+      tbody();
+      // Write all the data into a JavaScript array of arrays for JQuery
+      // DataTables to display
+      StringBuilder attemptsTableData = new StringBuilder("[\n");
+
       for (TaskAttempt attempt : getTaskAttempts()) {
         TaskAttemptInfo ta = new TaskAttemptInfo(attempt, true);
-        String taid = ta.getId();
         String progress = percent(ta.getProgress() / 100);
-        ContainerId containerId = ta.getAssignedContainerId();
 
         String nodeHttpAddr = ta.getNode();
-        long startTime = ta.getStartTime();
-        long finishTime = ta.getFinishTime();
-        long elapsed = ta.getElapsedTime();
         String diag = ta.getNote() == null ? "" : ta.getNote();
-        TD<TR<TBODY<TABLE<Hamlet>>>> nodeTd = tbody.
-          tr().
-            td(".id", taid).
-            td(".progress", progress).
-            td(".state", ta.getState()).td();
-        if (nodeHttpAddr == null) {
-          nodeTd._("N/A");
-        } else {
-          nodeTd.
-            a(".nodelink", url("http://", nodeHttpAddr), nodeHttpAddr);
-        }
-        if (containerId != null) {
-          String containerIdStr = ta.getAssignedContainerIdStr();
-          nodeTd._(" ").
-            a(".logslink", url("http://", nodeHttpAddr, "node", "containerlogs",
-              containerIdStr, app.getJob().getUserName()), "logs");
-        }
-        nodeTd._().
-          td(".ts", Times.format(startTime)).
-          td(".ts", Times.format(finishTime)).
-          td(".dt", StringUtils.formatTime(elapsed)).
-          td(".note", diag)._();
+        attemptsTableData.append("[\"")
+        .append(ta.getId()).append("\",\"")
+        .append(progress).append("\",\"")
+        .append(ta.getState().toString()).append("\",\"")
+        .append(StringEscapeUtils.escapeJavaScript(
+              StringEscapeUtils.escapeHtml(ta.getStatus()))).append("\",\"")
+
+        .append(nodeHttpAddr == null ? "N/A" :
+          "<a class='nodelink' href='" + MRWebAppUtil.getYARNWebappScheme() + nodeHttpAddr + "'>"
+          + nodeHttpAddr + "</a>")
+        .append("\",\"")
+
+        .append(ta.getAssignedContainerId() == null ? "N/A" :
+          "<a class='logslink' href='" + url(MRWebAppUtil.getYARNWebappScheme(), nodeHttpAddr, "node"
+            , "containerlogs", ta.getAssignedContainerIdStr(), app.getJob()
+            .getUserName()) + "'>logs</a>")
+          .append("\",\"")
+
+        .append(ta.getStartTime()).append("\",\"")
+        .append(ta.getFinishTime()).append("\",\"")
+        .append(ta.getElapsedTime()).append("\",\"")
+        .append(StringEscapeUtils.escapeJavaScript(StringEscapeUtils.escapeHtml(
+          diag))).append("\"],\n");
       }
+      //Remove the last comma and close off the array of arrays
+      if(attemptsTableData.charAt(attemptsTableData.length() - 2) == ',') {
+        attemptsTableData.delete(attemptsTableData.length()-2, attemptsTableData.length()-1);
+      }
+      attemptsTableData.append("]");
+      html.script().$type("text/javascript").
+      _("var attemptsTableData=" + attemptsTableData)._();
+
       tbody._()._();
+
     }
 
     protected boolean isValidRequest() {
@@ -121,10 +129,6 @@ public class TaskPage extends AppView {
   @Override protected void preHead(Page.HTML<_> html) {
     commonPreHead(html);
 
-    // This page is a list of all attempts which are limited in number. Okay to
-    // refresh automatically.
-    html.meta_http("refresh", "10");
-
     set(initID(ACCORDION, "nav"), "{autoHeight:false, active:3}");
     set(DATATABLES_ID, "attempts");
     set(initID(DATATABLES, "attempts"), attemptsTableInit());
@@ -136,9 +140,24 @@ public class TaskPage extends AppView {
   }
 
   private String attemptsTableInit() {
-    return tableInit().
-        // Sort by id upon page load
-        append(", aaSorting: [[0, 'asc']]").
-        append("}").toString();
+    return tableInit()
+    .append(", 'aaData': attemptsTableData")
+    .append(", bDeferRender: true")
+    .append(", bProcessing: true")
+    .append("\n,aoColumnDefs:[\n")
+
+    //logs column should not filterable (it includes container ID which may pollute searches)
+    .append("\n{'aTargets': [ 5 ]")
+    .append(", 'bSearchable': false }")
+
+    .append("\n, {'sType':'numeric', 'aTargets': [ 6, 7")
+    .append(" ], 'mRender': renderHadoopDate }")
+
+    .append("\n, {'sType':'numeric', 'aTargets': [ 8")
+    .append(" ], 'mRender': renderHadoopElapsedTime }]")
+
+    // Sort by id upon page load
+    .append("\n, aaSorting: [[0, 'asc']]")
+    .append("}").toString();
   }
 }

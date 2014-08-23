@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -33,8 +34,8 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.NameNodeProxies;
+import org.apache.hadoop.hdfs.server.namenode.ha.AbstractNNFailoverProxyProvider;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
-import org.apache.hadoop.io.retry.FailoverProxyProvider;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.security.UserGroupInformation;
 
@@ -45,8 +46,8 @@ import com.google.common.base.Preconditions;
  * to connect to during fail-over. The first configured address is tried first,
  * and on a fail-over event the other address is tried.
  */
-public class ConfiguredFailoverProxyProvider<T> implements
-    FailoverProxyProvider<T> {
+public class ConfiguredFailoverProxyProvider<T> extends
+    AbstractNNFailoverProxyProvider<T> {
   
   private static final Log LOG =
       LogFactory.getLog(ConfiguredFailoverProxyProvider.class);
@@ -93,14 +94,15 @@ public class ConfiguredFailoverProxyProvider<T> implements
             "for URI " + uri);
       }
       
-      for (InetSocketAddress address : addressesInNN.values()) {
+      Collection<InetSocketAddress> addressesOfNns = addressesInNN.values();
+      for (InetSocketAddress address : addressesOfNns) {
         proxies.add(new AddressRpcProxyPair<T>(address));
-        
-        // The client may have a delegation token set for the logical
-        // URI of the cluster. Clone this token to apply to each of the
-        // underlying IPC addresses so that the IPC code can find it.
-        HAUtil.cloneDelegationTokenForLogicalUri(ugi, uri, address);
       }
+
+      // The client may have a delegation token set for the logical
+      // URI of the cluster. Clone this token to apply to each of the
+      // underlying IPC addresses so that the IPC code can find it.
+      HAUtil.cloneDelegationTokenForLogicalUri(ugi, uri, addressesOfNns);
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
@@ -114,10 +116,9 @@ public class ConfiguredFailoverProxyProvider<T> implements
   /**
    * Lazily initialize the RPC proxy object.
    */
-  @SuppressWarnings("unchecked")
   @Override
-  public synchronized T getProxy() {
-    AddressRpcProxyPair current = proxies.get(currentProxyIndex);
+  public synchronized ProxyInfo<T> getProxy() {
+    AddressRpcProxyPair<T> current = proxies.get(currentProxyIndex);
     if (current.namenode == null) {
       try {
         current.namenode = NameNodeProxies.createNonHAProxy(conf,
@@ -127,7 +128,7 @@ public class ConfiguredFailoverProxyProvider<T> implements
         throw new RuntimeException(e);
       }
     }
-    return (T)current.namenode;
+    return new ProxyInfo<T>(current.namenode, current.address.toString());
   }
 
   @Override
@@ -140,7 +141,7 @@ public class ConfiguredFailoverProxyProvider<T> implements
    * an NN. Note that {@link AddressRpcProxyPair#namenode} may be null.
    */
   private static class AddressRpcProxyPair<T> {
-    public InetSocketAddress address;
+    public final InetSocketAddress address;
     public T namenode;
     
     public AddressRpcProxyPair(InetSocketAddress address) {
@@ -163,5 +164,13 @@ public class ConfiguredFailoverProxyProvider<T> implements
         }
       }
     }
+  }
+
+  /**
+   * Logical URI is required for this failover proxy provider.
+   */
+  @Override
+  public boolean useLogicalURI() {
+    return true;
   }
 }

@@ -20,6 +20,7 @@ package org.apache.hadoop.ha;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.io.retry.Idempotent;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.KerberosInfo;
 
@@ -42,13 +43,15 @@ public interface HAServiceProtocol {
   public static final long versionID = 1L;
 
   /**
-   * An HA service may be in active or standby state. During
-   * startup, it is in an unknown INITIALIZING state.
+   * An HA service may be in active or standby state. During startup, it is in
+   * an unknown INITIALIZING state. During shutdown, it is in the STOPPING state
+   * and can no longer return to active/standby states.
    */
   public enum HAServiceState {
     INITIALIZING("initializing"),
     ACTIVE("active"),
-    STANDBY("standby");
+    STANDBY("standby"),
+    STOPPING("stopping");
 
     private String name;
 
@@ -56,8 +59,34 @@ public interface HAServiceProtocol {
       this.name = name;
     }
 
+    @Override
     public String toString() {
       return name;
+    }
+  }
+  
+  public static enum RequestSource {
+    REQUEST_BY_USER,
+    REQUEST_BY_USER_FORCED,
+    REQUEST_BY_ZKFC;
+  }
+  
+  /**
+   * Information describing the source for a request to change state.
+   * This is used to differentiate requests from automatic vs CLI
+   * failover controllers, and in the future may include epoch
+   * information.
+   */
+  public static class StateChangeRequestInfo {
+    private final RequestSource source;
+
+    public StateChangeRequestInfo(RequestSource source) {
+      super();
+      this.source = source;
+    }
+
+    public RequestSource getSource() {
+      return source;
     }
   }
 
@@ -80,6 +109,7 @@ public interface HAServiceProtocol {
    * @throws IOException
    *           if other errors happen
    */
+  @Idempotent
   public void monitorHealth() throws HealthCheckFailedException,
                                      AccessControlException,
                                      IOException;
@@ -95,7 +125,9 @@ public interface HAServiceProtocol {
    * @throws IOException
    *           if other errors happen
    */
-  public void transitionToActive() throws ServiceFailedException,
+  @Idempotent
+  public void transitionToActive(StateChangeRequestInfo reqInfo)
+                                   throws ServiceFailedException,
                                           AccessControlException,
                                           IOException;
 
@@ -110,20 +142,24 @@ public interface HAServiceProtocol {
    * @throws IOException
    *           if other errors happen
    */
-  public void transitionToStandby() throws ServiceFailedException,
+  @Idempotent
+  public void transitionToStandby(StateChangeRequestInfo reqInfo)
+                                    throws ServiceFailedException,
                                            AccessControlException,
                                            IOException;
 
   /**
    * Return the current status of the service. The status indicates
    * the current <em>state</em> (e.g ACTIVE/STANDBY) as well as
-   * some additional information. {@see HAServiceStatus}
+   * some additional information.
    * 
    * @throws AccessControlException
    *           if access is denied.
    * @throws IOException
    *           if other errors happen
+   * @see HAServiceStatus
    */
+  @Idempotent
   public HAServiceStatus getServiceStatus() throws AccessControlException,
                                                    IOException;
 }

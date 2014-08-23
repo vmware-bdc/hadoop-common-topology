@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.SortedSet;
 import java.util.TreeSet;
 
@@ -37,6 +38,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystem.Statistics;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.DataInputBuffer;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.RawComparator;
 import org.apache.hadoop.io.SequenceFile;
 import org.apache.hadoop.io.Writable;
@@ -73,6 +75,10 @@ public class ReduceTask extends Task {
 
   private CompressionCodec codec;
 
+  // If this is a LocalJobRunner-based job, this will
+  // be a mapping from map task attempts to their output files.
+  // This will be null in other cases.
+  private Map<TaskAttemptID, MapOutputFile> localMapFiles;
 
   { 
     getProgress().setStatus("reduce"); 
@@ -104,24 +110,24 @@ public class ReduceTask extends Task {
   // file paths, the first parameter is considered smaller than the second one.
   // In case of files with same size and path are considered equal.
   private Comparator<FileStatus> mapOutputFileComparator = 
-    new Comparator<FileStatus>() {
-      public int compare(FileStatus a, FileStatus b) {
-        if (a.getLen() < b.getLen())
-          return -1;
-        else if (a.getLen() == b.getLen())
-          if (a.getPath().toString().equals(b.getPath().toString()))
-            return 0;
-          else
-            return -1; 
+      new Comparator<FileStatus>() {
+    public int compare(FileStatus a, FileStatus b) {
+      if (a.getLen() < b.getLen())
+        return -1;
+      else if (a.getLen() == b.getLen())
+        if (a.getPath().toString().equals(b.getPath().toString()))
+          return 0;
         else
-          return 1;
-      }
+          return -1; 
+      else
+        return 1;
+    }
   };
-  
+
   // A sorted set for keeping a set of map output files on disk
   private final SortedSet<FileStatus> mapOutputFilesOnDisk = 
-    new TreeSet<FileStatus>(mapOutputFileComparator);
-
+      new TreeSet<FileStatus>(mapOutputFileComparator);
+  
   public ReduceTask() {
     super();
   }
@@ -132,6 +138,17 @@ public class ReduceTask extends Task {
     this.numMaps = numMaps;
   }
   
+
+  /**
+   * Register the set of mapper outputs created by a LocalJobRunner-based
+   * job with this ReduceTask so it knows where to fetch from.
+   *
+   * This should not be called in normal (networked) execution.
+   */
+  public void setLocalMapFiles(Map<TaskAttemptID, MapOutputFile> mapFiles) {
+    this.localMapFiles = mapFiles;
+  }
+
   private CompressionCodec initCodec() {
     // check if map-outputs are to be compressed
     if (conf.getCompressMapOutput()) {
@@ -173,20 +190,11 @@ public class ReduceTask extends Task {
     numMaps = in.readInt();
   }
   
-  // Get the input files for the reducer.
-  private Path[] getMapFiles(FileSystem fs, boolean isLocal) 
-  throws IOException {
+  // Get the input files for the reducer (for local jobs).
+  private Path[] getMapFiles(FileSystem fs) throws IOException {
     List<Path> fileList = new ArrayList<Path>();
-    if (isLocal) {
-      // for local jobs
-      for(int i = 0; i < numMaps; ++i) {
-        fileList.add(mapOutputFile.getInputFile(i));
-      }
-    } else {
-      // for non local jobs
-      for (FileStatus filestatus : mapOutputFilesOnDisk) {
-        fileList.add(filestatus.getPath());
-      }
+    for(int i = 0; i < numMaps; ++i) {
+      fileList.add(mapOutputFile.getInputFile(i));
     }
     return fileList.toArray(new Path[0]);
   }
@@ -340,48 +348,33 @@ public class ReduceTask extends Task {
     // Initialize the codec
     codec = initCodec();
     RawKeyValueIterator rIter = null;
+    ShuffleConsumerPlugin shuffleConsumerPlugin = null;
     
-    boolean isLocal = false; 
-    // local if
-    // 1) framework == local or
-    // 2) framework == null and job tracker address == local
-    String framework = job.get(MRConfig.FRAMEWORK_NAME);
-    String masterAddr = job.get(MRConfig.MASTER_ADDRESS, "local");
-    if ((framework == null && masterAddr.equals("local"))
-        || (framework != null && framework.equals(MRConfig.LOCAL_FRAMEWORK_NAME))) {
-      isLocal = true;
-    }
-    
-    if (!isLocal) {
-      Class combinerClass = conf.getCombinerClass();
-      CombineOutputCollector combineCollector = 
-        (null != combinerClass) ? 
- 	     new CombineOutputCollector(reduceCombineOutputCounter, reporter, conf) : null;
+    Class combinerClass = conf.getCombinerClass();
+    CombineOutputCollector combineCollector = 
+      (null != combinerClass) ? 
+     new CombineOutputCollector(reduceCombineOutputCounter, reporter, conf) : null;
 
-      Shuffle shuffle = 
-        new Shuffle(getTaskID(), job, FileSystem.getLocal(job), umbilical, 
-                    super.lDirAlloc, reporter, codec, 
-                    combinerClass, combineCollector, 
-                    spilledRecordsCounter, reduceCombineInputCounter,
-                    shuffledMapsCounter,
-                    reduceShuffleBytes, failedShuffleCounter,
-                    mergedMapOutputsCounter,
-                    taskStatus, copyPhase, sortPhase, this,
-                    mapOutputFile);
-      rIter = shuffle.run();
-    } else {
-      // local job runner doesn't have a copy phase
-      copyPhase.complete();
-      final FileSystem rfs = FileSystem.getLocal(job).getRaw();
-      rIter = Merger.merge(job, rfs, job.getMapOutputKeyClass(),
-                           job.getMapOutputValueClass(), codec, 
-                           getMapFiles(rfs, true),
-                           !conf.getKeepFailedTaskFiles(), 
-                           job.getInt(JobContext.IO_SORT_FACTOR, 100),
-                           new Path(getTaskID().toString()), 
-                           job.getOutputKeyComparator(),
-                           reporter, spilledRecordsCounter, null, null);
-    }
+    Class<? extends ShuffleConsumerPlugin> clazz =
+          job.getClass(MRConfig.SHUFFLE_CONSUMER_PLUGIN, Shuffle.class, ShuffleConsumerPlugin.class);
+					
+    shuffleConsumerPlugin = ReflectionUtils.newInstance(clazz, job);
+    LOG.info("Using ShuffleConsumerPlugin: " + shuffleConsumerPlugin);
+
+    ShuffleConsumerPlugin.Context shuffleContext = 
+      new ShuffleConsumerPlugin.Context(getTaskID(), job, FileSystem.getLocal(job), umbilical, 
+                  super.lDirAlloc, reporter, codec, 
+                  combinerClass, combineCollector, 
+                  spilledRecordsCounter, reduceCombineInputCounter,
+                  shuffledMapsCounter,
+                  reduceShuffleBytes, failedShuffleCounter,
+                  mergedMapOutputsCounter,
+                  taskStatus, copyPhase, sortPhase, this,
+                  mapOutputFile, localMapFiles);
+    shuffleConsumerPlugin.init(shuffleContext);
+
+    rIter = shuffleConsumerPlugin.run();
+
     // free up the data structures
     mapOutputFilesOnDisk.clear();
     
@@ -399,6 +392,8 @@ public class ReduceTask extends Task {
       runOldReducer(job, umbilical, reporter, rIter, comparator, 
                     keyClass, valueClass);
     }
+
+    shuffleConsumerPlugin.close();
     done(umbilical, reporter);
   }
 
@@ -416,14 +411,15 @@ public class ReduceTask extends Task {
     // make output collector
     String finalName = getOutputName(getPartition());
 
-    final RecordWriter<OUTKEY, OUTVALUE> out = new OldTrackingRecordWriter<OUTKEY, OUTVALUE>(
+    RecordWriter<OUTKEY, OUTVALUE> out = new OldTrackingRecordWriter<OUTKEY, OUTVALUE>(
         this, job, reporter, finalName);
-
+    final RecordWriter<OUTKEY, OUTVALUE> finalOut = out;
+    
     OutputCollector<OUTKEY,OUTVALUE> collector = 
       new OutputCollector<OUTKEY,OUTVALUE>() {
         public void collect(OUTKEY key, OUTVALUE value)
           throws IOException {
-          out.write(key, value);
+          finalOut.write(key, value);
           // indicate that progress update needs to be sent
           reporter.progress();
         }
@@ -454,20 +450,14 @@ public class ReduceTask extends Task {
         values.informReduceProgress();
       }
 
-      //Clean up: repeated in catch block below
       reducer.close();
-      out.close(reporter);
-      //End of clean up.
-    } catch (IOException ioe) {
-      try {
-        reducer.close();
-      } catch (IOException ignored) {}
-        
-      try {
-        out.close(reporter);
-      } catch (IOException ignored) {}
+      reducer = null;
       
-      throw ioe;
+      out.close(reporter);
+      out = null;
+    } finally {
+      IOUtils.cleanup(LOG, reducer);
+      closeQuietly(out, reporter);
     }
   }
 
@@ -633,7 +623,21 @@ public class ReduceTask extends Task {
                                                committer,
                                                reporter, comparator, keyClass,
                                                valueClass);
-    reducer.run(reducerContext);
-    trackedRW.close(reducerContext);
+    try {
+      reducer.run(reducerContext);
+    } finally {
+      trackedRW.close(reducerContext);
+    }
+  }
+  
+  private <OUTKEY, OUTVALUE>
+  void closeQuietly(RecordWriter<OUTKEY, OUTVALUE> c, Reporter r) {
+    if (c != null) {
+      try {
+        c.close(r);
+      } catch (Exception e) {
+        LOG.info("Exception in closing " + c, e);
+      }
+    }
   }
 }

@@ -17,11 +17,6 @@
  */
 package org.apache.hadoop.hdfs;
 
-import java.io.IOException;
-import java.net.URL;
-
-import junit.framework.TestCase;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -30,19 +25,32 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.junit.Assert;
+import org.junit.Test;
+
+import javax.management.*;
+import java.io.IOException;
+import java.lang.management.ManagementFactory;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 /**
  * The test makes sure that NameNode detects presense blocks that do not have
  * any valid replicas. In addition, it verifies that HDFS front page displays
  * a warning in such a case.
  */
-public class TestMissingBlocksAlert extends TestCase {
+public class TestMissingBlocksAlert {
   
   private static final Log LOG = 
                            LogFactory.getLog(TestMissingBlocksAlert.class);
   
-  public void testMissingBlocksAlert() throws IOException, 
-                                       InterruptedException {
+  @Test
+  public void testMissingBlocksAlert()
+          throws IOException, InterruptedException,
+                 MalformedObjectNameException, AttributeNotFoundException,
+                 MBeanException, ReflectionException,
+                 InstanceNotFoundException {
     
     MiniDFSCluster cluster = null;
     
@@ -50,6 +58,7 @@ public class TestMissingBlocksAlert extends TestCase {
       Configuration conf = new HdfsConfiguration();
       //minimize test delay
       conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 0);
+      conf.setInt(DFSConfigKeys.DFS_CLIENT_RETRY_WINDOW_BASE, 10);
       int fileLen = 10*1024;
       conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, fileLen/2);
 
@@ -58,8 +67,8 @@ public class TestMissingBlocksAlert extends TestCase {
       cluster.waitActive();
 
       final BlockManager bm = cluster.getNamesystem().getBlockManager();
-      DistributedFileSystem dfs = 
-                            (DistributedFileSystem) cluster.getFileSystem();
+      DistributedFileSystem dfs =
+          cluster.getFileSystem();
 
       // create a normal file
       DFSTestUtil.createFile(dfs, new Path("/testMissingBlocksAlert/file1"), 
@@ -90,14 +99,11 @@ public class TestMissingBlocksAlert extends TestCase {
       assertEquals(4, dfs.getUnderReplicatedBlocksCount());
       assertEquals(3, bm.getUnderReplicatedNotMissingBlocks());
 
-
-      // Now verify that it shows up on webui
-      URL url = new URL("http://" + conf.get(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY) + 
-                        "/dfshealth.jsp");
-      String dfsFrontPage = DFSTestUtil.urlGet(url);
-      String warnStr = "WARNING : There are ";
-      assertTrue("HDFS Front page does not contain expected warning", 
-                 dfsFrontPage.contains(warnStr + "1 missing blocks"));
+      MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+      ObjectName mxbeanName = new ObjectName(
+              "Hadoop:service=NameNode,name=NameNodeInfo");
+      Assert.assertEquals(1, (long)(Long) mbs.getAttribute(mxbeanName,
+                      "NumberOfMissingBlocks"));
 
       // now do the reverse : remove the file expect the number of missing 
       // blocks to go to zero
@@ -112,11 +118,8 @@ public class TestMissingBlocksAlert extends TestCase {
       assertEquals(2, dfs.getUnderReplicatedBlocksCount());
       assertEquals(2, bm.getUnderReplicatedNotMissingBlocks());
 
-      // and make sure WARNING disappears
-      // Now verify that it shows up on webui
-      dfsFrontPage = DFSTestUtil.urlGet(url);
-      assertFalse("HDFS Front page contains unexpected warning", 
-                  dfsFrontPage.contains(warnStr));
+      Assert.assertEquals(0, (long)(Long) mbs.getAttribute(mxbeanName,
+              "NumberOfMissingBlocks"));
     } finally {
       if (cluster != null) {
         cluster.shutdown();

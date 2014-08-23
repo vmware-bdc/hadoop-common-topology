@@ -129,7 +129,7 @@ public class CBZip2InputStream extends InputStream implements BZip2Constants {
   private int computedBlockCRC, computedCombinedCRC;
 
   private boolean skipResult = false;// used by skipToNextMarker
-  private static boolean skipDecompression = false;
+  private boolean skipDecompression = false;
 
   // Variables used by setup* methods exclusively
 
@@ -281,12 +281,18 @@ public class CBZip2InputStream extends InputStream implements BZip2Constants {
   */
   public CBZip2InputStream(final InputStream in, READ_MODE readMode)
       throws IOException {
+    this(in, readMode, false);
+  }
+
+  private CBZip2InputStream(final InputStream in, READ_MODE readMode, boolean skipDecompression)
+      throws IOException {
 
     super();
     int blockSize = 0X39;// i.e 9
     this.blockSize100k = blockSize - '0';
     this.in = new BufferedInputStream(in, 1024 * 9);// >1 MB buffer
     this.readMode = readMode;
+    this.skipDecompression = skipDecompression;
     if (readMode == READ_MODE.CONTINUOUS) {
       currentState = STATE.START_BLOCK_STATE;
       lazyInitialization = (in.available() == 0)?true:false;
@@ -316,11 +322,7 @@ public class CBZip2InputStream extends InputStream implements BZip2Constants {
    *
    */
   public static long numberOfBytesTillNextMarker(final InputStream in) throws IOException{
-    CBZip2InputStream.skipDecompression = true;
-    CBZip2InputStream anObject = null;
-
-    anObject = new CBZip2InputStream(in, READ_MODE.BYBLOCK);
-
+    CBZip2InputStream anObject = new CBZip2InputStream(in, READ_MODE.BYBLOCK, true);
     return anObject.getProcessedByteCount();
   }
 
@@ -338,6 +340,7 @@ public class CBZip2InputStream extends InputStream implements BZip2Constants {
   }
 
 
+  @Override
   public int read() throws IOException {
 
     if (this.in != null) {
@@ -372,6 +375,7 @@ public class CBZip2InputStream extends InputStream implements BZip2Constants {
    */
 
 
+  @Override
   public int read(final byte[] dest, final int offs, final int len)
       throws IOException {
     if (offs < 0) {
@@ -395,7 +399,7 @@ public class CBZip2InputStream extends InputStream implements BZip2Constants {
 
     if(skipDecompression){
       changeStateToProcessABlock();
-      CBZip2InputStream.skipDecompression = false;
+      skipDecompression = false;
     }
 
     final int hi = offs + len;
@@ -574,6 +578,7 @@ public class CBZip2InputStream extends InputStream implements BZip2Constants {
     }
   }
 
+  @Override
   public void close() throws IOException {
     InputStream inShadow = this.in;
     if (inShadow != null) {

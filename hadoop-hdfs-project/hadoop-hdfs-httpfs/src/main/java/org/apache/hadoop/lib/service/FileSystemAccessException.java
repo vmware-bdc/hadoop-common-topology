@@ -18,20 +18,24 @@
 
 package org.apache.hadoop.lib.service;
 
+import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.lib.lang.XException;
 
+@InterfaceAudience.Private
 public class FileSystemAccessException extends XException {
 
   public enum ERROR implements XException.ERROR {
     H01("Service property [{0}] not defined"),
     H02("Kerberos initialization failed, {0}"),
     H03("FileSystemExecutor error, {0}"),
-    H04("JobClientExecutor error, {0}"),
+    H04("Invalid configuration, it has not be created by the FileSystemAccessService"),
     H05("[{0}] validation failed, {1}"),
     H06("Property [{0}] not defined in configuration object"),
     H07("[{0}] not healthy, {1}"),
-    H08(""),
-    H09("Invalid FileSystemAccess security mode [{0}]");
+    H08("{0}"),
+    H09("Invalid FileSystemAccess security mode [{0}]"),
+    H10("Hadoop config directory not found [{0}]"),
+    H11("Could not load Hadoop config files, {0}");
 
     private String template;
 

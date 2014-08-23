@@ -17,7 +17,9 @@
  */
 package org.apache.hadoop.hdfs.server.datanode.fsdataset.impl;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -27,6 +29,7 @@ import java.util.List;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSClientAdapter;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
@@ -52,11 +55,12 @@ import org.apache.hadoop.hdfs.server.protocol.ReplicaRecoveryInfo;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.ipc.RPC;
-import org.apache.hadoop.ipc.RpcPayloadHeader.RpcKind;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.net.NetUtils;
 import org.junit.Assert;
 import org.junit.Test;
+
+import static org.junit.Assume.assumeTrue;
 
 /**
  * This tests InterDataNodeProtocol for block handling. 
@@ -65,7 +69,7 @@ public class TestInterDatanodeProtocol {
   private static final String ADDRESS = "0.0.0.0";
   final static private int PING_INTERVAL = 1000;
   final static private int MIN_SLEEP_TIME = 1000;
-  private static Configuration conf = new HdfsConfiguration();
+  private static final Configuration conf = new HdfsConfiguration();
 
 
   private static class TestServer extends Server {
@@ -86,7 +90,7 @@ public class TestInterDatanodeProtocol {
     }
 
     @Override
-    public Writable call(RpcKind rpcKind, String protocol, Writable param, long receiveTime)
+    public Writable call(RPC.RpcKind rpcKind, String protocol, Writable param, long receiveTime)
         throws IOException {
       if (sleep) {
         // sleep a bit
@@ -124,21 +128,46 @@ public class TestInterDatanodeProtocol {
     return blocks.get(blocks.size() - 1);
   }
 
+  /** Test block MD access via a DN */
+  @Test
+  public void testBlockMetaDataInfo() throws Exception {
+    checkBlockMetaDataInfo(false);
+  }
+
+  /** The same as above, but use hostnames for DN<->DN communication */
+  @Test
+  public void testBlockMetaDataInfoWithHostname() throws Exception {
+    assumeTrue(System.getProperty("os.name").startsWith("Linux"));
+    checkBlockMetaDataInfo(true);
+  }
+
   /**
    * The following test first creates a file.
    * It verifies the block information from a datanode.
-   * Then, it updates the block with new information and verifies again. 
+   * Then, it updates the block with new information and verifies again.
+   * @param useDnHostname whether DNs should connect to other DNs by hostname
    */
-  @Test
-  public void testBlockMetaDataInfo() throws Exception {
+  private void checkBlockMetaDataInfo(boolean useDnHostname) throws Exception {
     MiniDFSCluster cluster = null;
 
+    conf.setBoolean(DFSConfigKeys.DFS_DATANODE_USE_DN_HOSTNAME, useDnHostname);
+    if (useDnHostname) {
+      // Since the mini cluster only listens on the loopback we have to
+      // ensure the hostname used to access DNs maps to the loopback. We
+      // do this by telling the DN to advertise localhost as its hostname
+      // instead of the default hostname.
+      conf.set(DFSConfigKeys.DFS_DATANODE_HOST_NAME_KEY, "localhost");
+    }
+
     try {
-      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(3).build();
+      cluster = new MiniDFSCluster.Builder(conf)
+        .numDataNodes(3)
+        .checkDataNodeHostConfig(true)
+        .build();
       cluster.waitActive();
 
       //create a file
-      DistributedFileSystem dfs = (DistributedFileSystem)cluster.getFileSystem();
+      DistributedFileSystem dfs = cluster.getFileSystem();
       String filestr = "/foo";
       Path filepath = new Path(filestr);
       DFSTestUtil.createFile(dfs, filepath, 1024L, (short)3, 0L);
@@ -153,7 +182,7 @@ public class TestInterDatanodeProtocol {
       //connect to a data node
       DataNode datanode = cluster.getDataNode(datanodeinfo[0].getIpcPort());
       InterDatanodeProtocol idp = DataNodeTestUtils.createInterDatanodeProtocolProxy(
-          datanode, datanodeinfo[0], conf);
+          datanode, datanodeinfo[0], conf, useDnHostname);
       
       //stop block scanner, so we could compare lastScanTime
       DataNodeTestUtils.shutdownBlockScanner(datanode);
@@ -196,7 +225,7 @@ public class TestInterDatanodeProtocol {
   }
 
   /** Test 
-   * {@link FsDatasetImpl#initReplicaRecovery(String, ReplicaMap, Block, long)}
+   * {@link FsDatasetImpl#initReplicaRecovery(String, ReplicaMap, Block, long, long)}
    */
   @Test
   public void testInitReplicaRecovery() throws IOException {
@@ -217,8 +246,9 @@ public class TestInterDatanodeProtocol {
       final ReplicaInfo originalInfo = map.get(bpid, b);
 
       final long recoveryid = gs + 1;
-      final ReplicaRecoveryInfo recoveryInfo = FsDatasetImpl.initReplicaRecovery(
-          bpid, map, blocks[0], recoveryid);
+      final ReplicaRecoveryInfo recoveryInfo = FsDatasetImpl
+          .initReplicaRecovery(bpid, map, blocks[0], recoveryid,
+              DFSConfigKeys.DFS_DATANODE_XCEIVER_STOP_TIMEOUT_MILLIS_DEFAULT);
       assertEquals(originalInfo, recoveryInfo);
 
       final ReplicaUnderRecovery updatedInfo = (ReplicaUnderRecovery)map.get(bpid, b);
@@ -227,7 +257,9 @@ public class TestInterDatanodeProtocol {
 
       //recover one more time 
       final long recoveryid2 = gs + 2;
-      final ReplicaRecoveryInfo recoveryInfo2 = FsDatasetImpl.initReplicaRecovery(bpid, map, blocks[0], recoveryid2);
+      final ReplicaRecoveryInfo recoveryInfo2 = FsDatasetImpl
+          .initReplicaRecovery(bpid, map, blocks[0], recoveryid2,
+              DFSConfigKeys.DFS_DATANODE_XCEIVER_STOP_TIMEOUT_MILLIS_DEFAULT);
       assertEquals(originalInfo, recoveryInfo2);
 
       final ReplicaUnderRecovery updatedInfo2 = (ReplicaUnderRecovery)map.get(bpid, b);
@@ -236,7 +268,8 @@ public class TestInterDatanodeProtocol {
       
       //case RecoveryInProgressException
       try {
-        FsDatasetImpl.initReplicaRecovery(bpid, map, b, recoveryid);
+        FsDatasetImpl.initReplicaRecovery(bpid, map, b, recoveryid,
+            DFSConfigKeys.DFS_DATANODE_XCEIVER_STOP_TIMEOUT_MILLIS_DEFAULT);
         Assert.fail();
       }
       catch(RecoveryInProgressException ripe) {
@@ -247,7 +280,9 @@ public class TestInterDatanodeProtocol {
     { // BlockRecoveryFI_01: replica not found
       final long recoveryid = gs + 1;
       final Block b = new Block(firstblockid - 1, length, gs);
-      ReplicaRecoveryInfo r = FsDatasetImpl.initReplicaRecovery(bpid, map, b, recoveryid);
+      ReplicaRecoveryInfo r = FsDatasetImpl.initReplicaRecovery(bpid, map, b,
+          recoveryid,
+          DFSConfigKeys.DFS_DATANODE_XCEIVER_STOP_TIMEOUT_MILLIS_DEFAULT);
       Assert.assertNull("Data-node should not have this replica.", r);
     }
     
@@ -255,7 +290,8 @@ public class TestInterDatanodeProtocol {
       final long recoveryid = gs - 1;
       final Block b = new Block(firstblockid + 1, length, gs);
       try {
-        FsDatasetImpl.initReplicaRecovery(bpid, map, b, recoveryid);
+        FsDatasetImpl.initReplicaRecovery(bpid, map, b, recoveryid,
+            DFSConfigKeys.DFS_DATANODE_XCEIVER_STOP_TIMEOUT_MILLIS_DEFAULT);
         Assert.fail();
       }
       catch(IOException ioe) {
@@ -268,7 +304,8 @@ public class TestInterDatanodeProtocol {
       final long recoveryid = gs + 1;
       final Block b = new Block(firstblockid, length, gs+1);
       try {
-        FsDatasetImpl.initReplicaRecovery(bpid, map, b, recoveryid);
+        FsDatasetImpl.initReplicaRecovery(bpid, map, b, recoveryid,
+            DFSConfigKeys.DFS_DATANODE_XCEIVER_STOP_TIMEOUT_MILLIS_DEFAULT);
         fail("InitReplicaRecovery should fail because replica's " +
         		"gs is less than the block's gs");
       } catch (IOException e) {
@@ -292,7 +329,7 @@ public class TestInterDatanodeProtocol {
       String bpid = cluster.getNamesystem().getBlockPoolId();
 
       //create a file
-      DistributedFileSystem dfs = (DistributedFileSystem)cluster.getFileSystem();
+      DistributedFileSystem dfs = cluster.getFileSystem();
       String filestr = "/foo";
       Path filepath = new Path(filestr);
       DFSTestUtil.createFile(dfs, filepath, 1024L, (short)3, 0L);
@@ -357,14 +394,13 @@ public class TestInterDatanodeProtocol {
     server.start();
 
     final InetSocketAddress addr = NetUtils.getConnectAddress(server);
-    DatanodeID fakeDnId = new DatanodeID(
-        "localhost", "localhost", "fake-storage", addr.getPort(), 0, addr.getPort());
+    DatanodeID fakeDnId = DFSTestUtil.getLocalDatanodeID(addr.getPort());
     DatanodeInfo dInfo = new DatanodeInfo(fakeDnId);
     InterDatanodeProtocol proxy = null;
 
     try {
       proxy = DataNode.createInterDataNodeProtocolProxy(
-          dInfo, conf, 500);
+          dInfo, conf, 500, false);
       proxy.initReplicaRecovery(new RecoveringBlock(
           new ExtendedBlock("bpid", 1), null, 100));
       fail ("Expected SocketTimeoutException exception, but did not get.");

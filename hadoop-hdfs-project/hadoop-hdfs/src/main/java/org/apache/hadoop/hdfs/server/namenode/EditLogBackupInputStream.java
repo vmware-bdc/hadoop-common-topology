@@ -33,8 +33,8 @@ import com.google.common.base.Preconditions;
  *  int, int, byte[])
  */
 class EditLogBackupInputStream extends EditLogInputStream {
-  String address; // sender address 
-  private ByteBufferInputStream inner;
+  final String address; // sender address
+  private final ByteBufferInputStream inner;
   private DataInputStream in;
   private FSEditLogOp.Reader reader = null;
   private FSEditLogLoader.PositionTrackingInputStream tracker = null;
@@ -92,7 +92,7 @@ class EditLogBackupInputStream extends EditLogInputStream {
   }
 
   @Override
-  public int getVersion() throws IOException {
+  public int getVersion(boolean verifyVersion) throws IOException {
     return this.version;
   }
 
@@ -119,7 +119,7 @@ class EditLogBackupInputStream extends EditLogInputStream {
 
     this.version = version;
 
-    reader = new FSEditLogOp.Reader(in, version);
+    reader = new FSEditLogOp.Reader(in, tracker, version);
   }
 
   void clear() throws IOException {
@@ -129,17 +129,22 @@ class EditLogBackupInputStream extends EditLogInputStream {
   }
 
   @Override
-  public long getFirstTxId() throws IOException {
+  public long getFirstTxId() {
     return HdfsConstants.INVALID_TXID;
   }
 
   @Override
-  public long getLastTxId() throws IOException {
+  public long getLastTxId() {
     return HdfsConstants.INVALID_TXID;
   }
 
   @Override
   public boolean isInProgress() {
     return true;
+  }
+
+  @Override
+  public void setMaxOpSize(int maxOpSize) {
+    reader.setMaxOpSize(maxOpSize);
   }
 }

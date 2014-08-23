@@ -35,7 +35,7 @@ import org.junit.Test;
 
 public class TestFetchImage {
   
-  private static File FETCHED_IMAGE_FILE = new File(
+  private static final File FETCHED_IMAGE_FILE = new File(
       System.getProperty("build.test.dir"), "fetched-image-dir");
   // Shamelessly stolen from NNStorage.
   private static final Pattern IMAGE_REGEX = Pattern.compile("fsimage_(\\d+)");
@@ -61,9 +61,11 @@ public class TestFetchImage {
       fs.mkdirs(new Path("/foo2"));
       fs.mkdirs(new Path("/foo3"));
       
-      cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+      cluster.getNameNodeRpc()
+          .setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
       cluster.getNameNodeRpc().saveNamespace();
-      cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+      cluster.getNameNodeRpc()
+          .setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
       
       runFetchImage(dfsAdmin, cluster);
     } finally {
@@ -105,7 +107,7 @@ public class TestFetchImage {
       for (File imageFile : new File(new File(nameDir), "current").listFiles()) {
         Matcher imageMatch = IMAGE_REGEX.matcher(imageFile.getName());
         if (imageMatch.matches()) {
-          long imageTxId = Long.valueOf(imageMatch.group(1));
+          long imageTxId = Long.parseLong(imageMatch.group(1));
           if (imageTxId > highestImageTxId) {
             highestImageTxId = imageTxId;
             highestImageOnNn = imageFile;

@@ -19,26 +19,34 @@ package org.apache.hadoop.hdfs.server.datanode.fsdataset;
 
 
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
 import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.protocol.HdfsBlocksMetadata;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataStorage;
+import org.apache.hadoop.hdfs.server.datanode.FinalizedReplica;
 import org.apache.hadoop.hdfs.server.datanode.Replica;
 import org.apache.hadoop.hdfs.server.datanode.ReplicaInPipelineInterface;
+import org.apache.hadoop.hdfs.server.datanode.StorageLocation;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetFactory;
 import org.apache.hadoop.hdfs.server.datanode.metrics.FSDatasetMBean;
 import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand.RecoveringBlock;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.hdfs.server.protocol.ReplicaRecoveryInfo;
+import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 import org.apache.hadoop.util.ReflectionUtils;
 
@@ -75,7 +83,7 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
 
   /**
    * Create rolling logs.
-   * 
+   *
    * @param prefix the prefix of the log names.
    * @return rolling logs
    */
@@ -85,17 +93,25 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
   /** @return a list of volumes. */
   public List<V> getVolumes();
 
+  /** Add an array of StorageLocation to FsDataset. */
+  public void addVolumes(Collection<StorageLocation> volumes)
+      throws IOException;
+
+  /** @return a storage with the given storage ID */
+  public DatanodeStorage getStorage(final String storageUuid);
+
+  /** @return one or more storage reports for attached volumes. */
+  public StorageReport[] getStorageReports(String bpid)
+      throws IOException;
+
   /** @return the volume that contains a replica of the block. */
   public V getVolume(ExtendedBlock b);
 
   /** @return a volume information map (name => info). */
   public Map<String, Object> getVolumeInfoMap();
 
-  /** @return a list of block pools. */
-  public String[] getBlockPoolList();
-
   /** @return a list of finalized blocks for the given block pool. */
-  public List<Block> getFinalizedBlocks(String bpid);
+  public List<FinalizedReplica> getFinalizedBlocks(String bpid);
 
   /**
    * Check whether the in-memory block record matches the block on the disk,
@@ -116,16 +132,14 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
 
   /**
    * Returns the specified block's on-disk length (excluding metadata)
-   * @param b
    * @return   the specified block's on-disk length (excluding metadta)
-   * @throws IOException
+   * @throws IOException on error
    */
   public long getLength(ExtendedBlock b) throws IOException;
 
   /**
    * Get reference to the replica meta info in the replicasMap. 
    * To be called from methods that are synchronized on {@link FSDataset}
-   * @param blockId
    * @return replica from the replicas map
    */
   @Deprecated
@@ -143,8 +157,8 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
   
   /**
    * Returns an input stream at specified offset of the specified block
-   * @param b
-   * @param seekOffset
+   * @param b block
+   * @param seekOffset offset with in the block to seek to
    * @return an input stream to read the contents of the specified block,
    *  starting at the offset
    * @throws IOException
@@ -155,9 +169,6 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
   /**
    * Returns an input stream at specified offset of the specified block
    * The block is still in the tmp directory and is not finalized
-   * @param b
-   * @param blkoff
-   * @param ckoff
    * @return an input stream to read the contents of the specified block,
    *  starting at the offset
    * @throws IOException
@@ -172,8 +183,8 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
    * @return the meta info of the replica which is being written to
    * @throws IOException if an error occurs
    */
-  public ReplicaInPipelineInterface createTemporary(ExtendedBlock b
-      ) throws IOException;
+  public ReplicaInPipelineInterface createTemporary(StorageType storageType,
+      ExtendedBlock b) throws IOException;
 
   /**
    * Creates a RBW replica and returns the meta info of the replica
@@ -182,8 +193,8 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
    * @return the meta info of the replica which is being written to
    * @throws IOException if an error occurs
    */
-  public ReplicaInPipelineInterface createRbw(ExtendedBlock b
-      ) throws IOException;
+  public ReplicaInPipelineInterface createRbw(StorageType storageType,
+      ExtendedBlock b) throws IOException;
 
   /**
    * Recovers a RBW replica and returns the meta info of the replica
@@ -238,16 +249,16 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
    * @param b block
    * @param newGS the new generation stamp for the replica
    * @param expectedBlockLen the number of bytes the replica is expected to have
+   * @return the storage uuid of the replica.
    * @throws IOException
    */
-  public void recoverClose(ExtendedBlock b, long newGS, long expectedBlockLen
+  public String recoverClose(ExtendedBlock b, long newGS, long expectedBlockLen
       ) throws IOException;
   
   /**
    * Finalizes the block previously opened for writing using writeToBlock.
    * The block size is what is in the parameter b and it must match the amount
    *  of data written
-   * @param b
    * @throws IOException
    */
   public void finalizeBlock(ExtendedBlock b) throws IOException;
@@ -255,32 +266,36 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
   /**
    * Unfinalizes the block previously opened for writing using writeToBlock.
    * The temporary file associated with this block is deleted.
-   * @param b
    * @throws IOException
    */
   public void unfinalizeBlock(ExtendedBlock b) throws IOException;
 
   /**
-   * Returns the block report - the full list of blocks stored under a 
-   * block pool
+   * Returns one block report per volume.
    * @param bpid Block Pool Id
-   * @return - the block report - the full list of blocks stored
+   * @return - a map of DatanodeStorage to block report for the volume.
    */
-  public BlockListAsLongs getBlockReport(String bpid);
+  public Map<DatanodeStorage, BlockListAsLongs> getBlockReports(String bpid);
+
+  /**
+   * Returns the cache report - the full list of cached block IDs of a
+   * block pool.
+   * @param   bpid Block Pool Id
+   * @return  the cache report - the full list of cached block IDs.
+   */
+  public List<Long> getCacheReport(String bpid);
 
   /** Does the dataset contain the block? */
   public boolean contains(ExtendedBlock block);
 
   /**
    * Is the block valid?
-   * @param b
    * @return - true if the specified block is valid
    */
   public boolean isValidBlock(ExtendedBlock b);
 
   /**
    * Is the block a valid RBW?
-   * @param b
    * @return - true if the specified block is a valid RBW
    */
   public boolean isValidRbw(ExtendedBlock b);
@@ -292,6 +307,28 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
    * @throws IOException
    */
   public void invalidate(String bpid, Block invalidBlks[]) throws IOException;
+
+  /**
+   * Caches the specified blocks
+   * @param bpid Block pool id
+   * @param blockIds - block ids to cache
+   */
+  public void cache(String bpid, long[] blockIds);
+
+  /**
+   * Uncaches the specified blocks
+   * @param bpid Block pool id
+   * @param blockIds - blocks ids to uncache
+   */
+  public void uncache(String bpid, long[] blockIds);
+
+  /**
+   * Determine if the specified block is cached.
+   * @param bpid Block pool id
+   * @param blockIds - block id
+   * @return true if the block is cached
+   */
+  public boolean isCached(String bpid, long blockId);
 
     /**
      * Check if all the data directories are healthy
@@ -373,4 +410,41 @@ public interface FsDatasetSpi<V extends FsVolumeSpi> extends FSDatasetMBean {
    */
   public BlockLocalPathInfo getBlockLocalPathInfo(ExtendedBlock b
       ) throws IOException;
+
+  /**
+   * Get a {@link HdfsBlocksMetadata} corresponding to the list of blocks in 
+   * <code>blocks</code>.
+   * 
+   * @param bpid pool to query
+   * @param blockIds List of block ids for which to return metadata
+   * @return metadata Metadata for the list of blocks
+   * @throws IOException
+   */
+  public HdfsBlocksMetadata getHdfsBlocksMetadata(String bpid,
+      long[] blockIds) throws IOException;
+
+  /**
+   * Enable 'trash' for the given dataset. When trash is enabled, files are
+   * moved to a separate trash directory instead of being deleted immediately.
+   * This can be useful for example during rolling upgrades.
+   */
+  public void enableTrash(String bpid);
+
+  /**
+   * Restore trash
+   */
+  public void restoreTrash(String bpid);
+
+  /**
+   * @return true when trash is enabled
+   */
+  public boolean trashEnabled(String bpid);
+
+  /**
+   * submit a sync_file_range request to AsyncDiskService
+   */
+  public void submitBackgroundSyncFileRangeRequest(final ExtendedBlock block,
+      final FileDescriptor fd, final long offset, final long nbytes,
+      final int flags);
 }
+

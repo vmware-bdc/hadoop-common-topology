@@ -17,11 +17,10 @@
  */
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
-import java.util.Collection;
-import java.util.Iterator;
-import java.util.concurrent.TimeoutException;
+import static org.junit.Assert.assertTrue;
 
-import junit.framework.TestCase;
+import java.util.Collection;
+import java.util.concurrent.TimeoutException;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -32,10 +31,9 @@ import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSCluster.DataNodeProperties;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
-import org.apache.hadoop.hdfs.server.blockmanagement.HeartbeatManager;
-import org.apache.hadoop.hdfs.server.blockmanagement.NumberReplicas;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.util.Time;
+import org.junit.Test;
 
 /**
  * Test if live nodes count per node is correct 
@@ -44,7 +42,7 @@ import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
  * Two of the "while" loops below use "busy wait"
  * because they are detecting transient states.
  */
-public class TestNodeCount extends TestCase {
+public class TestNodeCount {
   final short REPLICATION_FACTOR = (short)2;
   final long TIMEOUT = 20000L;
   long timeout = 0;
@@ -52,6 +50,7 @@ public class TestNodeCount extends TestCase {
   Block lastBlock = null;
   NumberReplicas lastNum = null;
 
+  @Test
   public void testNodeCount() throws Exception {
     // start a mini dfs cluster of 2 nodes
     final Configuration conf = new HdfsConfiguration();
@@ -98,13 +97,11 @@ public class TestNodeCount extends TestCase {
       }
       
       // find out a non-excess node
-      final Iterator<DatanodeDescriptor> iter = bm.blocksMap
-          .nodeIterator(block.getLocalBlock());
       DatanodeDescriptor nonExcessDN = null;
-      while (iter.hasNext()) {
-        DatanodeDescriptor dn = iter.next();
-        Collection<Block> blocks = bm.excessReplicateMap.get(dn.getStorageID());
-        if (blocks == null || !blocks.contains(block) ) {
+      for(DatanodeStorageInfo storage : bm.blocksMap.getStorages(block.getLocalBlock())) {
+        final DatanodeDescriptor dn = storage.getDatanodeDescriptor();
+        Collection<Block> blocks = bm.excessReplicateMap.get(dn.getDatanodeUuid());
+        if (blocks == null || !blocks.contains(block.getLocalBlock()) ) {
           nonExcessDN = dn;
           break;
         }
@@ -140,7 +137,7 @@ public class TestNodeCount extends TestCase {
   
   void initializeTimeout(long timeout) {
     this.timeout = timeout;
-    this.failtime = System.currentTimeMillis()
+    this.failtime = Time.now()
         + ((timeout <= 0) ? Long.MAX_VALUE : timeout);
   }
   
@@ -151,7 +148,7 @@ public class TestNodeCount extends TestCase {
   
   /* check for timeout, then wait for cycleTime msec */
   void checkTimeout(String testLabel, long cycleTime) throws TimeoutException {
-    if (System.currentTimeMillis() > failtime) {
+    if (Time.now() > failtime) {
       throw new TimeoutException("Timeout: "
           + testLabel + " for block " + lastBlock + " after " + timeout 
           + " msec.  Last counts: live = " + lastNum.liveReplicas()

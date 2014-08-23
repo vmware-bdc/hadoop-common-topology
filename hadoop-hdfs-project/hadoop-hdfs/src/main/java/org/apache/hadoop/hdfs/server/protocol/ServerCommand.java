@@ -31,7 +31,7 @@ import org.apache.hadoop.classification.InterfaceStability;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public abstract class ServerCommand {
-  private int action;
+  private final int action;
 
   /**
    * Create a command for the specified action.
@@ -39,7 +39,7 @@ public abstract class ServerCommand {
    * 
    * @see DatanodeProtocol
    * @see NamenodeProtocol
-   * @param action
+   * @param action protocol specific action
    */
   public ServerCommand(int action) {
     this.action = action;

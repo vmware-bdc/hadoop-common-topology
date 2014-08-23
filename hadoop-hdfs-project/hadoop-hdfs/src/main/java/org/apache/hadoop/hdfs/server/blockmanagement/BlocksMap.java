@@ -20,33 +20,40 @@ package org.apache.hadoop.hdfs.server.blockmanagement;
 import java.util.Iterator;
 
 import org.apache.hadoop.hdfs.protocol.Block;
-import org.apache.hadoop.hdfs.server.namenode.INodeFile;
-import org.apache.hadoop.hdfs.util.GSet;
-import org.apache.hadoop.hdfs.util.LightWeightGSet;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
+import org.apache.hadoop.util.GSet;
+import org.apache.hadoop.util.LightWeightGSet;
+
+import com.google.common.base.Preconditions;
+import com.google.common.base.Predicate;
+import com.google.common.collect.Iterables;
 
 /**
  * This class maintains the map from a block to its metadata.
- * block's metadata currently includes INode it belongs to and
+ * block's metadata currently includes blockCollection it belongs to and
  * the datanodes that store the block.
  */
 class BlocksMap {
-  private static class NodeIterator implements Iterator<DatanodeDescriptor> {
-    private BlockInfo blockInfo;
+  private static class StorageIterator implements Iterator<DatanodeStorageInfo> {
+    private final BlockInfo blockInfo;
     private int nextIdx = 0;
       
-    NodeIterator(BlockInfo blkInfo) {
+    StorageIterator(BlockInfo blkInfo) {
       this.blockInfo = blkInfo;
     }
 
+    @Override
     public boolean hasNext() {
       return blockInfo != null && nextIdx < blockInfo.getCapacity()
               && blockInfo.getDatanode(nextIdx) != null;
     }
 
-    public DatanodeDescriptor next() {
-      return blockInfo.getDatanode(nextIdx++);
+    @Override
+    public DatanodeStorageInfo next() {
+      return blockInfo.getStorageInfo(nextIdx++);
     }
 
+    @Override
     public void remove()  {
       throw new UnsupportedOperationException("Sorry. can't remove.");
     }
@@ -57,57 +64,48 @@ class BlocksMap {
   
   private GSet<Block, BlockInfo> blocks;
 
-  BlocksMap(final float loadFactor) {
-    this.capacity = computeCapacity();
-    this.blocks = new LightWeightGSet<Block, BlockInfo>(capacity);
+  BlocksMap(int capacity) {
+    // Use 2% of total memory to size the GSet capacity
+    this.capacity = capacity;
+    this.blocks = new LightWeightGSet<Block, BlockInfo>(capacity) {
+      @Override
+      public Iterator<BlockInfo> iterator() {
+        SetIterator iterator = new SetIterator();
+        /*
+         * Not tracking any modifications to set. As this set will be used
+         * always under FSNameSystem lock, modifications will not cause any
+         * ConcurrentModificationExceptions. But there is a chance of missing
+         * newly added elements during iteration.
+         */
+        iterator.setTrackModification(false);
+        return iterator;
+      }
+    };
   }
 
-  /**
-   * Let t = 2% of max memory.
-   * Let e = round(log_2 t).
-   * Then, we choose capacity = 2^e/(size of reference),
-   * unless it is outside the close interval [1, 2^30].
-   */
-  private static int computeCapacity() {
-    //VM detection
-    //See http://java.sun.com/docs/hotspot/HotSpotFAQ.html#64bit_detection
-    final String vmBit = System.getProperty("sun.arch.data.model");
-
-    //2% of max memory
-    final double twoPC = Runtime.getRuntime().maxMemory()/50.0;
-
-    //compute capacity
-    final int e1 = (int)(Math.log(twoPC)/Math.log(2.0) + 0.5);
-    final int e2 = e1 - ("32".equals(vmBit)? 2: 3);
-    final int exponent = e2 < 0? 0: e2 > 30? 30: e2;
-    final int c = 1 << exponent;
-
-    LightWeightGSet.LOG.info("VM type       = " + vmBit + "-bit");
-    LightWeightGSet.LOG.info("2% max memory = " + twoPC/(1 << 20) + " MB");
-    LightWeightGSet.LOG.info("capacity      = 2^" + exponent
-        + " = " + c + " entries");
-    return c;
-  }
 
   void close() {
-    blocks = null;
+    if (blocks != null) {
+      blocks.clear();
+      blocks = null;
+    }
   }
 
-  INodeFile getINode(Block b) {
+  BlockCollection getBlockCollection(Block b) {
     BlockInfo info = blocks.get(b);
-    return (info != null) ? info.getINode() : null;
+    return (info != null) ? info.getBlockCollection() : null;
   }
 
   /**
-   * Add block b belonging to the specified file inode to the map.
+   * Add block b belonging to the specified block collection to the map.
    */
-  BlockInfo addINode(BlockInfo b, INodeFile iNode) {
+  BlockInfo addBlockCollection(BlockInfo b, BlockCollection bc) {
     BlockInfo info = blocks.get(b);
     if (info != b) {
       info = b;
       blocks.put(info);
     }
-    info.setINode(iNode);
+    info.setBlockCollection(bc);
     return info;
   }
 
@@ -121,7 +119,7 @@ class BlocksMap {
     if (blockInfo == null)
       return;
 
-    blockInfo.setINode(null);
+    blockInfo.setBlockCollection(null);
     for(int idx = blockInfo.numNodes()-1; idx >= 0; idx--) {
       DatanodeDescriptor dn = blockInfo.getDatanode(idx);
       dn.removeBlock(blockInfo); // remove from the list and wipe the location
@@ -135,18 +133,39 @@ class BlocksMap {
 
   /**
    * Searches for the block in the BlocksMap and 
-   * returns Iterator that iterates through the nodes the block belongs to.
+   * returns {@link Iterable} of the storages the block belongs to.
    */
-  Iterator<DatanodeDescriptor> nodeIterator(Block b) {
-    return nodeIterator(blocks.get(b));
+  Iterable<DatanodeStorageInfo> getStorages(Block b) {
+    return getStorages(blocks.get(b));
+  }
+
+  /**
+   * Searches for the block in the BlocksMap and 
+   * returns {@link Iterable} of the storages the block belongs to
+   * <i>that are of the given {@link DatanodeStorage.State state}</i>.
+   * 
+   * @param state DatanodeStorage state by which to filter the returned Iterable
+   */
+  Iterable<DatanodeStorageInfo> getStorages(Block b, final DatanodeStorage.State state) {
+    return Iterables.filter(getStorages(blocks.get(b)), new Predicate<DatanodeStorageInfo>() {
+      @Override
+      public boolean apply(DatanodeStorageInfo storage) {
+        return storage.getState() == state;
+      }
+    });
   }
 
   /**
    * For a block that has already been retrieved from the BlocksMap
-   * returns Iterator that iterates through the nodes the block belongs to.
+   * returns {@link Iterable} of the storages the block belongs to.
    */
-  Iterator<DatanodeDescriptor> nodeIterator(BlockInfo storedBlock) {
-    return new NodeIterator(storedBlock);
+  Iterable<DatanodeStorageInfo> getStorages(final BlockInfo storedBlock) {
+    return new Iterable<DatanodeStorageInfo>() {
+      @Override
+      public Iterator<DatanodeStorageInfo> iterator() {
+        return new StorageIterator(storedBlock);
+      }
+    };
   }
 
   /** counts number of containing nodes. Better than using iterator. */
@@ -169,7 +188,7 @@ class BlocksMap {
     boolean removed = node.removeBlock(info);
 
     if (info.getDatanode(0) == null     // no datanodes left
-              && info.getINode() == null) {  // does not belong to a file
+              && info.getBlockCollection() == null) {  // does not belong to a file
       blocks.remove(b);  // remove block from the map
     }
     return removed;
@@ -198,9 +217,14 @@ class BlocksMap {
     BlockInfo currentBlock = blocks.get(newBlock);
     assert currentBlock != null : "the block if not in blocksMap";
     // replace block in data-node lists
-    for(int idx = currentBlock.numNodes()-1; idx >= 0; idx--) {
-      DatanodeDescriptor dn = currentBlock.getDatanode(idx);
-      dn.replaceBlock(currentBlock, newBlock);
+    for (int i = currentBlock.numNodes() - 1; i >= 0; i--) {
+      final DatanodeDescriptor dn = currentBlock.getDatanode(i);
+      final DatanodeStorageInfo storage = currentBlock.findStorageInfo(dn);
+      final boolean removed = storage.removeBlock(currentBlock);
+      Preconditions.checkState(removed, "currentBlock not found.");
+
+      final boolean added = storage.addBlock(newBlock);
+      Preconditions.checkState(added, "newBlock already exists.");
     }
     // replace block in the map itself
     blocks.put(newBlock);

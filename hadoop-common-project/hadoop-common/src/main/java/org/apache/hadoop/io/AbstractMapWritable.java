@@ -29,6 +29,8 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 
+import com.google.common.annotations.VisibleForTesting;
+
 /**
  * Abstract base class for MapWritable and SortedMapWritable
  * 
@@ -45,10 +47,12 @@ public abstract class AbstractMapWritable implements Writable, Configurable {
   private AtomicReference<Configuration> conf;
   
   /* Class to id mappings */
-  private Map<Class, Byte> classToIdMap = new ConcurrentHashMap<Class, Byte>();
+  @VisibleForTesting
+  Map<Class<?>, Byte> classToIdMap = new ConcurrentHashMap<Class<?>, Byte>();
   
   /* Id to Class mappings */
-  private Map<Byte, Class> idToClassMap = new ConcurrentHashMap<Byte, Class>();
+  @VisibleForTesting
+  Map<Byte, Class<?>> idToClassMap = new ConcurrentHashMap<Byte, Class<?>>();
   
   /* The number of new classes (those not established by the constructor) */
   private volatile byte newClasses = 0;
@@ -61,7 +65,7 @@ public abstract class AbstractMapWritable implements Writable, Configurable {
   /**
    * Used to add "predefined" classes and by Writable to copy "new" classes.
    */
-  private synchronized void addToMap(Class clazz, byte id) {
+  private synchronized void addToMap(Class<?> clazz, byte id) {
     if (classToIdMap.containsKey(clazz)) {
       byte b = classToIdMap.get(clazz);
       if (b != id) {
@@ -70,7 +74,7 @@ public abstract class AbstractMapWritable implements Writable, Configurable {
       }
     }
     if (idToClassMap.containsKey(id)) {
-      Class c = idToClassMap.get(id);
+      Class<?> c = idToClassMap.get(id);
       if (!c.equals(clazz)) {
         throw new IllegalArgumentException("Id " + id + " exists but maps to " +
             c.getName() + " and not " + clazz.getName());
@@ -81,7 +85,7 @@ public abstract class AbstractMapWritable implements Writable, Configurable {
   }
   
   /** Add a Class to the maps if it is not already present. */ 
-  protected synchronized void addToMap(Class clazz) {
+  protected synchronized void addToMap(Class<?> clazz) {
     if (classToIdMap.containsKey(clazz)) {
       return;
     }
@@ -94,12 +98,12 @@ public abstract class AbstractMapWritable implements Writable, Configurable {
   }
 
   /** @return the Class class for the specified id */
-  protected Class getClass(byte id) {
+  protected Class<?> getClass(byte id) {
     return idToClassMap.get(id);
   }
 
   /** @return the id for the specified Class */
-  protected byte getId(Class clazz) {
+  protected byte getId(Class<?> clazz) {
     return classToIdMap.containsKey(clazz) ? classToIdMap.get(clazz) : -1;
   }
 
@@ -164,16 +168,18 @@ public abstract class AbstractMapWritable implements Writable, Configurable {
   }
 
   /** @return the conf */
+  @Override
   public Configuration getConf() {
     return conf.get();
   }
 
   /** @param conf the conf to set */
+  @Override
   public void setConf(Configuration conf) {
     this.conf.set(conf);
   }
   
-  /** {@inheritDoc} */
+  @Override
   public void write(DataOutput out) throws IOException {
     
     // First write out the size of the class table and any classes that are
@@ -187,7 +193,7 @@ public abstract class AbstractMapWritable implements Writable, Configurable {
     }
   }
   
-  /** {@inheritDoc} */
+  @Override
   public void readFields(DataInput in) throws IOException {
     
     // Get the number of "unknown" classes

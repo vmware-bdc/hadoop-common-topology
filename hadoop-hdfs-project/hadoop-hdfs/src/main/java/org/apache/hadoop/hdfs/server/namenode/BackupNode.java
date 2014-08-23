@@ -20,10 +20,12 @@ package org.apache.hadoop.hdfs.server.namenode;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
+import java.net.URL;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.ha.ServiceFailedException;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.NameNodeProxies;
@@ -34,7 +36,9 @@ import org.apache.hadoop.hdfs.protocol.proto.JournalProtocolProtos.JournalProtoc
 import org.apache.hadoop.hdfs.protocolPB.JournalProtocolPB;
 import org.apache.hadoop.hdfs.protocolPB.JournalProtocolServerSideTranslatorPB;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.namenode.ha.HAState;
 import org.apache.hadoop.hdfs.server.protocol.FenceResponse;
 import org.apache.hadoop.hdfs.server.protocol.JournalInfo;
 import org.apache.hadoop.hdfs.server.protocol.JournalProtocol;
@@ -69,19 +73,17 @@ public class BackupNode extends NameNode {
   private static final String BN_HTTP_ADDRESS_NAME_KEY = DFSConfigKeys.DFS_NAMENODE_BACKUP_HTTP_ADDRESS_KEY;
   private static final String BN_HTTP_ADDRESS_DEFAULT = DFSConfigKeys.DFS_NAMENODE_BACKUP_HTTP_ADDRESS_DEFAULT;
   private static final String BN_SERVICE_RPC_ADDRESS_KEY = DFSConfigKeys.DFS_NAMENODE_BACKUP_SERVICE_RPC_ADDRESS_KEY;
+  private static final float  BN_SAFEMODE_THRESHOLD_PCT_DEFAULT = 1.5f;
+  private static final int    BN_SAFEMODE_EXTENSION_DEFAULT = Integer.MAX_VALUE;
 
   /** Name-node proxy */
   NamenodeProtocol namenode;
   /** Name-node RPC address */
   String nnRpcAddress;
   /** Name-node HTTP address */
-  String nnHttpAddress;
+  URL nnHttpAddress;
   /** Checkpoint manager */
   Checkpointer checkpointManager;
-  /** ClusterID to which BackupNode belongs to */
-  String clusterId;
-  /** Block pool Id of the peer namenode of this BackupNode */
-  String blockPoolId;
   
   BackupNode(Configuration conf, NamenodeRole role) throws IOException {
     super(conf, role);
@@ -123,16 +125,16 @@ public class BackupNode extends NameNode {
     String addr = conf.get(BN_HTTP_ADDRESS_NAME_KEY, BN_HTTP_ADDRESS_DEFAULT);
     return NetUtils.createSocketAddr(addr);
   }
-  
-  @Override // NameNode
-  protected void setHttpServerAddress(Configuration conf){
-    conf.set(BN_HTTP_ADDRESS_NAME_KEY, NetUtils.getHostPortString(getHttpAddress()));
-  }
 
   @Override // NameNode
   protected void loadNamesystem(Configuration conf) throws IOException {
+    conf.setFloat(DFSConfigKeys.DFS_NAMENODE_SAFEMODE_THRESHOLD_PCT_KEY,
+                                BN_SAFEMODE_THRESHOLD_PCT_DEFAULT);
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_KEY,
+                                BN_SAFEMODE_EXTENSION_DEFAULT);
     BackupImage bnImage = new BackupImage(conf);
     this.namesystem = new FSNamesystem(conf, bnImage);
+    namesystem.dir.disableQuotaChecks();
     bnImage.setNamesystem(namesystem);
     bnImage.recoverCreateRead();
   }
@@ -145,6 +147,7 @@ public class BackupNode extends NameNode {
                  CommonConfigurationKeys.FS_TRASH_INTERVAL_DEFAULT);
     NamespaceInfo nsInfo = handshake(conf);
     super.initialize(conf);
+    namesystem.setBlockPoolId(nsInfo.getBlockPoolID());
 
     if (false == namesystem.isInSafeMode()) {
       namesystem.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
@@ -154,14 +157,15 @@ public class BackupNode extends NameNode {
     // therefore lease hard limit should never expire.
     namesystem.leaseManager.setLeasePeriod(
         HdfsConstants.LEASE_SOFTLIMIT_PERIOD, Long.MAX_VALUE);
-    
-    clusterId = nsInfo.getClusterID();
-    blockPoolId = nsInfo.getBlockPoolID();
 
     // register with the active name-node 
     registerWith(nsInfo);
     // Checkpoint daemon should start after the rpc server started
     runCheckpointDaemon(conf);
+    InetSocketAddress addr = getHttpAddress();
+    if (addr != null) {
+      conf.set(BN_HTTP_ADDRESS_NAME_KEY, NetUtils.getHostPortString(getHttpAddress()));
+    }
   }
 
   @Override
@@ -219,7 +223,7 @@ public class BackupNode extends NameNode {
   }
   
   /* @Override */// NameNode
-  public boolean setSafeMode(@SuppressWarnings("unused") SafeModeAction action)
+  public boolean setSafeMode(SafeModeAction action)
       throws IOException {
     throw new UnsupportedActionException("setSafeMode");
   }
@@ -260,7 +264,7 @@ public class BackupNode extends NameNode {
     }
 
     /////////////////////////////////////////////////////
-    // BackupNodeProtocol implementation for backup node.
+    // JournalProtocol implementation for backup node.
     /////////////////////////////////////////////////////
     @Override
     public void startLogSegment(JournalInfo journalInfo, long epoch,
@@ -312,7 +316,8 @@ public class BackupNode extends NameNode {
         NamenodeProtocol.class, UserGroupInformation.getCurrentUser(),
         true).getProxy();
     this.nnRpcAddress = NetUtils.getHostPortString(nnAddress);
-    this.nnHttpAddress = NetUtils.getHostPortString(super.getHttpServerAddress(conf));
+    this.nnHttpAddress = DFSUtil.getInfoServer(nnAddress, conf,
+        DFSUtil.getHttpClientScheme(conf)).toURL();
     // get version and id info from the name-node
     NamespaceInfo nsInfo = null;
     while(!isStopRequested()) {
@@ -350,7 +355,7 @@ public class BackupNode extends NameNode {
 
   /**
    * Register this backup node with the active name-node.
-   * @param nsInfo
+   * @param nsInfo namespace information
    * @throws IOException
    */
   private void registerWith(NamespaceInfo nsInfo) throws IOException {
@@ -364,11 +369,12 @@ public class BackupNode extends NameNode {
     } else {
       nsInfo.validateStorage(storage);
     }
+    bnImage.initEditLog(StartupOption.REGULAR);
     setRegistration();
     NamenodeRegistration nnReg = null;
     while(!isStopRequested()) {
       try {
-        nnReg = namenode.register(getRegistration());
+        nnReg = namenode.registerSubordinateNamenode(getRegistration());
         break;
       } catch(SocketTimeoutException e) {  // name-node is busy
         LOG.info("Problem connecting to name-node: " + nnRpcAddress);
@@ -408,27 +414,29 @@ public class BackupNode extends NameNode {
       LOG.fatal(errorMsg);
       throw new IOException(errorMsg);
     }
-    assert HdfsConstants.LAYOUT_VERSION == nsInfo.getLayoutVersion() :
+    assert HdfsConstants.NAMENODE_LAYOUT_VERSION == nsInfo.getLayoutVersion() :
       "Active and backup node layout versions must be the same. Expected: "
-      + HdfsConstants.LAYOUT_VERSION + " actual "+ nsInfo.getLayoutVersion();
+      + HdfsConstants.NAMENODE_LAYOUT_VERSION + " actual "+ nsInfo.getLayoutVersion();
     return nsInfo;
   }
-  
-  String getBlockPoolId() {
-    return blockPoolId;
-  }
-  
-  String getClusterId() {
-    return clusterId;
-  }
-  
+
   @Override
+  protected String getNameServiceId(Configuration conf) {
+    return DFSUtil.getBackupNameServiceId(conf);
+  }
+
+  @Override
+  protected HAState createHAState(StartupOption startOpt) {
+    return new BackupState();
+  }
+
+  @Override // NameNode
   protected NameNodeHAContext createHAContext() {
     return new BNHAContext();
   }
-  
+
   private class BNHAContext extends NameNodeHAContext {
-    @Override // NameNode
+    @Override // NameNodeHAContext
     public void checkOperation(OperationCategory op)
         throws StandbyException {
       if (op == OperationCategory.UNCHECKED ||
@@ -436,16 +444,48 @@ public class BackupNode extends NameNode {
         return;
       }
       if (OperationCategory.JOURNAL != op &&
-          !(OperationCategory.READ == op && allowStaleStandbyReads)) {
+          !(OperationCategory.READ == op && !isRole(NamenodeRole.CHECKPOINT))) {
         String msg = "Operation category " + op
-            + " is not supported at the BackupNode";
+            + " is not supported at " + getRole();
         throw new StandbyException(msg);
       }
     }
-  }
-  
-  @Override
-  protected String getNameServiceId(Configuration conf) {
-    return DFSUtil.getBackupNameServiceId(conf);
+
+    @Override // NameNodeHAContext
+    public void prepareToStopStandbyServices() throws ServiceFailedException {
+    }
+
+    /**
+     * Start services for BackupNode.
+     * <p>
+     * The following services should be muted
+     * (not run or not pass any control commands to DataNodes)
+     * on BackupNode:
+     * {@link LeaseManager.Monitor} protected by SafeMode.
+     * {@link BlockManager.ReplicationMonitor} protected by SafeMode.
+     * {@link HeartbeatManager.Monitor} protected by SafeMode.
+     * {@link DecommissionManager.Monitor} need to prohibit refreshNodes().
+     * {@link PendingReplicationBlocks.PendingReplicationMonitor} harmless,
+     * because ReplicationMonitor is muted.
+     */
+    @Override
+    public void startActiveServices() throws IOException {
+      try {
+        namesystem.startActiveServices();
+      } catch (Throwable t) {
+        doImmediateShutdown(t);
+      }
+    }
+
+    @Override
+    public void stopActiveServices() throws IOException {
+      try {
+        if (namesystem != null) {
+          namesystem.stopActiveServices();
+        }
+      } catch (Throwable t) {
+        doImmediateShutdown(t);
+      }
+    }
   }
 }

@@ -17,25 +17,34 @@
  */
 package org.apache.hadoop.hdfs.tools;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_BACKUP_ADDRESS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMESERVICES;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.StringTokenizer;
 
-import static org.junit.Assert.*;
-
-import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.*;
-
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DFSUtil.ConfiguredNNAddress;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
-import org.apache.hadoop.hdfs.tools.GetConf;
 import org.apache.hadoop.hdfs.tools.GetConf.Command;
 import org.apache.hadoop.hdfs.tools.GetConf.CommandHandler;
 import org.apache.hadoop.net.NetUtils;
@@ -51,7 +60,7 @@ public class TestGetConf {
   enum TestType {
     NAMENODE, BACKUP, SECONDARY, NNRPCADDRESSES
   }
-  
+  FileSystem localFileSys; 
   /** Setup federation nameServiceIds in the configuration */
   private void setupNameServices(HdfsConfiguration conf, int nameServiceIdCount) {
     StringBuilder nsList = new StringBuilder();
@@ -61,7 +70,7 @@ public class TestGetConf {
       }
       nsList.append(getNameServiceId(i));
     }
-    conf.set(DFS_FEDERATION_NAMESERVICES, nsList.toString());
+    conf.set(DFS_NAMESERVICES, nsList.toString());
   }
 
   /** Set a given key with value as address, for all the nameServiceIds.
@@ -81,6 +90,16 @@ public class TestGetConf {
       conf.set(specificKey, values[i]);
     }
     return values;
+  }
+
+  /**
+   * Add namenodes to the static resolution list to avoid going
+   * through DNS which can be really slow in some configurations.
+   */
+  private void setupStaticHostResolution(int nameServiceIdCount) {
+    for (int i = 0; i < nameServiceIdCount; i++) {
+      NetUtils.addStaticResolution("nn" + i, "localhost");
+    }
   }
 
   /*
@@ -220,7 +239,7 @@ public class TestGetConf {
   /**
    * Test empty configuration
    */
-  @Test
+  @Test(timeout=10000)
   public void testEmptyConf() throws Exception {
     HdfsConfiguration conf = new HdfsConfiguration(false);
     // Verify getting addresses fails
@@ -243,7 +262,7 @@ public class TestGetConf {
   /**
    * Test invalid argument to the tool
    */
-  @Test
+  @Test(timeout=10000)
   public void testInvalidArgument() throws Exception {
     HdfsConfiguration conf = new HdfsConfiguration();
     String[] args = {"-invalidArgument"};
@@ -255,7 +274,7 @@ public class TestGetConf {
    * Tests to make sure the returned addresses are correct in case of default
    * configuration with no federation
    */
-  @Test
+  @Test(timeout=10000)
   public void testNonFederation() throws Exception {
     HdfsConfiguration conf = new HdfsConfiguration(false);
   
@@ -290,7 +309,7 @@ public class TestGetConf {
    * Tests to make sure the returned addresses are correct in case of federation
    * of setup.
    */
-  @Test
+  @Test(timeout=10000)
   public void testFederation() throws Exception {
     final int nsCount = 10;
     HdfsConfiguration conf = new HdfsConfiguration(false);
@@ -302,6 +321,7 @@ public class TestGetConf {
     String[] nnAddresses = setupAddress(conf,
         DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, nsCount, 1000);
     setupAddress(conf, DFS_NAMENODE_RPC_ADDRESS_KEY, nsCount, 1500);
+    setupStaticHostResolution(nsCount);
     String[] backupAddresses = setupAddress(conf,
         DFS_NAMENODE_BACKUP_ADDRESS_KEY, nsCount, 2000);
     String[] secondaryAddresses = setupAddress(conf,
@@ -329,15 +349,16 @@ public class TestGetConf {
     verifyAddresses(conf, TestType.NNRPCADDRESSES, true, nnAddresses);
   }
   
-  @Test
+  @Test(timeout=10000)
   public void testGetSpecificKey() throws Exception {
     HdfsConfiguration conf = new HdfsConfiguration();
     conf.set("mykey", " myval ");
     String[] args = {"-confKey", "mykey"};
-    assertTrue(runTool(conf, args, true).equals("myval\n"));
+    String toolResult = runTool(conf, args, true);
+    assertEquals(String.format("myval%n"), toolResult);
   }
   
-  @Test
+  @Test(timeout=10000)
   public void testExtraArgsThrowsError() throws Exception {
     HdfsConfiguration conf = new HdfsConfiguration();
     conf.set("mykey", "myval");
@@ -350,7 +371,7 @@ public class TestGetConf {
    * Tests commands other than {@link Command#NAMENODE}, {@link Command#BACKUP},
    * {@link Command#SECONDARY} and {@link Command#NNRPCADDRESSES}
    */
-  @Test
+  @Test(timeout=10000)
   public void testTool() throws Exception {
     HdfsConfiguration conf = new HdfsConfiguration(false);
     for (Command cmd : Command.values()) {
@@ -362,5 +383,71 @@ public class TestGetConf {
         assertTrue(runTool(conf, args, true).contains("value"));
       }
     }
+  }
+  @Test
+  public void TestGetConfExcludeCommand() throws Exception{
+  	HdfsConfiguration conf = new HdfsConfiguration();
+    // Set up the hosts/exclude files.
+    localFileSys = FileSystem.getLocal(conf);
+    Path workingDir = localFileSys.getWorkingDirectory();
+    Path dir = new Path(workingDir, System.getProperty("test.build.data", "target/test/data") + "/Getconf/");
+    Path hostsFile = new Path(dir, "hosts");
+    Path excludeFile = new Path(dir, "exclude");
+    
+    // Setup conf
+    conf.set(DFSConfigKeys.DFS_HOSTS, hostsFile.toUri().getPath());
+    conf.set(DFSConfigKeys.DFS_HOSTS_EXCLUDE, excludeFile.toUri().getPath());
+    writeConfigFile(hostsFile, null);
+    writeConfigFile(excludeFile, null);    
+    String[] args = {"-excludeFile"};
+    String ret = runTool(conf, args, true);
+    assertEquals(excludeFile.toUri().getPath(),ret.trim());
+    cleanupFile(localFileSys, excludeFile.getParent());
+  }
+  
+  @Test
+  public void TestGetConfIncludeCommand() throws Exception{
+  	HdfsConfiguration conf = new HdfsConfiguration();
+    // Set up the hosts/exclude files.
+    localFileSys = FileSystem.getLocal(conf);
+    Path workingDir = localFileSys.getWorkingDirectory();
+    Path dir = new Path(workingDir, System.getProperty("test.build.data", "target/test/data") + "/Getconf/");
+    Path hostsFile = new Path(dir, "hosts");
+    Path excludeFile = new Path(dir, "exclude");
+    
+    // Setup conf
+    conf.set(DFSConfigKeys.DFS_HOSTS, hostsFile.toUri().getPath());
+    conf.set(DFSConfigKeys.DFS_HOSTS_EXCLUDE, excludeFile.toUri().getPath());
+    writeConfigFile(hostsFile, null);
+    writeConfigFile(excludeFile, null);    
+    String[] args = {"-includeFile"};
+    String ret = runTool(conf, args, true);
+    assertEquals(hostsFile.toUri().getPath(),ret.trim());
+    cleanupFile(localFileSys, excludeFile.getParent());
+  }
+  
+  private void writeConfigFile(Path name, ArrayList<String> nodes) 
+      throws IOException {
+      // delete if it already exists
+      if (localFileSys.exists(name)) {
+        localFileSys.delete(name, true);
+      }
+
+      FSDataOutputStream stm = localFileSys.create(name);
+      
+      if (nodes != null) {
+        for (Iterator<String> it = nodes.iterator(); it.hasNext();) {
+          String node = it.next();
+          stm.writeBytes(node);
+          stm.writeBytes("\n");
+        }
+      }
+      stm.close();
+    }
+  
+  private void cleanupFile(FileSystem fileSys, Path name) throws IOException {
+    assertTrue(fileSys.exists(name));
+    fileSys.delete(name, true);
+    assertTrue(!fileSys.exists(name));
   }
 }

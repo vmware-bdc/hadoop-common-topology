@@ -27,7 +27,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.compress.CompressionCodec;
-import org.apache.hadoop.fs.FileAlreadyExistsException;
+import org.apache.hadoop.mapred.FileAlreadyExistsException;
 import org.apache.hadoop.mapred.InvalidJobConfException;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.JobContext;
@@ -59,6 +59,11 @@ public static final String COMPRESS_CODEC =
 "mapreduce.output.fileoutputformat.compress.codec";
 public static final String COMPRESS_TYPE = "mapreduce.output.fileoutputformat.compress.type";
 public static final String OUTDIR = "mapreduce.output.fileoutputformat.outputdir";
+
+  @Deprecated
+  public static enum Counter {
+    BYTES_WRITTEN
+  }
 
   /**
    * Set whether the output of the job is compressed.
@@ -150,9 +155,14 @@ public static final String OUTDIR = "mapreduce.output.fileoutputformat.outputdir
    * @param outputDir the {@link Path} of the output directory for 
    * the map-reduce job.
    */
-  public static void setOutputPath(Job job, Path outputDir) throws IOException {
-    outputDir = outputDir.getFileSystem(job.getConfiguration()).makeQualified(
-        outputDir);
+  public static void setOutputPath(Job job, Path outputDir) {
+    try {
+      outputDir = outputDir.getFileSystem(job.getConfiguration()).makeQualified(
+          outputDir);
+    } catch (IOException e) {
+        // Throw the IOException as a RuntimeException to be compatible with MR1
+        throw new RuntimeException(e);
+    }
     job.getConfiguration().set(FileOutputFormat.OUTDIR, outputDir.toString());
   }
 

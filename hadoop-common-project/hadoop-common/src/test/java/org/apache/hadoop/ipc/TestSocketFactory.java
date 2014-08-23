@@ -24,9 +24,10 @@ import java.util.Map;
 
 import javax.net.SocketFactory;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.StandardSocketFactory;
 import org.junit.Test;
@@ -34,18 +35,18 @@ import org.junit.Test;
 public class TestSocketFactory {
 
   @Test
-  public void testSocketFactoryAsKeyInMap() throws Exception {
+  public void testSocketFactoryAsKeyInMap() {
     Map<SocketFactory, Integer> dummyCache = new HashMap<SocketFactory, Integer>();
     int toBeCached1 = 1;
     int toBeCached2 = 2;
     Configuration conf = new Configuration();
-    conf.set("hadoop.rpc.socket.factory.class.default",
+    conf.set(CommonConfigurationKeys.HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_KEY,
         "org.apache.hadoop.ipc.TestSocketFactory$DummySocketFactory");
     final SocketFactory dummySocketFactory = NetUtils
         .getDefaultSocketFactory(conf);
     dummyCache.put(dummySocketFactory, toBeCached1);
 
-    conf.set("hadoop.rpc.socket.factory.class.default",
+    conf.set(CommonConfigurationKeys.HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_KEY,
         "org.apache.hadoop.net.StandardSocketFactory");
     final SocketFactory defaultSocketFactory = NetUtils
         .getDefaultSocketFactory(conf);

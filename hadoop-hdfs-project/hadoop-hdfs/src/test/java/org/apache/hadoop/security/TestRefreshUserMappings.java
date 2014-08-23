@@ -41,6 +41,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
 import org.apache.hadoop.security.authorize.AuthorizationException;
+import org.apache.hadoop.security.authorize.DefaultImpersonationProvider;
 import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.junit.After;
 import org.junit.Before;
@@ -50,7 +51,7 @@ import org.junit.Test;
 public class TestRefreshUserMappings {
   private MiniDFSCluster cluster;
   Configuration config;
-  private static long groupRefreshTimeoutSec = 1;
+  private static final long groupRefreshTimeoutSec = 1;
   private String tempResource = null;
   
   public static class MockUnixGroupsMapping implements GroupMappingServiceProvider {
@@ -150,8 +151,10 @@ public class TestRefreshUserMappings {
     final String [] GROUP_NAMES2 = new String [] {"gr3" , "gr4"};
     
     //keys in conf
-    String userKeyGroups = ProxyUsers.getProxySuperuserGroupConfKey(SUPER_USER);
-    String userKeyHosts = ProxyUsers.getProxySuperuserIpConfKey (SUPER_USER);
+    String userKeyGroups = DefaultImpersonationProvider.getTestProvider().
+        getProxySuperuserGroupConfKey(SUPER_USER);
+    String userKeyHosts = DefaultImpersonationProvider.getTestProvider().
+        getProxySuperuserIpConfKey (SUPER_USER);
     
     config.set(userKeyGroups, "gr3,gr4,gr5"); // superuser can proxy for this group
     config.set(userKeyHosts,"127.0.0.1");
@@ -179,14 +182,14 @@ public class TestRefreshUserMappings {
     
     // check before
     try {
-      ProxyUsers.authorize(ugi1, "127.0.0.1", config);
+      ProxyUsers.authorize(ugi1, "127.0.0.1");
       fail("first auth for " + ugi1.getShortUserName() + " should've failed ");
     } catch (AuthorizationException e) {
       // expected
       System.err.println("auth for " + ugi1.getUserName() + " failed");
     }
     try {
-      ProxyUsers.authorize(ugi2, "127.0.0.1", config);
+      ProxyUsers.authorize(ugi2, "127.0.0.1");
       System.err.println("auth for " + ugi2.getUserName() + " succeeded");
       // expected
     } catch (AuthorizationException e) {
@@ -204,14 +207,14 @@ public class TestRefreshUserMappings {
     admin.run(args);
     
     try {
-      ProxyUsers.authorize(ugi2, "127.0.0.1", config);
+      ProxyUsers.authorize(ugi2, "127.0.0.1");
       fail("second auth for " + ugi2.getShortUserName() + " should've failed ");
     } catch (AuthorizationException e) {
       // expected
       System.err.println("auth for " + ugi2.getUserName() + " failed");
     }
     try {
-      ProxyUsers.authorize(ugi1, "127.0.0.1", config);
+      ProxyUsers.authorize(ugi1, "127.0.0.1");
       System.err.println("auth for " + ugi1.getUserName() + " succeeded");
       // expected
     } catch (AuthorizationException e) {

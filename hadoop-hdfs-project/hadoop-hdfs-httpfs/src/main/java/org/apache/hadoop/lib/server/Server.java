@@ -18,6 +18,7 @@
 
 package org.apache.hadoop.lib.server;
 
+import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.lib.util.Check;
 import org.apache.hadoop.lib.util.ConfigurationUtils;
@@ -76,6 +77,7 @@ import java.util.Properties;
  * post-initialized (this enables late/conditional service bindings).
  * <p/>
  */
+@InterfaceAudience.Private
 public class Server {
   private Logger log;
 
@@ -97,7 +99,8 @@ public class Server {
   /**
    * Enumeration that defines the server status.
    */
-  public enum Status {
+  @InterfaceAudience.Private
+  public static enum Status {
     UNDEF(false, false),
     BOOTING(false, true),
     HALTED(true, true),
@@ -229,7 +232,7 @@ public class Server {
    * path.
    */
   private String checkAbsolutePath(String value, String name) {
-    if (!value.startsWith("/")) {
+    if (!new File(value).isAbsolute()) {
       throw new IllegalArgumentException(
         MessageFormat.format("[{0}] must be an absolute path [{1}]", name, value));
     }
@@ -415,7 +418,11 @@ public class Server {
       Properties props = new Properties();
       try {
         InputStream is = getResource(DEFAULT_LOG4J_PROPERTIES);
-        props.load(is);
+        try {
+          props.load(is);
+        } finally {
+          is.close();
+        }
       } catch (IOException ex) {
         throw new ServerException(ServerException.ERROR.S03, DEFAULT_LOG4J_PROPERTIES, ex.getMessage(), ex);
       }

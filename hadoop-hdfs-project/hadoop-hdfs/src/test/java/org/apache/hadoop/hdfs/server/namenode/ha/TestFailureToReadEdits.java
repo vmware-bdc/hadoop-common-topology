@@ -21,57 +21,79 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyInt;
 import static org.mockito.Matchers.anyLong;
+import static org.mockito.Matchers.anyObject;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedList;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.ha.ServiceFailedException;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
-import org.apache.hadoop.hdfs.server.namenode.EditLogInputException;
+import org.apache.hadoop.hdfs.qjournal.MiniQJMHACluster;
+import org.apache.hadoop.hdfs.qjournal.MiniQJMHACluster.Builder;
 import org.apache.hadoop.hdfs.server.namenode.EditLogInputStream;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLog;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp;
+import org.apache.hadoop.hdfs.server.namenode.MetaRecoveryContext;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.util.ExitUtil.ExitException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
 import com.google.common.collect.ImmutableList;
 
+@RunWith(Parameterized.class)
 public class TestFailureToReadEdits {
-  
-  private static final Log LOG = LogFactory.getLog(TestFailureToReadEdits.class);
-  
+
   private static final String TEST_DIR1 = "/test1";
   private static final String TEST_DIR2 = "/test2";
   private static final String TEST_DIR3 = "/test3";
   
+  private final TestType clusterType;
   private Configuration conf;
-  private Runtime mockRuntime = mock(Runtime.class);
   private MiniDFSCluster cluster;
+  private MiniQJMHACluster miniQjmHaCluster; // for QJM case only
   private NameNode nn0;
   private NameNode nn1;
   private FileSystem fs;
   
+  private static enum TestType {
+    SHARED_DIR_HA,
+    QJM_HA;
+  };
+  
+  /**
+   * Run this suite of tests both for QJM-based HA and for file-based
+   * HA.
+   */
+  @Parameters
+  public static Iterable<Object[]> data() {
+    return Arrays.asList(new Object[][] {
+        { TestType.SHARED_DIR_HA },
+        { TestType.QJM_HA } });
+  }
+  
+  public TestFailureToReadEdits(TestType clusterType) {
+    this.clusterType = clusterType;
+  }
+
   @Before
   public void setUpCluster() throws Exception {
     conf = new Configuration();
@@ -81,20 +103,23 @@ public class TestFailureToReadEdits {
     conf.setInt(DFSConfigKeys.DFS_HA_TAILEDITS_PERIOD_KEY, 1);
     HAUtil.setAllowStandbyReads(conf, true);
     
-    MiniDFSNNTopology topology = new MiniDFSNNTopology()
-      .addNameservice(new MiniDFSNNTopology.NSConf("ns1")
-        .addNN(new MiniDFSNNTopology.NNConf("nn1").setHttpPort(10001))
-        .addNN(new MiniDFSNNTopology.NNConf("nn2").setHttpPort(10002)));
-    cluster = new MiniDFSCluster.Builder(conf)
-      .nnTopology(topology)
-      .numDataNodes(0)
-      .build();
-    
+    if (clusterType == TestType.SHARED_DIR_HA) {
+      MiniDFSNNTopology topology = MiniQJMHACluster.createDefaultTopology(10000);
+      cluster = new MiniDFSCluster.Builder(conf)
+        .nnTopology(topology)
+        .numDataNodes(0)
+        .checkExitOnShutdown(false)
+        .build();
+    } else {
+      Builder builder = new MiniQJMHACluster.Builder(conf);
+      builder.getDfsBuilder().numDataNodes(0).checkExitOnShutdown(false);
+      miniQjmHaCluster = builder.build();
+      cluster = miniQjmHaCluster.getDfsCluster();
+    }
     cluster.waitActive();
     
     nn0 = cluster.getNameNode(0);
     nn1 = cluster.getNameNode(1);
-    nn1.getNamesystem().getEditLogTailer().setRuntime(mockRuntime);
     
     cluster.transitionToActive(0);
     fs = HATestUtil.configureFailoverFs(cluster, conf);
@@ -106,8 +131,14 @@ public class TestFailureToReadEdits {
       fs.close();
     }
     
-    if (cluster != null) {
-      cluster.shutdown();
+    if (clusterType == TestType.SHARED_DIR_HA) {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    } else {
+      if (miniQjmHaCluster != null) {
+        miniQjmHaCluster.shutdown();
+      }
     }
   }
 
@@ -137,7 +168,7 @@ public class TestFailureToReadEdits {
       HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
       fail("Standby fully caught up, but should not have been able to");
     } catch (HATestUtil.CouldNotCatchUpException e) {
-      verify(mockRuntime, times(0)).exit(anyInt());
+      // Expected. The NN did not exit.
     }
     
     // Null because it was deleted.
@@ -198,7 +229,7 @@ public class TestFailureToReadEdits {
       HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
       fail("Standby fully caught up, but should not have been able to");
     } catch (HATestUtil.CouldNotCatchUpException e) {
-      verify(mockRuntime, times(0)).exit(anyInt());
+      // Expected. The NN did not exit.
     }
     
     // 5 because we should get OP_START_LOG_SEGMENT and one successful OP_MKDIR
@@ -250,7 +281,7 @@ public class TestFailureToReadEdits {
       HATestUtil.waitForStandbyToCatchUp(nn0, nn1);
       fail("Standby fully caught up, but should not have been able to");
     } catch (HATestUtil.CouldNotCatchUpException e) {
-      verify(mockRuntime, times(0)).exit(anyInt());
+      // Expected. The NN did not exit.
     }
     
     // Shutdown the active NN.
@@ -260,22 +291,16 @@ public class TestFailureToReadEdits {
       // Transition the standby to active.
       cluster.transitionToActive(1);
       fail("Standby transitioned to active, but should not have been able to");
-    } catch (ServiceFailedException sfe) {
-      LOG.info("got expected exception: " + sfe.toString(), sfe);
-      assertTrue("Standby failed to catch up for some reason other than "
-          + "failure to read logs", sfe.toString().contains(
-              EditLogInputException.class.getName()));
+    } catch (ExitException ee) {
+      GenericTestUtils.assertExceptionContains("Error replaying edit log", ee);
     }
   }
   
   private LimitedEditLogAnswer causeFailureOnEditLogRead() throws IOException {
-    FSEditLog spyEditLog = spy(nn1.getNamesystem().getEditLogTailer()
-        .getEditLog());
+    FSEditLog spyEditLog = NameNodeAdapter.spyOnEditLog(nn1);
     LimitedEditLogAnswer answer = new LimitedEditLogAnswer(); 
     doAnswer(answer).when(spyEditLog).selectInputStreams(
-        anyLong(), anyLong(), anyBoolean());
-    nn1.getNamesystem().getEditLogTailer().setEditLog(spyEditLog);
-    
+        anyLong(), anyLong(), (MetaRecoveryContext)anyObject(), anyBoolean());
     return answer;
   }
   

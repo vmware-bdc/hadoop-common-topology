@@ -47,7 +47,7 @@ public class NativeCodeLoader {
     }
     try {
       System.loadLibrary("hadoop");
-      LOG.info("Loaded the native-hadoop library");
+      LOG.debug("Loaded the native-hadoop library");
       nativeCodeLoaded = true;
     } catch (Throwable t) {
       // Ignore failure to load
@@ -73,6 +73,18 @@ public class NativeCodeLoader {
   public static boolean isNativeCodeLoaded() {
     return nativeCodeLoaded;
   }
+
+  /**
+   * Returns true only if this build was compiled with support for snappy.
+   */
+  public static native boolean buildSupportsSnappy();
+  
+  /**
+   * Returns true only if this build was compiled with support for openssl.
+   */
+  public static native boolean buildSupportsOpenssl();
+
+  public static native String getLibraryName();
 
   /**
    * Return if native hadoop libraries, if present, can be used for this job.

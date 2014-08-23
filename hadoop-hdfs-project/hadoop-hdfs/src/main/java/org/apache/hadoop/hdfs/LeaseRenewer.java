@@ -34,6 +34,8 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.util.Time;
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * <p>
@@ -156,9 +158,6 @@ class LeaseRenewer {
     }
   }
 
-  private final String clienNamePostfix = DFSUtil.getRandom().nextInt()
-      + "_" + Thread.currentThread().getId();
-
   /** The time in milliseconds that the map became empty. */
   private long emptyTime = Long.MAX_VALUE;
   /** A fixed lease renewal time period in milliseconds */
@@ -210,11 +209,6 @@ class LeaseRenewer {
   /** @return the renewal time in milliseconds. */
   private synchronized long getRenewalTime() {
     return renewal;
-  }
-
-  /** @return the client name for the given id. */
-  String getClientName(final String id) {
-    return "DFSClient_" + id + "_" + clienNamePostfix;
   }
 
   /** Add a client. */
@@ -270,6 +264,11 @@ class LeaseRenewer {
   synchronized boolean isRunning() {
     return daemon != null && daemon.isAlive();
   }
+
+  /** Does this renewer have nothing to renew? */
+  public boolean isEmpty() {
+    return dfsclients.isEmpty();
+  }
   
   /** Used only by tests */
   synchronized String getDaemonName() {
@@ -279,10 +278,10 @@ class LeaseRenewer {
   /** Is the empty period longer than the grace period? */  
   private synchronized boolean isRenewerExpired() {
     return emptyTime != Long.MAX_VALUE
-        && System.currentTimeMillis() - emptyTime > gracePeriod;
+        && Time.now() - emptyTime > gracePeriod;
   }
 
-  synchronized void put(final String src, final DFSOutputStream out,
+  synchronized void put(final long inodeId, final DFSOutputStream out,
       final DFSClient dfsc) {
     if (dfsc.isClientRunning()) {
       if (!isRunning() || isRenewerExpired()) {
@@ -320,16 +319,24 @@ class LeaseRenewer {
         });
         daemon.start();
       }
-      dfsc.putFileBeingWritten(src, out);
+      dfsc.putFileBeingWritten(inodeId, out);
       emptyTime = Long.MAX_VALUE;
     }
   }
 
+  @VisibleForTesting
+  synchronized void setEmptyTime(long time) {
+    emptyTime = time;
+  }
+
   /** Close a file. */
-  void closeFile(final String src, final DFSClient dfsc) {
-    dfsc.removeFileBeingWritten(src);
+  void closeFile(final long inodeId, final DFSClient dfsc) {
+    dfsc.removeFileBeingWritten(inodeId);
 
     synchronized(this) {
+      if (dfsc.isFilesBeingWrittenEmpty()) {
+        dfsclients.remove(dfsc);
+      }
       //update emptyTime if necessary
       if (emptyTime == Long.MAX_VALUE) {
         for(DFSClient c : dfsclients) {
@@ -339,7 +346,7 @@ class LeaseRenewer {
           }
         }
         //discover the first time that all file-being-written maps are empty.
-        emptyTime = System.currentTimeMillis();
+        emptyTime = Time.now();
       }
     }
   }
@@ -354,7 +361,7 @@ class LeaseRenewer {
       }
       if (emptyTime == Long.MAX_VALUE) {
         //discover the first time that the client list is empty.
-        emptyTime = System.currentTimeMillis();
+        emptyTime = Time.now();
       }
     }
 
@@ -427,10 +434,9 @@ class LeaseRenewer {
    * when the lease period is half over.
    */
   private void run(final int id) throws InterruptedException {
-    for(long lastRenewed = System.currentTimeMillis();
-        clientsRunning() && !Thread.interrupted();
+    for(long lastRenewed = Time.now(); !Thread.interrupted();
         Thread.sleep(getSleepPeriod())) {
-      final long elapsed = System.currentTimeMillis() - lastRenewed;
+      final long elapsed = Time.now() - lastRenewed;
       if (elapsed >= getRenewalTime()) {
         try {
           renew();
@@ -438,13 +444,13 @@ class LeaseRenewer {
             LOG.debug("Lease renewer daemon for " + clientsString()
                 + " with renew id " + id + " executed");
           }
-          lastRenewed = System.currentTimeMillis();
+          lastRenewed = Time.now();
         } catch (SocketTimeoutException ie) {
           LOG.warn("Failed to renew lease for " + clientsString() + " for "
               + (elapsed/1000) + " seconds.  Aborting ...", ie);
           synchronized (this) {
-            for(DFSClient c : dfsclients) {
-              c.abort();
+            while (!dfsclients.isEmpty()) {
+              dfsclients.get(0).abort();
             }
           }
           break;
@@ -467,6 +473,13 @@ class LeaseRenewer {
           }
           //no longer the current daemon or expired
           return;
+        }
+
+        // if no clients are in running state or there is no more clients
+        // registered with this renewer, stop the daemon after the grace
+        // period.
+        if (!clientsRunning() && emptyTime == Long.MAX_VALUE) {
+          emptyTime = Time.now();
         }
       }
     }

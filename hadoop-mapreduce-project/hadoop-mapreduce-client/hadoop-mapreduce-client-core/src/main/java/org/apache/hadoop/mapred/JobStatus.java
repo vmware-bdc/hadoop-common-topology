@@ -77,6 +77,59 @@ public class JobStatus extends org.apache.hadoop.mapreduce.JobStatus {
    */
   public JobStatus() {
   }
+  
+  @Deprecated
+  public JobStatus(JobID jobid, float mapProgress, float reduceProgress,
+      float cleanupProgress, int runState) {
+    this(jobid, mapProgress, reduceProgress, cleanupProgress, runState, null,
+        null, null, null);
+  }
+
+  /**
+   * Create a job status object for a given jobid.
+   * @param jobid The jobid of the job
+   * @param mapProgress The progress made on the maps
+   * @param reduceProgress The progress made on the reduces
+   * @param runState The current state of the job
+   */
+  @Deprecated
+  public JobStatus(JobID jobid, float mapProgress, float reduceProgress,
+      int runState) {
+    this (jobid, mapProgress, reduceProgress, runState, null, null, null, null);
+  }
+
+  /**
+   * Create a job status object for a given jobid.
+   * @param jobid The jobid of the job
+   * @param mapProgress The progress made on the maps
+   * @param reduceProgress The progress made on the reduces
+   * @param runState The current state of the job
+   * @param jp Priority of the job.
+   */
+  @Deprecated
+  public JobStatus(JobID jobid, float mapProgress, float reduceProgress,
+      float cleanupProgress, int runState, JobPriority jp) {
+    this(jobid, mapProgress, reduceProgress, cleanupProgress, runState, jp,
+        null, null, null, null);
+  }
+
+  /**
+   * Create a job status object for a given jobid.
+   * @param jobid The jobid of the job
+   * @param setupProgress The progress made on the setup
+   * @param mapProgress The progress made on the maps
+   * @param reduceProgress The progress made on the reduces
+   * @param cleanupProgress The progress made on the cleanup
+   * @param runState The current state of the job
+   * @param jp Priority of the job.
+   */
+  @Deprecated
+  public JobStatus(JobID jobid, float setupProgress, float mapProgress,
+      float reduceProgress, float cleanupProgress, 
+      int runState, JobPriority jp) {
+    this(jobid, setupProgress, mapProgress, reduceProgress, cleanupProgress,
+        runState, jp, null, null, null, null);
+  }
 
   /**
    * Create a job status object for a given jobid.
@@ -238,7 +291,7 @@ public class JobStatus extends org.apache.hadoop.mapreduce.JobStatus {
       stat.getSetupProgress(), stat.getMapProgress(), stat.getReduceProgress(),
       stat.getCleanupProgress(), stat.getState().getValue(), 
       JobPriority.valueOf(stat.getPriority().name()),
-      stat.getUsername(), stat.getJobName(), stat.getJobFile(),
+      stat.getUsername(), stat.getJobName(), stat.getQueue(), stat.getJobFile(),
       stat.getTrackingUrl(), stat.isUber());
     old.setStartTime(stat.getStartTime());
     old.setFinishTime(stat.getFinishTime());
@@ -328,8 +381,14 @@ public class JobStatus extends org.apache.hadoop.mapreduce.JobStatus {
 
    /**
     * Change the current run state of the job.
+    *
+    * The setter is public to be compatible with M/R 1.x, however, it should be
+    * used internally.
+    *
+    * @param state the state of the job
     */
-   protected synchronized void setRunState(int state) {
+   @InterfaceAudience.Private
+   public synchronized void setRunState(int state) {
      super.setState(getEnum(state));
    }
 
@@ -356,10 +415,14 @@ public class JobStatus extends org.apache.hadoop.mapreduce.JobStatus {
 
    /**
     * Used to set the scheduling information associated to a particular Job.
-    * 
+    *
+    * The setter is public to be compatible with M/R 1.x, however, it should be
+    * used internally.
+    *
     * @param schedulingInfo Scheduling information of the job
     */
-   protected synchronized void setSchedulingInfo(String schedulingInfo) {
+   @InterfaceAudience.Private
+   public synchronized void setSchedulingInfo(String schedulingInfo) {
      super.setSchedulingInfo(schedulingInfo);
    }
 

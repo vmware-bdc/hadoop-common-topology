@@ -30,17 +30,22 @@ import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Reader;
 import java.io.Writer;
+import java.lang.ref.WeakReference;
+import java.net.InetSocketAddress;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Set;
 import java.util.StringTokenizer;
@@ -49,6 +54,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -59,6 +67,7 @@ import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 
+import org.apache.commons.collections.map.UnmodifiableMap;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -68,11 +77,15 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableUtils;
+import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.security.alias.CredentialProvider;
+import org.apache.hadoop.security.alias.CredentialProvider.CredentialEntry;
+import org.apache.hadoop.security.alias.CredentialProviderFactory;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.StringInterner;
 import org.apache.hadoop.util.StringUtils;
 import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.JsonGenerator;
-import org.w3c.dom.Comment;
 import org.w3c.dom.DOMException;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -80,6 +93,8 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.w3c.dom.Text;
 import org.xml.sax.SAXException;
+
+import com.google.common.base.Preconditions;
 
 /** 
  * Provides access to configuration parameters.
@@ -95,8 +110,9 @@ import org.xml.sax.SAXException;
  *
  * <p>Unless explicitly turned off, Hadoop by default specifies two 
  * resources, loaded in-order from the classpath: <ol>
- * <li><tt><a href="{@docRoot}/../core-default.html">core-default.xml</a>
- * </tt>: Read-only defaults for hadoop.</li>
+ * <li><tt>
+ * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+ * core-default.xml</a></tt>: Read-only defaults for hadoop.</li>
  * <li><tt>core-site.xml</tt>: Site-specific configuration for a given hadoop
  * installation.</li>
  * </ol>
@@ -111,8 +127,8 @@ import org.xml.sax.SAXException;
  * For example, one might define a final parameter with:
  * <tt><pre>
  *  &lt;property&gt;
- *    &lt;name&gt;dfs.client.buffer.dir&lt;/name&gt;
- *    &lt;value&gt;/tmp/hadoop/dfs/client&lt;/value&gt;
+ *    &lt;name&gt;dfs.hosts.include&lt;/name&gt;
+ *    &lt;value&gt;/etc/hadoop/conf/hosts.include&lt;/value&gt;
  *    <b>&lt;final&gt;true&lt;/final&gt;</b>
  *  &lt;/property&gt;</pre></tt>
  *
@@ -145,6 +161,10 @@ import org.xml.sax.SAXException;
  * will be resolved to another property in this Configuration, while
  * <tt>${<i>user.name</i>}</tt> would then ordinarily be resolved to the value
  * of the System property with that name.
+ * By default, warnings will be given to any deprecated configuration 
+ * parameters and these are suppressible by configuring
+ * <tt>log4j.logger.org.apache.hadoop.conf.Configuration.deprecation</tt> in
+ * log4j.properties file.
  */
 @InterfaceAudience.Public
 @InterfaceStability.Stable
@@ -153,18 +173,49 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   private static final Log LOG =
     LogFactory.getLog(Configuration.class);
 
+  private static final Log LOG_DEPRECATION =
+    LogFactory.getLog("org.apache.hadoop.conf.Configuration.deprecation");
+
   private boolean quietmode = true;
+  
+  private static class Resource {
+    private final Object resource;
+    private final String name;
+    
+    public Resource(Object resource) {
+      this(resource, resource.toString());
+    }
+    
+    public Resource(Object resource, String name) {
+      this.resource = resource;
+      this.name = name;
+    }
+    
+    public String getName(){
+      return name;
+    }
+    
+    public Object getResource() {
+      return resource;
+    }
+    
+    @Override
+    public String toString() {
+      return name;
+    }
+  }
   
   /**
    * List of configuration resources.
    */
-  private ArrayList<Object> resources = new ArrayList<Object>();
-
+  private ArrayList<Resource> resources = new ArrayList<Resource>();
+  
   /**
    * The value reported as the setting resource when a key is set
-   * by code rather than a file resource.
+   * by code rather than a file resource by dumpConfiguration.
    */
   static final String UNKNOWN_RESOURCE = "Unknown";
+
 
   /**
    * List of configuration parameters marked <b>final</b>. 
@@ -186,8 +237,8 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   private static final CopyOnWriteArrayList<String> defaultResources =
     new CopyOnWriteArrayList<String>();
 
-  private static final Map<ClassLoader, Map<String, Class<?>>>
-    CACHE_CLASSES = new WeakHashMap<ClassLoader, Map<String, Class<?>>>();
+  private static final Map<ClassLoader, Map<String, WeakReference<Class<?>>>>
+    CACHE_CLASSES = new WeakHashMap<ClassLoader, Map<String, WeakReference<Class<?>>>>();
 
   /**
    * Sentinel value to store negative cache results in {@link #CACHE_CLASSES}.
@@ -199,7 +250,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * Stores the mapping of key to the resource which modifies or loads 
    * the key most recently
    */
-  private HashMap<String, String> updatingResource;
+  private HashMap<String, String[]> updatingResource;
  
   /**
    * Class to keep the information about the keys which replace the deprecated
@@ -211,13 +262,13 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * warning message which can be logged whenever the deprecated key is used.
    */
   private static class DeprecatedKeyInfo {
-    private String[] newKeys;
-    private String customMessage;
-    private boolean accessed;
+    private final String[] newKeys;
+    private final String customMessage;
+    private final AtomicBoolean accessed = new AtomicBoolean(false);
+
     DeprecatedKeyInfo(String[] newKeys, String customMessage) {
       this.newKeys = newKeys;
       this.customMessage = customMessage;
-      accessed = false;
     }
 
     /**
@@ -243,63 +294,257 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       else {
         warningMessage = customMessage;
       }
-      accessed = true;
       return warningMessage;
     }
+
+    boolean getAndSetAccessed() {
+      return accessed.getAndSet(true);
+    }
+
+    public void clearAccessed() {
+      accessed.set(false);
+    }
   }
   
   /**
-   * Stores the deprecated keys, the new keys which replace the deprecated keys
-   * and custom message(if any provided).
+   * A pending addition to the global set of deprecated keys.
    */
-  private static Map<String, DeprecatedKeyInfo> deprecatedKeyMap = 
-      new HashMap<String, DeprecatedKeyInfo>();
-  
-  /**
-   * Stores a mapping from superseding keys to the keys which they deprecate.
-   */
-  private static Map<String, String> reverseDeprecatedKeyMap =
-      new HashMap<String, String>();
+  public static class DeprecationDelta {
+    private final String key;
+    private final String[] newKeys;
+    private final String customMessage;
+
+    DeprecationDelta(String key, String[] newKeys, String customMessage) {
+      Preconditions.checkNotNull(key);
+      Preconditions.checkNotNull(newKeys);
+      Preconditions.checkArgument(newKeys.length > 0);
+      this.key = key;
+      this.newKeys = newKeys;
+      this.customMessage = customMessage;
+    }
+
+    public DeprecationDelta(String key, String newKey, String customMessage) {
+      this(key, new String[] { newKey }, customMessage);
+    }
+
+    public DeprecationDelta(String key, String newKey) {
+      this(key, new String[] { newKey }, null);
+    }
+
+    public String getKey() {
+      return key;
+    }
+
+    public String[] getNewKeys() {
+      return newKeys;
+    }
+
+    public String getCustomMessage() {
+      return customMessage;
+    }
+  }
 
   /**
-   * Adds the deprecated key to the deprecation map.
-   * It does not override any existing entries in the deprecation map.
-   * This is to be used only by the developers in order to add deprecation of
-   * keys, and attempts to call this method after loading resources once,
-   * would lead to <tt>UnsupportedOperationException</tt>
-   * @param key
-   * @param newKeys
-   * @param customMessage
+   * The set of all keys which are deprecated.
+   *
+   * DeprecationContext objects are immutable.
    */
-  public synchronized static void addDeprecation(String key, String[] newKeys,
-      String customMessage) {
-    if (key == null || key.length() == 0 ||
-        newKeys == null || newKeys.length == 0) {
-      throw new IllegalArgumentException();
-    }
-    if (!isDeprecated(key)) {
-      DeprecatedKeyInfo newKeyInfo;
-      newKeyInfo = new DeprecatedKeyInfo(newKeys, customMessage);
-      deprecatedKeyMap.put(key, newKeyInfo);
-      for (String newKey : newKeys) {
-        reverseDeprecatedKeyMap.put(newKey, key);
+  private static class DeprecationContext {
+    /**
+     * Stores the deprecated keys, the new keys which replace the deprecated keys
+     * and custom message(if any provided).
+     */
+    private final Map<String, DeprecatedKeyInfo> deprecatedKeyMap;
+
+    /**
+     * Stores a mapping from superseding keys to the keys which they deprecate.
+     */
+    private final Map<String, String> reverseDeprecatedKeyMap;
+
+    /**
+     * Create a new DeprecationContext by copying a previous DeprecationContext
+     * and adding some deltas.
+     *
+     * @param other   The previous deprecation context to copy, or null to start
+     *                from nothing.
+     * @param deltas  The deltas to apply.
+     */
+    @SuppressWarnings("unchecked")
+    DeprecationContext(DeprecationContext other, DeprecationDelta[] deltas) {
+      HashMap<String, DeprecatedKeyInfo> newDeprecatedKeyMap = 
+        new HashMap<String, DeprecatedKeyInfo>();
+      HashMap<String, String> newReverseDeprecatedKeyMap =
+        new HashMap<String, String>();
+      if (other != null) {
+        for (Entry<String, DeprecatedKeyInfo> entry :
+            other.deprecatedKeyMap.entrySet()) {
+          newDeprecatedKeyMap.put(entry.getKey(), entry.getValue());
+        }
+        for (Entry<String, String> entry :
+            other.reverseDeprecatedKeyMap.entrySet()) {
+          newReverseDeprecatedKeyMap.put(entry.getKey(), entry.getValue());
+        }
       }
+      for (DeprecationDelta delta : deltas) {
+        if (!newDeprecatedKeyMap.containsKey(delta.getKey())) {
+          DeprecatedKeyInfo newKeyInfo =
+            new DeprecatedKeyInfo(delta.getNewKeys(), delta.getCustomMessage());
+          newDeprecatedKeyMap.put(delta.key, newKeyInfo);
+          for (String newKey : delta.getNewKeys()) {
+            newReverseDeprecatedKeyMap.put(newKey, delta.key);
+          }
+        }
+      }
+      this.deprecatedKeyMap =
+        UnmodifiableMap.decorate(newDeprecatedKeyMap);
+      this.reverseDeprecatedKeyMap =
+        UnmodifiableMap.decorate(newReverseDeprecatedKeyMap);
     }
+
+    Map<String, DeprecatedKeyInfo> getDeprecatedKeyMap() {
+      return deprecatedKeyMap;
+    }
+
+    Map<String, String> getReverseDeprecatedKeyMap() {
+      return reverseDeprecatedKeyMap;
+    }
+  }
+  
+  private static DeprecationDelta[] defaultDeprecations = 
+    new DeprecationDelta[] {
+      new DeprecationDelta("topology.script.file.name", 
+        CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_FILE_NAME_KEY),
+      new DeprecationDelta("topology.script.number.args", 
+        CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_NUMBER_ARGS_KEY),
+      new DeprecationDelta("hadoop.configured.node.mapping", 
+        CommonConfigurationKeys.NET_TOPOLOGY_CONFIGURED_NODE_MAPPING_KEY),
+      new DeprecationDelta("topology.node.switch.mapping.impl", 
+        CommonConfigurationKeys.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY),
+      new DeprecationDelta("dfs.df.interval", 
+        CommonConfigurationKeys.FS_DF_INTERVAL_KEY),
+      new DeprecationDelta("hadoop.native.lib", 
+        CommonConfigurationKeys.IO_NATIVE_LIB_AVAILABLE_KEY),
+      new DeprecationDelta("fs.default.name", 
+        CommonConfigurationKeys.FS_DEFAULT_NAME_KEY),
+      new DeprecationDelta("dfs.umaskmode",
+        CommonConfigurationKeys.FS_PERMISSIONS_UMASK_KEY),
+      new DeprecationDelta("dfs.nfs.exports.allowed.hosts",
+          CommonConfigurationKeys.NFS_EXPORTS_ALLOWED_HOSTS_KEY)
+    };
+
+  /**
+   * The global DeprecationContext.
+   */
+  private static AtomicReference<DeprecationContext> deprecationContext =
+      new AtomicReference<DeprecationContext>(
+          new DeprecationContext(null, defaultDeprecations));
+
+  /**
+   * Adds a set of deprecated keys to the global deprecations.
+   *
+   * This method is lockless.  It works by means of creating a new
+   * DeprecationContext based on the old one, and then atomically swapping in
+   * the new context.  If someone else updated the context in between us reading
+   * the old context and swapping in the new one, we try again until we win the
+   * race.
+   *
+   * @param deltas   The deprecations to add.
+   */
+  public static void addDeprecations(DeprecationDelta[] deltas) {
+    DeprecationContext prev, next;
+    do {
+      prev = deprecationContext.get();
+      next = new DeprecationContext(prev, deltas);
+    } while (!deprecationContext.compareAndSet(prev, next));
   }
 
   /**
-   * Adds the deprecated key to the deprecation map when no custom message
-   * is provided.
+   * Adds the deprecated key to the global deprecation map.
    * It does not override any existing entries in the deprecation map.
    * This is to be used only by the developers in order to add deprecation of
    * keys, and attempts to call this method after loading resources once,
    * would lead to <tt>UnsupportedOperationException</tt>
    * 
+   * If a key is deprecated in favor of multiple keys, they are all treated as 
+   * aliases of each other, and setting any one of them resets all the others 
+   * to the new value.
+   *
+   * If you have multiple deprecation entries to add, it is more efficient to
+   * use #addDeprecations(DeprecationDelta[] deltas) instead.
+   * 
+   * @param key
+   * @param newKeys
+   * @param customMessage
+   * @deprecated use {@link #addDeprecation(String key, String newKey,
+      String customMessage)} instead
+   */
+  @Deprecated
+  public static void addDeprecation(String key, String[] newKeys,
+      String customMessage) {
+    addDeprecations(new DeprecationDelta[] {
+      new DeprecationDelta(key, newKeys, customMessage)
+    });
+  }
+
+  /**
+   * Adds the deprecated key to the global deprecation map.
+   * It does not override any existing entries in the deprecation map.
+   * This is to be used only by the developers in order to add deprecation of
+   * keys, and attempts to call this method after loading resources once,
+   * would lead to <tt>UnsupportedOperationException</tt>
+   * 
+   * If you have multiple deprecation entries to add, it is more efficient to
+   * use #addDeprecations(DeprecationDelta[] deltas) instead.
+   *
+   * @param key
+   * @param newKey
+   * @param customMessage
+   */
+  public static void addDeprecation(String key, String newKey,
+	      String customMessage) {
+	  addDeprecation(key, new String[] {newKey}, customMessage);
+  }
+
+  /**
+   * Adds the deprecated key to the global deprecation map when no custom
+   * message is provided.
+   * It does not override any existing entries in the deprecation map.
+   * This is to be used only by the developers in order to add deprecation of
+   * keys, and attempts to call this method after loading resources once,
+   * would lead to <tt>UnsupportedOperationException</tt>
+   * 
+   * If a key is deprecated in favor of multiple keys, they are all treated as 
+   * aliases of each other, and setting any one of them resets all the others 
+   * to the new value.
+   * 
+   * If you have multiple deprecation entries to add, it is more efficient to
+   * use #addDeprecations(DeprecationDelta[] deltas) instead.
+   *
    * @param key Key that is to be deprecated
    * @param newKeys list of keys that take up the values of deprecated key
+   * @deprecated use {@link #addDeprecation(String key, String newKey)} instead
    */
-  public synchronized static void addDeprecation(String key, String[] newKeys) {
+  @Deprecated
+  public static void addDeprecation(String key, String[] newKeys) {
     addDeprecation(key, newKeys, null);
+  }
+  
+  /**
+   * Adds the deprecated key to the global deprecation map when no custom
+   * message is provided.
+   * It does not override any existing entries in the deprecation map.
+   * This is to be used only by the developers in order to add deprecation of
+   * keys, and attempts to call this method after loading resources once,
+   * would lead to <tt>UnsupportedOperationException</tt>
+   * 
+   * If you have multiple deprecation entries to add, it is more efficient to
+   * use #addDeprecations(DeprecationDelta[] deltas) instead.
+   *
+   * @param key Key that is to be deprecated
+   * @param newKey key that takes up the value of deprecated key
+   */
+  public static void addDeprecation(String key, String newKey) {
+    addDeprecation(key, new String[] {newKey}, null);
   }
   
   /**
@@ -310,26 +555,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *         <code>false</code> otherwise.
    */
   public static boolean isDeprecated(String key) {
-    return deprecatedKeyMap.containsKey(key);
-  }
-
-  /**
-   * Returns the alternate name for a key if the property name is deprecated
-   * or if deprecates a property name.
-   *
-   * @param name property name.
-   * @return alternate name.
-   */
-  private String getAlternateName(String name) {
-    String altName;
-    DeprecatedKeyInfo keyInfo = deprecatedKeyMap.get(name);
-    if (keyInfo != null) {
-      altName = (keyInfo.newKeys.length > 0) ? keyInfo.newKeys[0] : null;
-    }
-    else {
-      altName = reverseDeprecatedKeyMap.get(name);
-    }
-    return altName;
+    return deprecationContext.get().getDeprecatedKeyMap().containsKey(key);
   }
 
   /**
@@ -344,33 +570,43 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * @return the first property in the list of properties mapping
    *         the <code>name</code> or the <code>name</code> itself.
    */
-  private String handleDeprecation(String name) {
-    if (isDeprecated(name)) {
-      DeprecatedKeyInfo keyInfo = deprecatedKeyMap.get(name);
-      warnOnceIfDeprecated(name);
+  private String[] handleDeprecation(DeprecationContext deprecations,
+      String name) {
+    if (null != name) {
+      name = name.trim();
+    }
+    ArrayList<String > names = new ArrayList<String>();
+	if (isDeprecated(name)) {
+      DeprecatedKeyInfo keyInfo = deprecations.getDeprecatedKeyMap().get(name);
+      warnOnceIfDeprecated(deprecations, name);
       for (String newKey : keyInfo.newKeys) {
         if(newKey != null) {
-          name = newKey;
-          break;
+          names.add(newKey);
         }
       }
     }
-    String deprecatedKey = reverseDeprecatedKeyMap.get(name);
-    if (deprecatedKey != null && !getOverlay().containsKey(name) &&
-        getOverlay().containsKey(deprecatedKey)) {
-      getProps().setProperty(name, getOverlay().getProperty(deprecatedKey));
-      getOverlay().setProperty(name, getOverlay().getProperty(deprecatedKey));
+    if(names.size() == 0) {
+    	names.add(name);
     }
-    return name;
+    for(String n : names) {
+	  String deprecatedKey = deprecations.getReverseDeprecatedKeyMap().get(n);
+	  if (deprecatedKey != null && !getOverlay().containsKey(n) &&
+	      getOverlay().containsKey(deprecatedKey)) {
+	    getProps().setProperty(n, getOverlay().getProperty(deprecatedKey));
+	    getOverlay().setProperty(n, getOverlay().getProperty(deprecatedKey));
+	  }
+    }
+    return names.toArray(new String[names.size()]);
   }
  
   private void handleDeprecation() {
     LOG.debug("Handling deprecation for all properties in config...");
+    DeprecationContext deprecations = deprecationContext.get();
     Set<Object> keys = new HashSet<Object>();
     keys.addAll(getProps().keySet());
     for (Object item: keys) {
       LOG.debug("Handling deprecation for " + (String)item);
-      handleDeprecation((String)item);
+      handleDeprecation(deprecations, (String)item);
     }
   }
  
@@ -389,13 +625,6 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     }
     addDefaultResource("core-default.xml");
     addDefaultResource("core-site.xml");
-    //Add code for managing deprecated key mapping
-    //for example
-    //addDeprecation("oldKey1",new String[]{"newkey1","newkey2"});
-    //adds deprecation for oldKey1 to two new keys(newkey1, newkey2).
-    //so get or set of oldKey1 will correctly populate/access values of 
-    //newkey1 and newkey2
-    addDeprecatedKeys();
   }
   
   private Properties properties;
@@ -422,7 +651,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   public Configuration(boolean loadDefaults) {
     this.loadDefaults = loadDefaults;
-    updatingResource = new HashMap<String, String>();
+    updatingResource = new HashMap<String, String[]>();
     synchronized(Configuration.class) {
       REGISTRY.put(this, null);
     }
@@ -435,7 +664,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   @SuppressWarnings("unchecked")
   public Configuration(Configuration other) {
-   this.resources = (ArrayList)other.resources.clone();
+   this.resources = (ArrayList<Resource>) other.resources.clone();
    synchronized(other) {
      if (other.properties != null) {
        this.properties = (Properties)other.properties.clone();
@@ -445,10 +674,10 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
        this.overlay = (Properties)other.overlay.clone();
      }
 
-     this.updatingResource = new HashMap<String, String>(other.updatingResource);
+     this.updatingResource = new HashMap<String, String[]>(other.updatingResource);
+     this.finalParameters = new HashSet<String>(other.finalParameters);
    }
    
-    this.finalParameters = new HashSet<String>(other.finalParameters);
     synchronized(Configuration.class) {
       REGISTRY.put(this, null);
     }
@@ -483,7 +712,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *             with that name.
    */
   public void addResource(String name) {
-    addResourceObject(name);
+    addResourceObject(new Resource(name));
   }
 
   /**
@@ -497,7 +726,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *            the classpath.
    */
   public void addResource(URL url) {
-    addResourceObject(url);
+    addResourceObject(new Resource(url));
   }
 
   /**
@@ -511,7 +740,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *             the classpath.
    */
   public void addResource(Path file) {
-    addResourceObject(file);
+    addResourceObject(new Resource(file));
   }
 
   /**
@@ -520,11 +749,43 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * The properties of this resource will override properties of previously 
    * added resources, unless they were marked <a href="#Final">final</a>. 
    * 
-   * @param in InputStream to deserialize the object from. 
+   * WARNING: The contents of the InputStream will be cached, by this method. 
+   * So use this sparingly because it does increase the memory consumption.
+   * 
+   * @param in InputStream to deserialize the object from. In will be read from
+   * when a get or set is called next.  After it is read the stream will be
+   * closed. 
    */
   public void addResource(InputStream in) {
-    addResourceObject(in);
+    addResourceObject(new Resource(in));
   }
+
+  /**
+   * Add a configuration resource. 
+   * 
+   * The properties of this resource will override properties of previously 
+   * added resources, unless they were marked <a href="#Final">final</a>. 
+   * 
+   * @param in InputStream to deserialize the object from.
+   * @param name the name of the resource because InputStream.toString is not
+   * very descriptive some times.  
+   */
+  public void addResource(InputStream in, String name) {
+    addResourceObject(new Resource(in, name));
+  }
+  
+  /**
+   * Add a configuration resource.
+   *
+   * The properties of this resource will override properties of previously
+   * added resources, unless they were marked <a href="#Final">final</a>.
+   *
+   * @param conf Configuration object from which to load properties
+   */
+  public void addResource(Configuration conf) {
+    addResourceObject(new Resource(conf.getProps()));
+  }
+
   
   
   /**
@@ -540,21 +801,29 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     finalParameters.clear();                      // clear site-limits
   }
   
-  private synchronized void addResourceObject(Object resource) {
+  private synchronized void addResourceObject(Resource resource) {
     resources.add(resource);                      // add to resources
     reloadConfiguration();
   }
   
-  private static Pattern varPat = Pattern.compile("\\$\\{[^\\}\\$\u0020]+\\}");
-  private static int MAX_SUBST = 20;
+  private static final Pattern VAR_PATTERN =
+      Pattern.compile("\\$\\{[^\\}\\$\u0020]+\\}");
+
+  private static final int MAX_SUBST = 20;
 
   private String substituteVars(String expr) {
     if (expr == null) {
       return null;
     }
-    Matcher match = varPat.matcher("");
+    Matcher match = VAR_PATTERN.matcher("");
     String eval = expr;
+    Set<String> evalSet = new HashSet<String>();
     for(int s=0; s<MAX_SUBST; s++) {
+      if (evalSet.contains(eval)) {
+        // Cyclic resolution pattern detected. Return current expression.
+        return eval;
+      }
+      evalSet.add(eval);
       match.reset(eval);
       if (!match.find()) {
         return eval;
@@ -583,18 +852,22 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   /**
    * Get the value of the <code>name</code> property, <code>null</code> if
    * no such property exists. If the key is deprecated, it returns the value of
-   * the first key which replaces the deprecated key and is not null
+   * the first key which replaces the deprecated key and is not null.
    * 
    * Values are processed for <a href="#VariableExpansion">variable expansion</a> 
    * before being returned. 
    * 
-   * @param name the property name.
+   * @param name the property name, will be trimmed before get value.
    * @return the value of the <code>name</code> or its replacing property, 
    *         or null if no such property exists.
    */
   public String get(String name) {
-    name = handleDeprecation(name);
-    return substituteVars(getProps().getProperty(name));
+    String[] names = handleDeprecation(deprecationContext.get(), name);
+    String result = null;
+    for(String n : names) {
+      result = substituteVars(getProps().getProperty(n));
+    }
+    return result;
   }
   
   /**
@@ -619,6 +892,21 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       return value.trim();
     }
   }
+  
+  /**
+   * Get the value of the <code>name</code> property as a trimmed <code>String</code>, 
+   * <code>defaultValue</code> if no such property exists. 
+   * See @{Configuration#getTrimmed} for more details.
+   * 
+   * @param name          the property name.
+   * @param defaultValue  the property default value.
+   * @return              the value of the <code>name</code> or defaultValue
+   *                      if it is not set.
+   */
+  public String getTrimmed(String name, String defaultValue) {
+    String ret = getTrimmed(name);
+    return ret == null ? defaultValue : ret;
+  }
 
   /**
    * Get the value of the <code>name</code> property, without doing
@@ -631,37 +919,114 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    *         its replacing property and null if no such property exists.
    */
   public String getRaw(String name) {
-    name = handleDeprecation(name);
-    return getProps().getProperty(name);
+    String[] names = handleDeprecation(deprecationContext.get(), name);
+    String result = null;
+    for(String n : names) {
+      result = getProps().getProperty(n);
+    }
+    return result;
+  }
+
+  /**
+   * Returns alternative names (non-deprecated keys or previously-set deprecated keys)
+   * for a given non-deprecated key.
+   * If the given key is deprecated, return null.
+   *
+   * @param name property name.
+   * @return alternative names.
+   */
+  private String[] getAlternativeNames(String name) {
+    String altNames[] = null;
+    DeprecatedKeyInfo keyInfo = null;
+    DeprecationContext cur = deprecationContext.get();
+    String depKey = cur.getReverseDeprecatedKeyMap().get(name);
+    if(depKey != null) {
+      keyInfo = cur.getDeprecatedKeyMap().get(depKey);
+      if(keyInfo.newKeys.length > 0) {
+        if(getProps().containsKey(depKey)) {
+          //if deprecated key is previously set explicitly
+          List<String> list = new ArrayList<String>();
+          list.addAll(Arrays.asList(keyInfo.newKeys));
+          list.add(depKey);
+          altNames = list.toArray(new String[list.size()]);
+        }
+        else {
+          altNames = keyInfo.newKeys;
+        }
+      }
+    }
+    return altNames;
   }
 
   /** 
    * Set the <code>value</code> of the <code>name</code> property. If 
    * <code>name</code> is deprecated or there is a deprecated name associated to it,
-   * it sets the value to both names.
+   * it sets the value to both names. Name will be trimmed before put into
+   * configuration.
    * 
    * @param name property name.
    * @param value property value.
    */
   public void set(String name, String value) {
-    if (deprecatedKeyMap.isEmpty()) {
+    set(name, value, null);
+  }
+  
+  /** 
+   * Set the <code>value</code> of the <code>name</code> property. If 
+   * <code>name</code> is deprecated, it also sets the <code>value</code> to
+   * the keys that replace the deprecated key. Name will be trimmed before put
+   * into configuration.
+   *
+   * @param name property name.
+   * @param value property value.
+   * @param source the place that this configuration value came from 
+   * (For debugging).
+   * @throws IllegalArgumentException when the value or name is null.
+   */
+  public void set(String name, String value, String source) {
+    Preconditions.checkArgument(
+        name != null,
+        "Property name must not be null");
+    Preconditions.checkArgument(
+        value != null,
+        "The value of property " + name + " must not be null");
+    name = name.trim();
+    DeprecationContext deprecations = deprecationContext.get();
+    if (deprecations.getDeprecatedKeyMap().isEmpty()) {
       getProps();
     }
     getOverlay().setProperty(name, value);
     getProps().setProperty(name, value);
-    updatingResource.put(name, UNKNOWN_RESOURCE);
-    String altName = getAlternateName(name);
-    if (altName != null) {
-      getOverlay().setProperty(altName, value);
-      getProps().setProperty(altName, value);
+    String newSource = (source == null ? "programatically" : source);
+
+    if (!isDeprecated(name)) {
+      updatingResource.put(name, new String[] {newSource});
+      String[] altNames = getAlternativeNames(name);
+      if(altNames != null) {
+        for(String n: altNames) {
+          if(!n.equals(name)) {
+            getOverlay().setProperty(n, value);
+            getProps().setProperty(n, value);
+            updatingResource.put(n, new String[] {newSource});
+          }
+        }
+      }
     }
-    warnOnceIfDeprecated(name);
+    else {
+      String[] names = handleDeprecation(deprecationContext.get(), name);
+      String altSource = "because " + name + " is deprecated";
+      for(String n : names) {
+        getOverlay().setProperty(n, value);
+        getProps().setProperty(n, value);
+        updatingResource.put(n, new String[] {altSource});
+      }
+    }
   }
 
-  private void warnOnceIfDeprecated(String name) {
-    DeprecatedKeyInfo keyInfo = deprecatedKeyMap.get(name);
-    if (keyInfo != null && !keyInfo.accessed) {
-      LOG.warn(keyInfo.getWarningMessage(name));
+  private void warnOnceIfDeprecated(DeprecationContext deprecations, String name) {
+    DeprecatedKeyInfo keyInfo = deprecations.getDeprecatedKeyMap().get(name);
+    if (keyInfo != null && !keyInfo.getAndSetAccessed()) {
+      LOG_DEPRECATION.info(keyInfo.getWarningMessage(name));
     }
   }
 
@@ -669,12 +1034,20 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * Unset a previously set property.
    */
   public synchronized void unset(String name) {
-    String altName = getAlternateName(name);
-    getOverlay().remove(name);
-    getProps().remove(name);
-    if (altName !=null) {
-      getOverlay().remove(altName);
-       getProps().remove(altName);
+    String[] names = null;
+    if (!isDeprecated(name)) {
+      names = getAlternativeNames(name);
+      if(names == null) {
+    	  names = new String[]{name};
+      }
+    }
+    else {
+      names = handleDeprecation(deprecationContext.get(), name);
+    }
+
+    for(String n: names) {
+      getOverlay().remove(n);
+      getProps().remove(n);
     }
   }
 
@@ -703,16 +1076,20 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * If no such property exists,
    * then <code>defaultValue</code> is returned.
    * 
-   * @param name property name.
+   * @param name property name, will be trimmed before get value.
    * @param defaultValue default value.
    * @return property value, or <code>defaultValue</code> if the property 
    *         doesn't exist.                    
    */
   public String get(String name, String defaultValue) {
-    name = handleDeprecation(name);
-    return substituteVars(getProps().getProperty(name, defaultValue));
+    String[] names = handleDeprecation(deprecationContext.get(), name);
+    String result = null;
+    for(String n : names) {
+      result = substituteVars(getProps().getProperty(n, defaultValue));
+    }
+    return result;
   }
-    
+
   /** 
    * Get the value of the <code>name</code> property as an <code>int</code>.
    *   
@@ -735,6 +1112,25 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       return Integer.parseInt(hexString, 16);
     }
     return Integer.parseInt(valueString);
+  }
+  
+  /**
+   * Get the value of the <code>name</code> property as a set of comma-delimited
+   * <code>int</code> values.
+   * 
+   * If no such property exists, an empty array is returned.
+   * 
+   * @param name property name
+   * @return property value interpreted as an array of comma-delimited
+   *         <code>int</code> values
+   */
+  public int[] getInts(String name) {
+    String[] strings = getTrimmedStrings(name);
+    int[] ints = new int[strings.length];
+    for (int i = 0; i < strings.length; i++) {
+      ints[i] = Integer.parseInt(strings[i]);
+    }
+    return ints;
   }
 
   /** 
@@ -838,6 +1234,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       return defaultValue;
     return Float.parseFloat(valueString);
   }
+
   /**
    * Set the value of the <code>name</code> property to a <code>float</code>.
    * 
@@ -846,6 +1243,35 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   public void setFloat(String name, float value) {
     set(name,Float.toString(value));
+  }
+
+  /** 
+   * Get the value of the <code>name</code> property as a <code>double</code>.  
+   * If no such property exists, the provided default value is returned,
+   * or if the specified value is not a valid <code>double</code>,
+   * then an error is thrown.
+   *
+   * @param name property name.
+   * @param defaultValue default value.
+   * @throws NumberFormatException when the value is invalid
+   * @return property value as a <code>double</code>, 
+   *         or <code>defaultValue</code>. 
+   */
+  public double getDouble(String name, double defaultValue) {
+    String valueString = getTrimmed(name);
+    if (valueString == null)
+      return defaultValue;
+    return Double.parseDouble(valueString);
+  }
+
+  /**
+   * Set the value of the <code>name</code> property to a <code>double</code>.
+   * 
+   * @param name property name.
+   * @param value property value.
+   */
+  public void setDouble(String name, double value) {
+    set(name,Double.toString(value));
   }
  
   /** 
@@ -860,7 +1286,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   public boolean getBoolean(String name, boolean defaultValue) {
     String valueString = getTrimmed(name);
-    if (null == valueString || "".equals(valueString)) {
+    if (null == valueString || valueString.isEmpty()) {
       return defaultValue;
     }
 
@@ -916,6 +1342,93 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       : Enum.valueOf(defaultValue.getDeclaringClass(), val);
   }
 
+  enum ParsedTimeDuration {
+    NS {
+      TimeUnit unit() { return TimeUnit.NANOSECONDS; }
+      String suffix() { return "ns"; }
+    },
+    US {
+      TimeUnit unit() { return TimeUnit.MICROSECONDS; }
+      String suffix() { return "us"; }
+    },
+    MS {
+      TimeUnit unit() { return TimeUnit.MILLISECONDS; }
+      String suffix() { return "ms"; }
+    },
+    S {
+      TimeUnit unit() { return TimeUnit.SECONDS; }
+      String suffix() { return "s"; }
+    },
+    M {
+      TimeUnit unit() { return TimeUnit.MINUTES; }
+      String suffix() { return "m"; }
+    },
+    H {
+      TimeUnit unit() { return TimeUnit.HOURS; }
+      String suffix() { return "h"; }
+    },
+    D {
+      TimeUnit unit() { return TimeUnit.DAYS; }
+      String suffix() { return "d"; }
+    };
+    abstract TimeUnit unit();
+    abstract String suffix();
+    static ParsedTimeDuration unitFor(String s) {
+      for (ParsedTimeDuration ptd : values()) {
+        // iteration order is in decl order, so SECONDS matched last
+        if (s.endsWith(ptd.suffix())) {
+          return ptd;
+        }
+      }
+      return null;
+    }
+    static ParsedTimeDuration unitFor(TimeUnit unit) {
+      for (ParsedTimeDuration ptd : values()) {
+        if (ptd.unit() == unit) {
+          return ptd;
+        }
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Set the value of <code>name</code> to the given time duration. This
+   * is equivalent to <code>set(&lt;name&gt;, value + &lt;time suffix&gt;)</code>.
+   * @param name Property name
+   * @param value Time duration
+   * @param unit Unit of time
+   */
+  public void setTimeDuration(String name, long value, TimeUnit unit) {
+    set(name, value + ParsedTimeDuration.unitFor(unit).suffix());
+  }
+
+  /**
+   * Return time duration in the given time unit. Valid units are encoded in
+   * properties as suffixes: nanoseconds (ns), microseconds (us), milliseconds
+   * (ms), seconds (s), minutes (m), hours (h), and days (d).
+   * @param name Property name
+   * @param defaultValue Value returned if no mapping exists.
+   * @param unit Unit to convert the stored property, if it exists.
+   * @throws NumberFormatException If the property stripped of its unit is not
+   *         a number
+   */
+  public long getTimeDuration(String name, long defaultValue, TimeUnit unit) {
+    String vStr = get(name);
+    if (null == vStr) {
+      return defaultValue;
+    }
+    vStr = vStr.trim();
+    ParsedTimeDuration vUnit = ParsedTimeDuration.unitFor(vStr);
+    if (null == vUnit) {
+      LOG.warn("No unit for " + name + "(" + vStr + ") assuming " + unit);
+      vUnit = ParsedTimeDuration.unitFor(unit);
+    } else {
+      vStr = vStr.substring(0, vStr.lastIndexOf(vUnit.suffix()));
+    }
+    return unit.convert(Long.parseLong(vStr), vUnit.unit());
+  }
+
   /**
    * Get the value of the <code>name</code> property as a <code>Pattern</code>.
    * If no such property is specified, or if the specified value is not a valid
@@ -927,7 +1440,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   public Pattern getPattern(String name, Pattern defaultValue) {
     String valString = get(name);
-    if (null == valString || "".equals(valString)) {
+    if (null == valString || valString.isEmpty()) {
       return defaultValue;
     }
     try {
@@ -956,17 +1469,100 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   }
 
   /**
+   * Gets information about why a property was set.  Typically this is the 
+   * path to the resource objects (file, URL, etc.) the property came from, but
+   * it can also indicate that it was set programatically, or because of the
+   * command line.
+   *
+   * @param name - The property name to get the source of.
+   * @return null - If the property or its source wasn't found. Otherwise, 
+   * returns a list of the sources of the resource.  The older sources are
+   * the first ones in the list.  So for example if a configuration is set from
+   * the command line, and then written out to a file that is read back in the
+   * first entry would indicate that it was set from the command line, while
+   * the second one would indicate the file that the new configuration was read
+   * in from.
+   */
+  @InterfaceStability.Unstable
+  public synchronized String[] getPropertySources(String name) {
+    if (properties == null) {
+      // If properties is null, it means a resource was newly added
+      // but the props were cleared so as to load it upon future
+      // requests. So lets force a load by asking a properties list.
+      getProps();
+    }
+    // Return a null right away if our properties still
+    // haven't loaded or the resource mapping isn't defined
+    if (properties == null || updatingResource == null) {
+      return null;
+    } else {
+      String[] source = updatingResource.get(name);
+      if(source == null) {
+        return null;
+      } else {
+        return Arrays.copyOf(source, source.length);
+      }
+    }
+  }
+
+  /**
    * A class that represents a set of positive integer ranges. It parses 
    * strings of the form: "2-3,5,7-" where ranges are separated by comma and 
    * the lower/upper bounds are separated by dash. Either the lower or upper 
    * bound may be omitted meaning all values up to or over. So the string 
    * above means 2, 3, 5, and 7, 8, 9, ...
    */
-  public static class IntegerRanges {
+  public static class IntegerRanges implements Iterable<Integer>{
     private static class Range {
       int start;
       int end;
     }
+    
+    private static class RangeNumberIterator implements Iterator<Integer> {
+      Iterator<Range> internal;
+      int at;
+      int end;
+
+      public RangeNumberIterator(List<Range> ranges) {
+        if (ranges != null) {
+          internal = ranges.iterator();
+        }
+        at = -1;
+        end = -2;
+      }
+      
+      @Override
+      public boolean hasNext() {
+        if (at <= end) {
+          return true;
+        } else if (internal != null){
+          return internal.hasNext();
+        }
+        return false;
+      }
+
+      @Override
+      public Integer next() {
+        if (at <= end) {
+          at++;
+          return at - 1;
+        } else if (internal != null){
+          Range found = internal.next();
+          if (found != null) {
+            at = found.start;
+            end = found.end;
+            at++;
+            return at - 1;
+          }
+        }
+        return null;
+      }
+
+      @Override
+      public void remove() {
+        throw new UnsupportedOperationException();
+      }
+    };
 
     List<Range> ranges = new ArrayList<Range>();
     
@@ -1025,6 +1621,13 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       return false;
     }
     
+    /**
+     * @return true if there are no values in this range, else false.
+     */
+    public boolean isEmpty() {
+      return ranges == null || ranges.isEmpty();
+    }
+    
     @Override
     public String toString() {
       StringBuilder result = new StringBuilder();
@@ -1041,6 +1644,12 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       }
       return result.toString();
     }
+
+    @Override
+    public Iterator<Integer> iterator() {
+      return new RangeNumberIterator(ranges);
+    }
+    
   }
 
   /**
@@ -1163,6 +1772,182 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   }
 
   /**
+   * Get the value for a known password configuration element.
+   * In order to enable the elimination of clear text passwords in config,
+   * this method attempts to resolve the property name as an alias through
+   * the CredentialProvider API and conditionally fallsback to config.
+   * @param name property name
+   * @return password
+   */
+  public char[] getPassword(String name) throws IOException {
+    char[] pass = null;
+
+    pass = getPasswordFromCredentialProviders(name);
+
+    if (pass == null) {
+      pass = getPasswordFromConfig(name);
+    }
+
+    return pass;
+  }
+
+  /**
+   * Try and resolve the provided element name as a credential provider
+   * alias.
+   * @param name alias of the provisioned credential
+   * @return password or null if not found
+   * @throws IOException
+   */
+  protected char[] getPasswordFromCredentialProviders(String name)
+      throws IOException {
+    char[] pass = null;
+    try {
+      List<CredentialProvider> providers =
+          CredentialProviderFactory.getProviders(this);
+
+      if (providers != null) {
+        for (CredentialProvider provider : providers) {
+          try {
+            CredentialEntry entry = provider.getCredentialEntry(name);
+            if (entry != null) {
+              pass = entry.getCredential();
+              break;
+            }
+          }
+          catch (IOException ioe) {
+            throw new IOException("Can't get key " + name + " from key provider" +
+            		"of type: " + provider.getClass().getName() + ".", ioe);
+          }
+        }
+      }
+    }
+    catch (IOException ioe) {
+      throw new IOException("Configuration problem with provider path.", ioe);
+    }
+
+    return pass;
+  }
+
+  /**
+   * Fallback to clear text passwords in configuration.
+   * @param name
+   * @return clear text password or null
+   */
+  protected char[] getPasswordFromConfig(String name) {
+    char[] pass = null;
+    if (getBoolean(CredentialProvider.CLEAR_TEXT_FALLBACK, true)) {
+      String passStr = get(name);
+      if (passStr != null) {
+        pass = passStr.toCharArray();
+      }
+    }
+    return pass;
+  }
+
+  /**
+   * Get the socket address for <code>hostProperty</code> as a
+   * <code>InetSocketAddress</code>. If <code>hostProperty</code> is
+   * <code>null</code>, <code>addressProperty</code> will be used. This
+   * is useful for cases where we want to differentiate between host
+   * bind address and address clients should use to establish connection.
+   *
+   * @param hostProperty bind host property name.
+   * @param addressProperty address property name.
+   * @param defaultAddressValue the default value
+   * @param defaultPort the default port
+   * @return InetSocketAddress
+   */
+  public InetSocketAddress getSocketAddr(
+      String hostProperty,
+      String addressProperty,
+      String defaultAddressValue,
+      int defaultPort) {
+
+    InetSocketAddress bindAddr = getSocketAddr(
+      addressProperty, defaultAddressValue, defaultPort);
+
+    final String host = get(hostProperty);
+
+    if (host == null || host.isEmpty()) {
+      return bindAddr;
+    }
+
+    return NetUtils.createSocketAddr(
+        host, bindAddr.getPort(), hostProperty);
+  }
+
+  /**
+   * Get the socket address for <code>name</code> property as a
+   * <code>InetSocketAddress</code>.
+   * @param name property name.
+   * @param defaultAddress the default value
+   * @param defaultPort the default port
+   * @return InetSocketAddress
+   */
+  public InetSocketAddress getSocketAddr(
+      String name, String defaultAddress, int defaultPort) {
+    final String address = get(name, defaultAddress);
+    return NetUtils.createSocketAddr(address, defaultPort, name);
+  }
+
+  /**
+   * Set the socket address for the <code>name</code> property as
+   * a <code>host:port</code>.
+   */
+  public void setSocketAddr(String name, InetSocketAddress addr) {
+    set(name, NetUtils.getHostPortString(addr));
+  }
+
+  /**
+   * Set the socket address a client can use to connect for the
+   * <code>name</code> property as a <code>host:port</code>.  The wildcard
+   * address is replaced with the local host's address. If the host and address
+   * properties are configured the host component of the address will be combined
+   * with the port component of the addr to generate the address.  This is to allow
+   * optional control over which host name is used in multi-home bind-host
+   * cases where a host can have multiple names
+   * @param hostProperty the bind-host configuration name
+   * @param addressProperty the service address configuration name
+   * @param defaultAddressValue the service default address configuration value
+   * @param addr InetSocketAddress of the service listener
+   * @return InetSocketAddress for clients to connect
+   */
+  public InetSocketAddress updateConnectAddr(
+      String hostProperty,
+      String addressProperty,
+      String defaultAddressValue,
+      InetSocketAddress addr) {
+
+    final String host = get(hostProperty);
+    final String connectHostPort = getTrimmed(addressProperty, defaultAddressValue);
+
+    if (host == null || host.isEmpty() || connectHostPort == null || connectHostPort.isEmpty()) {
+      //not our case, fall back to original logic
+      return updateConnectAddr(addressProperty, addr);
+    }
+
+    final String connectHost = connectHostPort.split(":")[0];
+    // Create connect address using client address hostname and server port.
+    return updateConnectAddr(addressProperty, NetUtils.createSocketAddrForHost(
+        connectHost, addr.getPort()));
+  }
+  
+  /**
+   * Set the socket address a client can use to connect for the
+   * <code>name</code> property as a <code>host:port</code>.  The wildcard
+   * address is replaced with the local host's address.
+   * @param name property name.
+   * @param addr InetSocketAddress of a listener to store in the given property
+   * @return InetSocketAddress for clients to connect
+   */
+  public InetSocketAddress updateConnectAddr(String name,
+                                             InetSocketAddress addr) {
+    final InetSocketAddress connectAddr = NetUtils.getConnectAddress(addr);
+    setSocketAddr(name, connectAddr);
+    return connectAddr;
+  }
+  
+  /**
    * Load a class by name.
    * 
    * @param name the class name.
@@ -1186,28 +1971,33 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * @return the class object, or null if it could not be found.
    */
   public Class<?> getClassByNameOrNull(String name) {
-    Map<String, Class<?>> map;
+    Map<String, WeakReference<Class<?>>> map;
     
     synchronized (CACHE_CLASSES) {
       map = CACHE_CLASSES.get(classLoader);
       if (map == null) {
         map = Collections.synchronizedMap(
-          new WeakHashMap<String, Class<?>>());
+          new WeakHashMap<String, WeakReference<Class<?>>>());
         CACHE_CLASSES.put(classLoader, map);
       }
     }
 
-    Class<?> clazz = map.get(name);
+    Class<?> clazz = null;
+    WeakReference<Class<?>> ref = map.get(name); 
+    if (ref != null) {
+       clazz = ref.get();
+    }
+     
     if (clazz == null) {
       try {
         clazz = Class.forName(name, true, classLoader);
       } catch (ClassNotFoundException e) {
         // Leave a marker that the class isn't found
-        map.put(name, NEGATIVE_CACHE_SENTINEL);
+        map.put(name, new WeakReference<Class<?>>(NEGATIVE_CACHE_SENTINEL));
         return null;
       }
       // two putters can race here, but they'll put the same class
-      map.put(name, clazz);
+      map.put(name, new WeakReference<Class<?>>(clazz));
       return clazz;
     } else if (clazz == NEGATIVE_CACHE_SENTINEL) {
       return null; // not found
@@ -1456,14 +2246,26 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     }
   }
 
+  /**
+   * Get the set of parameters marked final.
+   *
+   * @return final parameter set.
+   */
+  public Set<String> getFinalParameters() {
+    return new HashSet<String>(finalParameters);
+  }
+
   protected synchronized Properties getProps() {
     if (properties == null) {
       properties = new Properties();
+      HashMap<String, String[]> backup = 
+        new HashMap<String, String[]>(updatingResource);
       loadResources(properties, resources, quietmode);
       if (overlay!= null) {
         properties.putAll(overlay);
         for (Map.Entry<Object,Object> item: overlay.entrySet()) {
-          updatingResource.put((String) item.getKey(), UNKNOWN_RESOURCE);
+          String key = (String)item.getKey();
+          updatingResource.put(key, backup.get(key));
         }
       }
     }
@@ -1493,6 +2295,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * 
    * @return an iterator over the entries.
    */
+  @Override
   public Iterator<Map.Entry<String, String>> iterator() {
     // Get a copy of just the string to string pairs. After the old object
     // methods that allow non-strings to be put into configurations are removed,
@@ -1508,27 +2311,61 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     return result.entrySet().iterator();
   }
 
+  private Document parse(DocumentBuilder builder, URL url)
+      throws IOException, SAXException {
+    if (!quietmode) {
+      LOG.debug("parsing URL " + url);
+    }
+    if (url == null) {
+      return null;
+    }
+    return parse(builder, url.openStream(), url.toString());
+  }
+
+  private Document parse(DocumentBuilder builder, InputStream is,
+      String systemId) throws IOException, SAXException {
+    if (!quietmode) {
+      LOG.debug("parsing input stream " + is);
+    }
+    if (is == null) {
+      return null;
+    }
+    try {
+      return (systemId == null) ? builder.parse(is) : builder.parse(is,
+          systemId);
+    } finally {
+      is.close();
+    }
+  }
+
   private void loadResources(Properties properties,
-                             ArrayList resources,
+                             ArrayList<Resource> resources,
                              boolean quiet) {
     if(loadDefaults) {
       for (String resource : defaultResources) {
-        loadResource(properties, resource, quiet);
+        loadResource(properties, new Resource(resource), quiet);
       }
     
       //support the hadoop-site.xml as a deprecated case
       if(getResource("hadoop-site.xml")!=null) {
-        loadResource(properties, "hadoop-site.xml", quiet);
+        loadResource(properties, new Resource("hadoop-site.xml"), quiet);
       }
     }
     
-    for (Object resource : resources) {
-      loadResource(properties, resource, quiet);
+    for (int i = 0; i < resources.size(); i++) {
+      Resource ret = loadResource(properties, resources.get(i), quiet);
+      if (ret != null) {
+        resources.set(i, ret);
+      }
     }
   }
   
-  private void loadResource(Properties properties, Object name, boolean quiet) {
+  private Resource loadResource(Properties properties, Resource wrapper, boolean quiet) {
+    String name = UNKNOWN_RESOURCE;
     try {
+      Object resource = wrapper.getResource();
+      name = wrapper.getName();
+      
       DocumentBuilderFactory docBuilderFactory 
         = DocumentBuilderFactory.newInstance();
       //ignore all comments inside the xml file
@@ -1547,68 +2384,58 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       DocumentBuilder builder = docBuilderFactory.newDocumentBuilder();
       Document doc = null;
       Element root = null;
-
-      if (name instanceof URL) {                  // an URL resource
-        URL url = (URL)name;
-        if (url != null) {
-          if (!quiet) {
-            LOG.info("parsing " + url);
-          }
-          doc = builder.parse(url.toString());
-        }
-      } else if (name instanceof String) {        // a CLASSPATH resource
-        URL url = getResource((String)name);
-        if (url != null) {
-          if (!quiet) {
-            LOG.info("parsing " + url);
-          }
-          doc = builder.parse(url.toString());
-        }
-      } else if (name instanceof Path) {          // a file resource
+      boolean returnCachedProperties = false;
+      
+      if (resource instanceof URL) {                  // an URL resource
+        doc = parse(builder, (URL)resource);
+      } else if (resource instanceof String) {        // a CLASSPATH resource
+        URL url = getResource((String)resource);
+        doc = parse(builder, url);
+      } else if (resource instanceof Path) {          // a file resource
         // Can't use FileSystem API or we get an infinite loop
         // since FileSystem uses Configuration API.  Use java.io.File instead.
-        File file = new File(((Path)name).toUri().getPath())
+        File file = new File(((Path)resource).toUri().getPath())
           .getAbsoluteFile();
         if (file.exists()) {
           if (!quiet) {
-            LOG.info("parsing " + file);
+            LOG.debug("parsing File " + file);
           }
-          InputStream in = new BufferedInputStream(new FileInputStream(file));
-          try {
-            doc = builder.parse(in);
-          } finally {
-            in.close();
-          }
+          doc = parse(builder, new BufferedInputStream(
+              new FileInputStream(file)), ((Path)resource).toString());
         }
-      } else if (name instanceof InputStream) {
-        try {
-          doc = builder.parse((InputStream)name);
-        } finally {
-          ((InputStream)name).close();
-        }
-      } else if (name instanceof Element) {
-        root = (Element)name;
-      }
-
-      if (doc == null && root == null) {
-        if (quiet)
-          return;
-        throw new RuntimeException(name + " not found");
+      } else if (resource instanceof InputStream) {
+        doc = parse(builder, (InputStream) resource, null);
+        returnCachedProperties = true;
+      } else if (resource instanceof Properties) {
+        overlay(properties, (Properties)resource);
+      } else if (resource instanceof Element) {
+        root = (Element)resource;
       }
 
       if (root == null) {
+        if (doc == null) {
+          if (quiet) {
+            return null;
+          }
+          throw new RuntimeException(resource + " not found");
+        }
         root = doc.getDocumentElement();
+      }
+      Properties toAddTo = properties;
+      if(returnCachedProperties) {
+        toAddTo = new Properties();
       }
       if (!"configuration".equals(root.getTagName()))
         LOG.fatal("bad conf file: top-level element not <configuration>");
       NodeList props = root.getChildNodes();
+      DeprecationContext deprecations = deprecationContext.get();
       for (int i = 0; i < props.getLength(); i++) {
         Node propNode = props.item(i);
         if (!(propNode instanceof Element))
           continue;
         Element prop = (Element)propNode;
         if ("configuration".equals(prop.getTagName())) {
-          loadResource(properties, prop, quiet);
+          loadResource(toAddTo, new Resource(prop, name), quiet);
           continue;
         }
         if (!"property".equals(prop.getTagName()))
@@ -1617,56 +2444,77 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
         String attr = null;
         String value = null;
         boolean finalParameter = false;
+        LinkedList<String> source = new LinkedList<String>();
         for (int j = 0; j < fields.getLength(); j++) {
           Node fieldNode = fields.item(j);
           if (!(fieldNode instanceof Element))
             continue;
           Element field = (Element)fieldNode;
           if ("name".equals(field.getTagName()) && field.hasChildNodes())
-            attr = ((Text)field.getFirstChild()).getData().trim();
+            attr = StringInterner.weakIntern(
+                ((Text)field.getFirstChild()).getData().trim());
           if ("value".equals(field.getTagName()) && field.hasChildNodes())
-            value = ((Text)field.getFirstChild()).getData();
+            value = StringInterner.weakIntern(
+                ((Text)field.getFirstChild()).getData());
           if ("final".equals(field.getTagName()) && field.hasChildNodes())
             finalParameter = "true".equals(((Text)field.getFirstChild()).getData());
+          if ("source".equals(field.getTagName()) && field.hasChildNodes())
+            source.add(StringInterner.weakIntern(
+                ((Text)field.getFirstChild()).getData()));
         }
+        source.add(name);
         
         // Ignore this parameter if it has already been marked as 'final'
         if (attr != null) {
-          if (deprecatedKeyMap.containsKey(attr)) {
-            DeprecatedKeyInfo keyInfo = deprecatedKeyMap.get(attr);
-            keyInfo.accessed = false;
+          if (deprecations.getDeprecatedKeyMap().containsKey(attr)) {
+            DeprecatedKeyInfo keyInfo =
+                deprecations.getDeprecatedKeyMap().get(attr);
+            keyInfo.clearAccessed();
             for (String key:keyInfo.newKeys) {
               // update new keys with deprecated key's value 
-              loadProperty(properties, name, key, value, finalParameter);
+              loadProperty(toAddTo, name, key, value, finalParameter, 
+                  source.toArray(new String[source.size()]));
             }
           }
           else {
-            loadProperty(properties, name, attr, value, finalParameter);
+            loadProperty(toAddTo, name, attr, value, finalParameter, 
+                source.toArray(new String[source.size()]));
           }
         }
       }
-        
+      
+      if (returnCachedProperties) {
+        overlay(properties, toAddTo);
+        return new Resource(toAddTo, name);
+      }
+      return null;
     } catch (IOException e) {
-      LOG.fatal("error parsing conf file: " + e);
+      LOG.fatal("error parsing conf " + name, e);
       throw new RuntimeException(e);
     } catch (DOMException e) {
-      LOG.fatal("error parsing conf file: " + e);
+      LOG.fatal("error parsing conf " + name, e);
       throw new RuntimeException(e);
     } catch (SAXException e) {
-      LOG.fatal("error parsing conf file: " + e);
+      LOG.fatal("error parsing conf " + name, e);
       throw new RuntimeException(e);
     } catch (ParserConfigurationException e) {
-      LOG.fatal("error parsing conf file: " + e);
+      LOG.fatal("error parsing conf " + name , e);
       throw new RuntimeException(e);
     }
   }
 
-  private void loadProperty(Properties properties, Object name, String attr,
-      String value, boolean finalParameter) {
+  private void overlay(Properties to, Properties from) {
+    for (Entry<Object, Object> entry: from.entrySet()) {
+      to.put(entry.getKey(), entry.getValue());
+    }
+  }
+  
+  private void loadProperty(Properties properties, String name, String attr,
+      String value, boolean finalParameter, String[] source) {
     if (value != null) {
       if (!finalParameters.contains(attr)) {
         properties.setProperty(attr, value);
-        updatingResource.put(attr, name.toString());
+        updatingResource.put(attr, source);
       } else if (!value.equals(properties.getProperty(attr))) {
         LOG.warn(name+":an attempt to override final parameter: "+attr
             +";  Ignoring.");
@@ -1679,12 +2527,12 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
 
   /** 
    * Write out the non-default properties in this configuration to the given
-   * {@link OutputStream}.
+   * {@link OutputStream} using UTF-8 encoding.
    * 
    * @param out the output stream to write to.
    */
   public void writeXml(OutputStream out) throws IOException {
-    writeXml(new OutputStreamWriter(out));
+    writeXml(new OutputStreamWriter(out, "UTF-8"));
   }
 
   /** 
@@ -1726,7 +2574,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     doc.appendChild(conf);
     conf.appendChild(doc.createTextNode("\n"));
     handleDeprecation(); //ensure properties is set and deprecation is handled
-    for (Enumeration e = properties.keys(); e.hasMoreElements();) {
+    for (Enumeration<Object> e = properties.keys(); e.hasMoreElements();) {
       String name = (String)e.nextElement();
       Object object = properties.get(name);
       String value = null;
@@ -1738,11 +2586,6 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       Element propNode = doc.createElement("property");
       conf.appendChild(propNode);
 
-      if (updatingResource != null) {
-        Comment commentNode = doc.createComment(
-          "Loaded from " + updatingResource.get(name));
-        propNode.appendChild(commentNode);
-      }
       Element nameNode = doc.createElement("name");
       nameNode.appendChild(doc.createTextNode(name));
       propNode.appendChild(nameNode);
@@ -1751,6 +2594,17 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       valueNode.appendChild(doc.createTextNode(value));
       propNode.appendChild(valueNode);
 
+      if (updatingResource != null) {
+        String[] sources = updatingResource.get(name);
+        if(sources != null) {
+          for(String s : sources) {
+            Element sourceNode = doc.createElement("source");
+            sourceNode.appendChild(doc.createTextNode(s));
+            propNode.appendChild(sourceNode);
+          }
+        }
+      }
+      
       conf.appendChild(doc.createTextNode("\n"));
     }
     return doc;
@@ -1783,8 +2637,12 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
                                        config.get((String) item.getKey()));
         dumpGenerator.writeBooleanField("isFinal",
                                         config.finalParameters.contains(item.getKey()));
-        dumpGenerator.writeStringField("resource",
-                                       config.updatingResource.get(item.getKey()));
+        String[] resources = config.updatingResource.get(item.getKey());
+        String resource = UNKNOWN_RESOURCE;
+        if(resources != null && resources.length > 0) {
+          resource = resources[0];
+        }
+        dumpGenerator.writeStringField("resource", resource);
         dumpGenerator.writeEndObject();
       }
     }
@@ -1824,7 +2682,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     toString(resources, sb);
     return sb.toString();
   }
-
+  
   private <T> void toString(List<T> resources, StringBuilder sb) {
     ListIterator<T> i = resources.listIterator();
     while (i.hasNext()) {
@@ -1861,18 +2719,24 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     clear();
     int size = WritableUtils.readVInt(in);
     for(int i=0; i < size; ++i) {
-      set(org.apache.hadoop.io.Text.readString(in), 
-          org.apache.hadoop.io.Text.readString(in));
+      String key = org.apache.hadoop.io.Text.readString(in);
+      String value = org.apache.hadoop.io.Text.readString(in);
+      set(key, value); 
+      String sources[] = WritableUtils.readCompressedStringArray(in);
+      updatingResource.put(key, sources);
     }
   }
 
   //@Override
+  @Override
   public void write(DataOutput out) throws IOException {
     Properties props = getProps();
     WritableUtils.writeVInt(out, props.size());
     for(Map.Entry<Object, Object> item: props.entrySet()) {
       org.apache.hadoop.io.Text.writeString(out, (String) item.getKey());
       org.apache.hadoop.io.Text.writeString(out, (String) item.getValue());
+      WritableUtils.writeCompressedStringArray(out, 
+          updatingResource.get(item.getKey()));
     }
   }
   
@@ -1892,36 +2756,43 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
           item.getValue() instanceof String) {
         m = p.matcher((String)item.getKey());
         if(m.find()) { // match
-          result.put((String) item.getKey(), (String) item.getValue());
+          result.put((String) item.getKey(),
+              substituteVars(getProps().getProperty((String) item.getKey())));
         }
       }
     }
     return result;
   }
 
-  //Load deprecated keys in common
-  private static void addDeprecatedKeys() {
-    Configuration.addDeprecation("topology.script.file.name", 
-               new String[]{CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_FILE_NAME_KEY});
-    Configuration.addDeprecation("topology.script.number.args", 
-               new String[]{CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_NUMBER_ARGS_KEY});
-    Configuration.addDeprecation("hadoop.configured.node.mapping", 
-               new String[]{CommonConfigurationKeys.NET_TOPOLOGY_CONFIGURED_NODE_MAPPING_KEY});
-    Configuration.addDeprecation("topology.node.switch.mapping.impl", 
-               new String[]{CommonConfigurationKeys.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY});
-    Configuration.addDeprecation("dfs.df.interval", 
-               new String[]{CommonConfigurationKeys.FS_DF_INTERVAL_KEY});
-    Configuration.addDeprecation("dfs.client.buffer.dir", 
-               new String[]{CommonConfigurationKeys.FS_CLIENT_BUFFER_DIR_KEY});
-    Configuration.addDeprecation("hadoop.native.lib", 
-               new String[]{CommonConfigurationKeys.IO_NATIVE_LIB_AVAILABLE_KEY});
-    Configuration.addDeprecation("fs.default.name", 
-               new String[]{CommonConfigurationKeys.FS_DEFAULT_NAME_KEY});
-  }
-  
   /**
    * A unique class which is used as a sentinel value in the caching
-   * for getClassByName. {@see Configuration#getClassByNameOrNull(String)}
+   * for getClassByName. {@link Configuration#getClassByNameOrNull(String)}
    */
   private static abstract class NegativeCacheSentinel {}
+
+  public static void dumpDeprecatedKeys() {
+    DeprecationContext deprecations = deprecationContext.get();
+    for (Map.Entry<String, DeprecatedKeyInfo> entry :
+        deprecations.getDeprecatedKeyMap().entrySet()) {
+      StringBuilder newKeys = new StringBuilder();
+      for (String newKey : entry.getValue().newKeys) {
+        newKeys.append(newKey).append("\t");
+      }
+      System.out.println(entry.getKey() + "\t" + newKeys.toString());
+    }
+  }
+
+  /**
+   * Returns whether or not a deprecated name has been warned. If the name is not
+   * deprecated then always return false
+   */
+  public static boolean hasWarnedDeprecation(String name) {
+    DeprecationContext deprecations = deprecationContext.get();
+    if(deprecations.getDeprecatedKeyMap().containsKey(name)) {
+      if(deprecations.getDeprecatedKeyMap().get(name).accessed.get()) {
+        return true;
+      }
+    }
+    return false;
+  }
 }

@@ -54,6 +54,15 @@ public class CommonConfigurationKeysPublic {
   public static final String  FS_DF_INTERVAL_KEY = "fs.df.interval"; 
   /** Default value for FS_DF_INTERVAL_KEY */
   public static final long    FS_DF_INTERVAL_DEFAULT = 60000;
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  FS_DU_INTERVAL_KEY = "fs.du.interval";
+  /** Default value for FS_DU_INTERVAL_KEY */
+  public static final long    FS_DU_INTERVAL_DEFAULT = 600000;
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  FS_CLIENT_RESOLVE_REMOTE_SYMLINKS_KEY =
+    "fs.client.resolve.remote.symlinks";
+  /** Default value for FS_CLIENT_RESOLVE_REMOTE_SYMLINKS_KEY */
+  public static final boolean FS_CLIENT_RESOLVE_REMOTE_SYMLINKS_DEFAULT = true;
 
 
   //Defaults are not specified for following keys
@@ -63,10 +72,14 @@ public class CommonConfigurationKeysPublic {
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY =
     "net.topology.node.switch.mapping.impl";
-  
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  NET_TOPOLOGY_IMPL_KEY =
+    "net.topology.impl";
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  NET_TOPOLOGY_TABLE_MAPPING_FILE_KEY =
     "net.topology.table.file.name";
+  public static final String NET_DEPENDENCY_SCRIPT_FILE_NAME_KEY = 
+    "net.topology.dependency.script.file.name";
 
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  FS_TRASH_CHECKPOINT_INTERVAL_KEY =
@@ -171,10 +184,20 @@ public class CommonConfigurationKeysPublic {
   /** Default value for IPC_CLIENT_CONNECTION_MAXIDLETIME_KEY */
   public static final int     IPC_CLIENT_CONNECTION_MAXIDLETIME_DEFAULT = 10000; // 10s
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  IPC_CLIENT_CONNECT_TIMEOUT_KEY =
+    "ipc.client.connect.timeout";
+  /** Default value for IPC_CLIENT_CONNECT_TIMEOUT_KEY */
+  public static final int     IPC_CLIENT_CONNECT_TIMEOUT_DEFAULT = 20000; // 20s
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  IPC_CLIENT_CONNECT_MAX_RETRIES_KEY =
     "ipc.client.connect.max.retries";
   /** Default value for IPC_CLIENT_CONNECT_MAX_RETRIES_KEY */
   public static final int     IPC_CLIENT_CONNECT_MAX_RETRIES_DEFAULT = 10;
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  IPC_CLIENT_CONNECT_RETRY_INTERVAL_KEY =
+      "ipc.client.connect.retry.interval";
+  /** Default value for IPC_CLIENT_CONNECT_RETRY_INTERVAL_KEY */
+  public static final int     IPC_CLIENT_CONNECT_RETRY_INTERVAL_DEFAULT = 1000;
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  IPC_CLIENT_CONNECT_MAX_RETRIES_ON_SOCKET_TIMEOUTS_KEY =
     "ipc.client.connect.max.retries.on.timeouts";
@@ -184,7 +207,7 @@ public class CommonConfigurationKeysPublic {
   public static final String  IPC_CLIENT_TCPNODELAY_KEY =
     "ipc.client.tcpnodelay";
   /** Defalt value for IPC_CLIENT_TCPNODELAY_KEY */
-  public static final boolean IPC_CLIENT_TCPNODELAY_DEFAULT = false;
+  public static final boolean IPC_CLIENT_TCPNODELAY_DEFAULT = true;
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  IPC_SERVER_LISTEN_QUEUE_SIZE_KEY =
     "ipc.server.listen.queue.size";
@@ -203,11 +226,13 @@ public class CommonConfigurationKeysPublic {
   public static final String  IPC_SERVER_TCPNODELAY_KEY =
     "ipc.server.tcpnodelay";
   /** Default value for IPC_SERVER_TCPNODELAY_KEY */
-  public static final boolean IPC_SERVER_TCPNODELAY_DEFAULT = false;
+  public static final boolean IPC_SERVER_TCPNODELAY_DEFAULT = true;
 
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_KEY =
     "hadoop.rpc.socket.factory.class.default";
+  public static final String  HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_DEFAULT =
+    "org.apache.hadoop.net.StandardSocketFactory";
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  HADOOP_SOCKS_SERVER_KEY = "hadoop.socks.server";
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
@@ -222,13 +247,106 @@ public class CommonConfigurationKeysPublic {
   public static final String  HADOOP_SECURITY_GROUPS_CACHE_SECS =
     "hadoop.security.groups.cache.secs";
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final long HADOOP_SECURITY_GROUPS_CACHE_SECS_DEFAULT =
+    300;
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  HADOOP_SECURITY_GROUPS_NEGATIVE_CACHE_SECS =
+    "hadoop.security.groups.negative-cache.secs";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final long HADOOP_SECURITY_GROUPS_NEGATIVE_CACHE_SECS_DEFAULT =
+    30;
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SECURITY_GROUPS_CACHE_WARN_AFTER_MS =
+    "hadoop.security.groups.cache.warn.after.ms";
+  public static final long HADOOP_SECURITY_GROUPS_CACHE_WARN_AFTER_MS_DEFAULT =
+    5000;
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  HADOOP_SECURITY_AUTHENTICATION =
     "hadoop.security.authentication";
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String HADOOP_SECURITY_AUTHORIZATION =
     "hadoop.security.authorization";
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SECURITY_INSTRUMENTATION_REQUIRES_ADMIN =
+    "hadoop.security.instrumentation.requires.admin";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  HADOOP_SECURITY_SERVICE_USER_NAME_KEY =
     "hadoop.security.service.user.name.key";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  HADOOP_SECURITY_AUTH_TO_LOCAL =
+    "hadoop.security.auth_to_local";
+
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN =
+          "hadoop.kerberos.min.seconds.before.relogin";
+  /** Default value for HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN */
+  public static final int HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN_DEFAULT =
+          60;
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  HADOOP_RPC_PROTECTION =
+    "hadoop.rpc.protection";
+  /** Class to override Sasl Properties for a connection */
+  public static final String  HADOOP_SECURITY_SASL_PROPS_RESOLVER_CLASS =
+    "hadoop.security.saslproperties.resolver.class";
+  public static final String HADOOP_SECURITY_CRYPTO_CODEC_CLASSES_KEY_PREFIX = 
+    "hadoop.security.crypto.codec.classes";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SECURITY_CRYPTO_CIPHER_SUITE_KEY =
+    "hadoop.security.crypto.cipher.suite";
+  public static final String HADOOP_SECURITY_CRYPTO_CIPHER_SUITE_DEFAULT = 
+    "AES/CTR/NoPadding";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SECURITY_CRYPTO_JCE_PROVIDER_KEY =
+    "hadoop.security.crypto.jce.provider";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SECURITY_CRYPTO_BUFFER_SIZE_KEY = 
+    "hadoop.security.crypto.buffer.size";
+  /** Defalt value for HADOOP_SECURITY_CRYPTO_BUFFER_SIZE_KEY */
+  public static final int HADOOP_SECURITY_CRYPTO_BUFFER_SIZE_DEFAULT = 8192;
+  /** Class to override Impersonation provider */
+  public static final String  HADOOP_SECURITY_IMPERSONATION_PROVIDER_CLASS =
+    "hadoop.security.impersonation.provider.class";
+
+  //  <!--- KMSClientProvider configurations —>
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String KMS_CLIENT_ENC_KEY_CACHE_SIZE =
+      "hadoop.security.kms.client.encrypted.key.cache.size";
+  /** Default value for KMS_CLIENT_ENC_KEY_CACHE_SIZE */
+  public static final int KMS_CLIENT_ENC_KEY_CACHE_SIZE_DEFAULT = 500;
+
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String KMS_CLIENT_ENC_KEY_CACHE_LOW_WATERMARK =
+      "hadoop.security.kms.client.encrypted.key.cache.low-watermark";
+  /** Default value for KMS_CLIENT_ENC_KEY_CACHE_LOW_WATERMARK */
+  public static final float KMS_CLIENT_ENC_KEY_CACHE_LOW_WATERMARK_DEFAULT =
+      0.3f;
+
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String KMS_CLIENT_ENC_KEY_CACHE_NUM_REFILL_THREADS =
+      "hadoop.security.kms.client.encrypted.key.cache.num.refill.threads";
+  /** Default value for KMS_CLIENT_ENC_KEY_NUM_REFILL_THREADS */
+  public static final int KMS_CLIENT_ENC_KEY_CACHE_NUM_REFILL_THREADS_DEFAULT =
+      2;
+
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String KMS_CLIENT_ENC_KEY_CACHE_EXPIRY_MS =
+      "hadoop.security.kms.client.encrypted.key.cache.expiry";
+  /** Default value for KMS_CLIENT_ENC_KEY_CACHE_EXPIRY (12 hrs)*/
+  public static final int KMS_CLIENT_ENC_KEY_CACHE_EXPIRY_DEFAULT = 43200000;
+
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SECURITY_JAVA_SECURE_RANDOM_ALGORITHM_KEY = 
+    "hadoop.security.java.secure.random.algorithm";
+  /** Defalt value for HADOOP_SECURITY_JAVA_SECURE_RANDOM_ALGORITHM_KEY */
+  public static final String HADOOP_SECURITY_JAVA_SECURE_RANDOM_ALGORITHM_DEFAULT = 
+    "SHA1PRNG";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SECURITY_SECURE_RANDOM_IMPL_KEY = 
+    "hadoop.security.secure.random.impl";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SECURITY_SECURE_RANDOM_DEVICE_FILE_PATH_KEY = 
+    "hadoop.security.random.device.file.path";
+  public static final String HADOOP_SECURITY_SECURE_RANDOM_DEVICE_FILE_PATH_DEFAULT = 
+    "/dev/urandom";
 }
 

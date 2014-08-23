@@ -38,6 +38,7 @@ import org.apache.hadoop.mapreduce.jobhistory.JobInitedEvent;
 import org.apache.hadoop.mapreduce.jobhistory.JobPriorityChangeEvent;
 import org.apache.hadoop.mapreduce.jobhistory.JobStatusChangedEvent;
 import org.apache.hadoop.mapreduce.jobhistory.JobSubmittedEvent;
+import org.apache.hadoop.mapreduce.jobhistory.JobQueueChangeEvent;
 import org.apache.hadoop.mapreduce.jobhistory.JobUnsuccessfulCompletionEvent;
 import org.apache.hadoop.mapreduce.jobhistory.MapAttemptFinished;
 import org.apache.hadoop.mapreduce.jobhistory.MapAttemptFinishedEvent;
@@ -82,6 +83,9 @@ public class JobBuilder {
 
   private Map<ParsedHost, ParsedHost> allHosts =
       new HashMap<ParsedHost, ParsedHost>();
+
+  private org.apache.hadoop.mapreduce.jobhistory.JhCounters EMPTY_COUNTERS =
+      new org.apache.hadoop.mapreduce.jobhistory.JhCounters();
 
   /**
    * The number of splits a task can have, before we ignore them all.
@@ -141,6 +145,8 @@ public class JobBuilder {
       processJobInitedEvent((JobInitedEvent) event);
     } else if (event instanceof JobPriorityChangeEvent) {
       processJobPriorityChangeEvent((JobPriorityChangeEvent) event);
+    } else if (event instanceof JobQueueChangeEvent) {
+      processJobQueueChangeEvent((JobQueueChangeEvent) event);
     } else if (event instanceof JobStatusChangedEvent) {
       processJobStatusChangedEvent((JobStatusChangedEvent) event);
     } else if (event instanceof JobSubmittedEvent) {
@@ -459,7 +465,10 @@ public class JobBuilder {
     TaskFailed t = (TaskFailed)(event.getDatum());
     task.putDiagnosticInfo(t.error.toString());
     task.putFailedDueToAttemptId(t.failedDueToAttempt.toString());
-    // No counters in TaskFailedEvent
+    org.apache.hadoop.mapreduce.jobhistory.JhCounters counters =
+        ((TaskFailed) event.getDatum()).counters;
+    task.incorporateCounters(
+        counters == null ? EMPTY_COUNTERS : counters);
   }
 
   private void processTaskAttemptUnsuccessfulCompletionEvent(
@@ -481,7 +490,10 @@ public class JobBuilder {
     }
 
     attempt.setFinishTime(event.getFinishTime());
-
+    org.apache.hadoop.mapreduce.jobhistory.JhCounters counters =
+        ((TaskAttemptUnsuccessfulCompletion) event.getDatum()).counters;
+    attempt.incorporateCounters(
+        counters == null ? EMPTY_COUNTERS : counters);
     attempt.arraySetClockSplits(event.getClockSplits());
     attempt.arraySetCpuUsages(event.getCpuUsages());
     attempt.arraySetVMemKbytes(event.getVMemKbytes());
@@ -489,7 +501,6 @@ public class JobBuilder {
     TaskAttemptUnsuccessfulCompletion t =
         (TaskAttemptUnsuccessfulCompletion) (event.getDatum());
     attempt.putDiagnosticInfo(t.error.toString());
-    // No counters in TaskAttemptUnsuccessfulCompletionEvent
   }
 
   private void processTaskAttemptStartedEvent(TaskAttemptStartedEvent event) {
@@ -596,6 +607,14 @@ public class JobBuilder {
     result.putJobConfPath(event.getJobConfPath());
     result.putJobAcls(event.getJobAcls());
 
+    // set the queue name if existing
+    String queue = event.getJobQueueName();
+    if (queue != null) {
+      result.setQueue(queue);
+    }
+  }
+
+  private void processJobQueueChangeEvent(JobQueueChangeEvent event) {
     // set the queue name if existing
     String queue = event.getJobQueueName();
     if (queue != null) {

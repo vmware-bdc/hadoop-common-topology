@@ -18,21 +18,30 @@
 
 package org.apache.hadoop.hdfs;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 import java.io.File;
-import java.io.RandomAccessFile;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.Random;
 
-import org.junit.Test;
-import static org.junit.Assert.*;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.DFSClientFaultInjector;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.io.IOUtils;
+import org.junit.Before;
+import org.junit.Test;
+
+import org.mockito.Mockito;
+import org.mockito.stubbing.Answer;
 
 /**
  * A JUnit test for corrupted file handling.
@@ -62,6 +71,81 @@ import org.apache.hadoop.io.IOUtils;
  *     replica was created from the non-corrupted replica.
  */
 public class TestCrcCorruption {
+
+  private DFSClientFaultInjector faultInjector;
+
+  @Before
+  public void setUp() throws IOException {
+    faultInjector = Mockito.mock(DFSClientFaultInjector.class);
+    DFSClientFaultInjector.instance = faultInjector;
+  }
+
+  /** 
+   * Test case for data corruption during data transmission for
+   * create/write. To recover from corruption while writing, at
+   * least two replicas are needed.
+   */
+  @Test(timeout=50000)
+  public void testCorruptionDuringWrt() throws Exception {
+    Configuration conf = new HdfsConfiguration();
+    // Set short retry timeouts so this test runs faster
+    conf.setInt(DFSConfigKeys.DFS_CLIENT_RETRY_WINDOW_BASE, 10);
+    MiniDFSCluster cluster = null;
+
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(10).build();
+      cluster.waitActive();
+      FileSystem fs = cluster.getFileSystem();
+      Path file = new Path("/test_corruption_file");
+      FSDataOutputStream out = fs.create(file, true, 8192, (short)3, (long)(128*1024*1024));
+      byte[] data = new byte[65536];
+      for (int i=0; i < 65536; i++) {
+        data[i] = (byte)(i % 256);
+      }
+
+      for (int i = 0; i < 5; i++) {
+        out.write(data, 0, 65535);
+      }
+      out.hflush();
+      // corrupt the packet once
+      Mockito.when(faultInjector.corruptPacket()).thenReturn(true, false);
+      Mockito.when(faultInjector.uncorruptPacket()).thenReturn(true, false);
+
+      for (int i = 0; i < 5; i++) {
+        out.write(data, 0, 65535);
+      }
+      out.close();
+      // read should succeed
+      FSDataInputStream in = fs.open(file);
+      for(int c; (c = in.read()) != -1; );
+      in.close();
+
+      // test the retry limit
+      out = fs.create(file, true, 8192, (short)3, (long)(128*1024*1024));
+
+      // corrupt the packet once and never fix it.
+      Mockito.when(faultInjector.corruptPacket()).thenReturn(true, false);
+      Mockito.when(faultInjector.uncorruptPacket()).thenReturn(false);
+
+      // the client should give up pipeline reconstruction after retries.
+      try {
+        for (int i = 0; i < 5; i++) {
+          out.write(data, 0, 65535);
+        }
+        out.close();
+        fail("Write did not fail");
+      } catch (IOException ioe) {
+        // we should get an ioe
+        DFSClient.LOG.info("Got expected exception", ioe);
+      }
+    } finally {
+      if (cluster != null) { cluster.shutdown(); }
+      Mockito.when(faultInjector.corruptPacket()).thenReturn(false);
+      Mockito.when(faultInjector.uncorruptPacket()).thenReturn(false);
+    }
+  }
+
+
   /** 
    * check if DFS can handle corrupted CRC blocks
    */
@@ -70,7 +154,8 @@ public class TestCrcCorruption {
     int numDataNodes = 2;
     short replFactor = 2;
     Random random = new Random();
-
+    // Set short retry timeouts so this test runs faster
+    conf.setInt(DFSConfigKeys.DFS_CLIENT_RETRY_WINDOW_BASE, 10);
     try {
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDataNodes).build();
       cluster.waitActive();
@@ -206,7 +291,8 @@ public class TestCrcCorruption {
     System.out.println("TestCrcCorruption with default parameters");
     Configuration conf1 = new HdfsConfiguration();
     conf1.setInt(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 3 * 1000);
-    DFSTestUtil util1 = new DFSTestUtil("TestCrcCorruption", 40, 3, 8*1024);
+    DFSTestUtil util1 = new DFSTestUtil.Builder().setName("TestCrcCorruption").
+        setNumFiles(40).build();
     thistest(conf1, util1);
 
     //
@@ -216,7 +302,8 @@ public class TestCrcCorruption {
     Configuration conf2 = new HdfsConfiguration();
     conf2.setInt(DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY, 17);
     conf2.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, 34);
-    DFSTestUtil util2 = new DFSTestUtil("TestCrcCorruption", 40, 3, 400);
+    DFSTestUtil util2 = new DFSTestUtil.Builder().setName("TestCrcCorruption").
+        setNumFiles(40).setMaxSize(400).build();
     thistest(conf2, util2);
   }
 
@@ -250,6 +337,8 @@ public class TestCrcCorruption {
     short replFactor = (short)numDataNodes;
     Configuration conf = new Configuration();
     conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, numDataNodes);
+    // Set short retry timeouts so this test runs faster
+    conf.setInt(DFSConfigKeys.DFS_CLIENT_RETRY_WINDOW_BASE, 10);
     MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDataNodes).build();
 
     try {

@@ -19,10 +19,13 @@
 package org.apache.hadoop.io;
 
 import junit.framework.TestCase;
-
+import java.io.IOException;
+import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.util.Random;
+import com.google.common.base.Charsets;
+import com.google.common.primitives.Bytes;
 
 /** Unit tests for LargeUTF8. */
 public class TestText extends TestCase {
@@ -107,7 +110,6 @@ public class TestText extends TestCase {
     }
   }
   
-  
   public void testIO() throws Exception {
     DataOutputBuffer out = new DataOutputBuffer();
     DataInputBuffer in = new DataInputBuffer();
@@ -135,6 +137,40 @@ public class TestText extends TestCase {
                                  out.getLength()-strLenSize, "UTF-8");
       assertTrue(before.equals(after2));
     }
+  }
+  
+  public void doTestLimitedIO(String str, int len) throws IOException {
+    DataOutputBuffer out = new DataOutputBuffer();
+    DataInputBuffer in = new DataInputBuffer();
+
+    out.reset();
+    try {
+      Text.writeString(out, str, len);
+      fail("expected writeString to fail when told to write a string " +
+          "that was too long!  The string was '" + str + "'");
+    } catch (IOException e) {
+    }
+    Text.writeString(out, str, len + 1);
+
+    // test that it reads correctly
+    in.reset(out.getData(), out.getLength());
+    in.mark(len);
+    String after;
+    try {
+      after = Text.readString(in, len);
+      fail("expected readString to fail when told to read a string " +
+          "that was too long!  The string was '" + str + "'");
+    } catch (IOException e) {
+    }
+    in.reset();
+    after = Text.readString(in, len + 1);
+    assertTrue(str.equals(after));
+  }
+  
+  public void testLimitedIO() throws Exception {
+    doTestLimitedIO("abcd", 3);
+    doTestLimitedIO("foo bar baz", 10);
+    doTestLimitedIO("1", 0);
   }
 
   public void testCompare() throws Exception {
@@ -177,10 +213,13 @@ public class TestText extends TestCase {
           
       assertEquals(ret1, ret2);
           
-      // test equal
-      assertEquals(txt1.compareTo(txt3), 0);
-      assertEquals(comparator.compare(out1.getData(), 0, out3.getLength(),
-                                      out3.getData(), 0, out3.getLength()), 0);
+      assertEquals("Equivalence of different txt objects, same content" ,
+              0,
+              txt1.compareTo(txt3));
+      assertEquals("Equvalence of data output buffers",
+              0,
+              comparator.compare(out1.getData(), 0, out3.getLength(),
+                      out3.getData(), 0, out3.getLength()));
     }
   }
       
@@ -190,16 +229,6 @@ public class TestText extends TestCase {
     assertTrue(text.find("ac")==-1);
     assertTrue(text.find("\u20ac")==4);
     assertTrue(text.find("\u20ac", 5)==11);
-  }
-
-  public void testClear() {
-	Text text = new Text();
-	assertEquals("", text.toString());
-	assertEquals(0, text.getBytes().length);
-	text = new Text("abcd\u20acbdcd\u20ac");
-	text.clear();
-	assertEquals("", text.toString());
-	assertEquals(0, text.getBytes().length);
   }
 
   public void testFindAfterUpdatingContents() throws Exception {
@@ -215,6 +244,30 @@ public class TestText extends TestCase {
     byte [] utf8 = text.getBytes();
     int length = text.getLength();
     Text.validateUTF8(utf8, 0, length);
+  }
+
+  public void testClear() throws Exception {
+    // Test lengths on an empty text object
+    Text text = new Text();
+    assertEquals(
+        "Actual string on an empty text object must be an empty string",
+        "", text.toString());
+    assertEquals("Underlying byte array length must be zero",
+        0, text.getBytes().length);
+    assertEquals("String's length must be zero",
+        0, text.getLength());
+
+    // Test if clear works as intended
+    text = new Text("abcd\u20acbdcd\u20ac");
+    int len = text.getLength();
+    text.clear();
+    assertEquals("String must be empty after clear()",
+        "", text.toString());
+    assertTrue(
+        "Length of the byte array must not decrease after clear()",
+        text.getBytes().length >= len);
+    assertEquals("Length of the string must be reset to 0 after clear()",
+        0, text.getLength());
   }
 
   public void testTextText() throws CharacterCodingException {
@@ -236,8 +289,9 @@ public class TestText extends TestCase {
       super(name);
     }
 
+    @Override
     public void run() {
-      String name = this.getName();
+      final String name = this.getName();
       DataOutputBuffer out = new DataOutputBuffer();
       DataInputBuffer in = new DataInputBuffer();
       for (int i=0; i < 1000; ++i) {
@@ -248,7 +302,7 @@ public class TestText extends TestCase {
           in.reset(out.getData(), out.getLength());
           String s = WritableUtils.readString(in);
           
-          assertEquals(name, s);
+          assertEquals("input buffer reset contents = " + name, name, s);
         } catch (Exception ioe) {
           throw new RuntimeException(ioe);
         }
@@ -272,7 +326,108 @@ public class TestText extends TestCase {
       (new Text("foo"),
        "{\"type\":\"string\",\"java-class\":\"org.apache.hadoop.io.Text\"}");
   }
+  
+  /**
+   * 
+   */
+  public void testCharAt() {
+    String line = "adsawseeeeegqewgasddga";
+    Text text = new Text(line);
+    for (int i = 0; i < line.length(); i++) {
+      assertTrue("testCharAt error1 !!!", text.charAt(i) == line.charAt(i));
+    }    
+    assertEquals("testCharAt error2 !!!", -1, text.charAt(-1));    
+    assertEquals("testCharAt error3 !!!", -1, text.charAt(100));
+  }    
+  
+  /**
+   * test {@code Text} readFields/write operations
+   */
+  public void testReadWriteOperations() {
+    String line = "adsawseeeeegqewgasddga";
+    byte[] inputBytes = line.getBytes();       
+    inputBytes = Bytes.concat(new byte[] {(byte)22}, inputBytes);        
+    
+    DataInputBuffer in = new DataInputBuffer();
+    DataOutputBuffer out = new DataOutputBuffer();
+    Text text = new Text(line);
+    try {      
+      in.reset(inputBytes, inputBytes.length);
+      text.readFields(in);      
+    } catch(Exception ex) {
+      fail("testReadFields error !!!");
+    }    
+    try {
+      text.write(out);
+    } catch(IOException ex) {      
+    } catch(Exception ex) {
+      fail("testReadWriteOperations error !!!");
+    }        
+  }
 
+  public void testReadWithKnownLength() throws IOException {
+    String line = "hello world";
+    byte[] inputBytes = line.getBytes(Charsets.UTF_8);
+    DataInputBuffer in = new DataInputBuffer();
+    Text text = new Text();
+
+    in.reset(inputBytes, inputBytes.length);
+    text.readWithKnownLength(in, 5);
+    assertEquals("hello", text.toString());
+
+    // Read longer length, make sure it lengthens
+    in.reset(inputBytes, inputBytes.length);
+    text.readWithKnownLength(in, 7);
+    assertEquals("hello w", text.toString());
+
+    // Read shorter length, make sure it shortens
+    in.reset(inputBytes, inputBytes.length);
+    text.readWithKnownLength(in, 2);
+    assertEquals("he", text.toString());
+  }
+  
+  /**
+   * test {@code Text.bytesToCodePoint(bytes) } 
+   * with {@code BufferUnderflowException}
+   * 
+   */
+  public void testBytesToCodePoint() {
+    try {
+      ByteBuffer bytes = ByteBuffer.wrap(new byte[] {-2, 45, 23, 12, 76, 89});                                      
+      Text.bytesToCodePoint(bytes);      
+      assertTrue("testBytesToCodePoint error !!!", bytes.position() == 6 );                      
+    } catch (BufferUnderflowException ex) {
+      fail("testBytesToCodePoint unexp exception");
+    } catch (Exception e) {
+      fail("testBytesToCodePoint unexp exception");
+    }    
+  }
+  
+  public void testbytesToCodePointWithInvalidUTF() {
+    try {                 
+      Text.bytesToCodePoint(ByteBuffer.wrap(new byte[] {-2}));
+      fail("testbytesToCodePointWithInvalidUTF error unexp exception !!!");
+    } catch (BufferUnderflowException ex) {      
+    } catch(Exception e) {
+      fail("testbytesToCodePointWithInvalidUTF error unexp exception !!!");
+    }
+  }
+  
+  public void testUtf8Length() {
+    assertEquals("testUtf8Length1 error   !!!",
+            1, Text.utf8Length(new String(new char[]{(char)1})));
+    assertEquals("testUtf8Length127 error !!!",
+            1, Text.utf8Length(new String(new char[]{(char)127})));
+    assertEquals("testUtf8Length128 error !!!",
+            2, Text.utf8Length(new String(new char[]{(char)128})));
+    assertEquals("testUtf8Length193 error !!!",
+            2, Text.utf8Length(new String(new char[]{(char)193})));
+    assertEquals("testUtf8Length225 error !!!",
+            2, Text.utf8Length(new String(new char[]{(char)225})));
+    assertEquals("testUtf8Length254 error !!!",
+            2, Text.utf8Length(new String(new char[]{(char)254})));
+  }
+  
   public static void main(String[] args)  throws Exception
   {
     TestText test = new TestText("main");

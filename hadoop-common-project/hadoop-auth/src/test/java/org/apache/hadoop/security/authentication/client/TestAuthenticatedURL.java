@@ -13,55 +13,29 @@
  */
 package org.apache.hadoop.security.authentication.client;
 
-import junit.framework.TestCase;
+import org.junit.Assert;
+import org.junit.Test;
 import org.mockito.Mockito;
 
 import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class TestAuthenticatedURL extends TestCase {
+public class TestAuthenticatedURL {
 
+  @Test
   public void testToken() throws Exception {
     AuthenticatedURL.Token token = new AuthenticatedURL.Token();
-    assertFalse(token.isSet());
+    Assert.assertFalse(token.isSet());
     token = new AuthenticatedURL.Token("foo");
-    assertTrue(token.isSet());
-    assertEquals("foo", token.toString());
-
-    AuthenticatedURL.Token token1 = new AuthenticatedURL.Token();
-    AuthenticatedURL.Token token2 = new AuthenticatedURL.Token();
-    assertEquals(token1.hashCode(), token2.hashCode());
-    assertTrue(token1.equals(token2));
-
-    token1 = new AuthenticatedURL.Token();
-    token2 = new AuthenticatedURL.Token("foo");
-    assertNotSame(token1.hashCode(), token2.hashCode());
-    assertFalse(token1.equals(token2));
-
-    token1 = new AuthenticatedURL.Token("foo");
-    token2 = new AuthenticatedURL.Token();
-    assertNotSame(token1.hashCode(), token2.hashCode());
-    assertFalse(token1.equals(token2));
-
-    token1 = new AuthenticatedURL.Token("foo");
-    token2 = new AuthenticatedURL.Token("foo");
-    assertEquals(token1.hashCode(), token2.hashCode());
-    assertTrue(token1.equals(token2));
-
-    token1 = new AuthenticatedURL.Token("bar");
-    token2 = new AuthenticatedURL.Token("foo");
-    assertNotSame(token1.hashCode(), token2.hashCode());
-    assertFalse(token1.equals(token2));
-
-    token1 = new AuthenticatedURL.Token("foo");
-    token2 = new AuthenticatedURL.Token("bar");
-    assertNotSame(token1.hashCode(), token2.hashCode());
-    assertFalse(token1.equals(token2));
+    Assert.assertTrue(token.isSet());
+    Assert.assertEquals("foo", token.toString());
   }
 
+  @Test
   public void testInjectToken() throws Exception {
     HttpURLConnection conn = Mockito.mock(HttpURLConnection.class);
     AuthenticatedURL.Token token = new AuthenticatedURL.Token();
@@ -70,6 +44,7 @@ public class TestAuthenticatedURL extends TestCase {
     Mockito.verify(conn).addRequestProperty(Mockito.eq("Cookie"), Mockito.anyString());
   }
 
+  @Test
   public void testExtractTokenOK() throws Exception {
     HttpURLConnection conn = Mockito.mock(HttpURLConnection.class);
 
@@ -85,9 +60,10 @@ public class TestAuthenticatedURL extends TestCase {
     AuthenticatedURL.Token token = new AuthenticatedURL.Token();
     AuthenticatedURL.extractToken(conn, token);
 
-    assertEquals(tokenStr, token.toString());
+    Assert.assertEquals(tokenStr, token.toString());
   }
 
+  @Test
   public void testExtractTokenFail() throws Exception {
     HttpURLConnection conn = Mockito.mock(HttpURLConnection.class);
 
@@ -100,14 +76,43 @@ public class TestAuthenticatedURL extends TestCase {
     headers.put("Set-Cookie", cookies);
     Mockito.when(conn.getHeaderFields()).thenReturn(headers);
 
+    AuthenticatedURL.Token token = new AuthenticatedURL.Token();
+    token.set("bar");
     try {
-      AuthenticatedURL.extractToken(conn, new AuthenticatedURL.Token());
-      fail();
+      AuthenticatedURL.extractToken(conn, token);
+      Assert.fail();
     } catch (AuthenticationException ex) {
       // Expected
+      Assert.assertFalse(token.isSet());
     } catch (Exception ex) {
-      fail();
+      Assert.fail();
     }
+  }
+
+  @Test
+  public void testConnectionConfigurator() throws Exception {
+    HttpURLConnection conn = Mockito.mock(HttpURLConnection.class);
+    Mockito.when(conn.getResponseCode()).
+        thenReturn(HttpURLConnection.HTTP_UNAUTHORIZED);
+
+    ConnectionConfigurator connConf =
+        Mockito.mock(ConnectionConfigurator.class);
+    Mockito.when(connConf.configure(Mockito.<HttpURLConnection>any())).
+        thenReturn(conn);
+
+    Authenticator authenticator = Mockito.mock(Authenticator.class);
+
+    AuthenticatedURL aURL = new AuthenticatedURL(authenticator, connConf);
+    aURL.openConnection(new URL("http://foo"), new AuthenticatedURL.Token());
+    Mockito.verify(connConf).configure(Mockito.<HttpURLConnection>any());
+  }
+
+  @Test
+  public void testGetAuthenticator() throws Exception {
+    Authenticator authenticator = Mockito.mock(Authenticator.class);
+
+    AuthenticatedURL aURL = new AuthenticatedURL(authenticator);
+    Assert.assertEquals(authenticator, aURL.getAuthenticator());
   }
 
 }

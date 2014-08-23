@@ -16,24 +16,20 @@
  */
 package org.apache.hadoop.security;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION;
+
 import java.io.IOException;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.net.URL;
 import java.net.UnknownHostException;
-import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.security.PrivilegedExceptionAction;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.ServiceLoader;
-import java.util.Set;
 
-import javax.security.auth.Subject;
 import javax.security.auth.kerberos.KerberosPrincipal;
 import javax.security.auth.kerberos.KerberosTicket;
 
@@ -45,14 +41,16 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenInfo;
 
-import com.google.common.annotations.VisibleForTesting;
 
 //this will need to be replaced someday when there is a suitable replacement
 import sun.net.dns.ResolverConfiguration;
 import sun.net.util.IPAddressUtil;
+
+import com.google.common.annotations.VisibleForTesting;
 
 @InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
 @InterfaceStability.Evolving
@@ -66,46 +64,25 @@ public class SecurityUtil {
   static boolean useIpForTokenService;
   @VisibleForTesting
   static HostResolver hostResolver;
-  
+
   static {
-    boolean useIp = new Configuration().getBoolean(
-      CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP,
-      CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT);
+    Configuration conf = new Configuration();
+    boolean useIp = conf.getBoolean(
+        CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP,
+        CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT);
     setTokenServiceUseIp(useIp);
   }
-  
+
   /**
    * For use only by tests and initialization
    */
   @InterfaceAudience.Private
-  static void setTokenServiceUseIp(boolean flag) {
+  @VisibleForTesting
+  public static void setTokenServiceUseIp(boolean flag) {
     useIpForTokenService = flag;
     hostResolver = !useIpForTokenService
         ? new QualifiedHostResolver()
         : new StandardHostResolver();
-  }
-  
-  /**
-   * Find the original TGT within the current subject's credentials. Cross-realm
-   * TGT's of the form "krbtgt/TWO.COM@ONE.COM" may be present.
-   * 
-   * @return The TGT from the current subject
-   * @throws IOException
-   *           if TGT can't be found
-   */
-  private static KerberosTicket getTgtFromSubject() throws IOException {
-    Subject current = Subject.getSubject(AccessController.getContext());
-    if (current == null) {
-      throw new IOException(
-          "Can't get TGT from current Subject, because it is null");
-    }
-    Set<KerberosTicket> tickets = current
-        .getPrivateCredentials(KerberosTicket.class);
-    for (KerberosTicket t : tickets) {
-      if (isOriginalTGT(t))
-        return t;
-    }
-    throw new IOException("Failed to find TGT from current Subject:"+current);
   }
   
   /**
@@ -135,79 +112,6 @@ public class SecurityUtil {
   }
 
   /**
-   * Explicitly pull the service ticket for the specified host.  This solves a
-   * problem with Java's Kerberos SSL problem where the client cannot 
-   * authenticate against a cross-realm service.  It is necessary for clients
-   * making kerberized https requests to call this method on the target URL
-   * to ensure that in a cross-realm environment the remote host will be 
-   * successfully authenticated.  
-   * 
-   * This method is internal to Hadoop and should not be used by other 
-   * applications.  This method should not be considered stable or open: 
-   * it will be removed when the Java behavior is changed.
-   * 
-   * @param remoteHost Target URL the krb-https client will access
-   * @throws IOException if the service ticket cannot be retrieved
-   */
-  public static void fetchServiceTicket(URL remoteHost) throws IOException {
-    if(!UserGroupInformation.isSecurityEnabled())
-      return;
-    
-    String serviceName = "host/" + remoteHost.getHost();
-    if (LOG.isDebugEnabled())
-      LOG.debug("Fetching service ticket for host at: " + serviceName);
-    Object serviceCred = null;
-    Method credsToTicketMeth;
-    Class<?> krb5utilClass;
-    try {
-      Class<?> principalClass;
-      Class<?> credentialsClass;
-      
-      if (System.getProperty("java.vendor").contains("IBM")) {
-        principalClass = Class.forName("com.ibm.security.krb5.PrincipalName");
-        
-        credentialsClass = Class.forName("com.ibm.security.krb5.Credentials");
-        krb5utilClass = Class.forName("com.ibm.security.jgss.mech.krb5");
-      } else {
-        principalClass = Class.forName("sun.security.krb5.PrincipalName");
-        credentialsClass = Class.forName("sun.security.krb5.Credentials");
-        krb5utilClass = Class.forName("sun.security.jgss.krb5.Krb5Util");
-      }
-      @SuppressWarnings("rawtypes")
-      Constructor principalConstructor = principalClass.getConstructor(String.class, 
-          int.class);
-      Field KRB_NT_SRV_HST = principalClass.getDeclaredField("KRB_NT_SRV_HST");
-      Method acquireServiceCredsMeth = 
-          credentialsClass.getDeclaredMethod("acquireServiceCreds", 
-              String.class, credentialsClass);
-      Method ticketToCredsMeth = krb5utilClass.getDeclaredMethod("ticketToCreds", 
-          KerberosTicket.class);
-      credsToTicketMeth = krb5utilClass.getDeclaredMethod("credsToTicket", 
-          credentialsClass);
-      
-      Object principal = principalConstructor.newInstance(serviceName,
-          KRB_NT_SRV_HST.get(principalClass));
-      
-      serviceCred = acquireServiceCredsMeth.invoke(credentialsClass, 
-          principal.toString(), 
-          ticketToCredsMeth.invoke(krb5utilClass, getTgtFromSubject()));
-    } catch (Exception e) {
-      throw new IOException("Can't get service ticket for: "
-          + serviceName, e);
-    }
-    if (serviceCred == null) {
-      throw new IOException("Can't get service ticket for " + serviceName);
-    }
-    try {
-      Subject.getSubject(AccessController.getContext()).getPrivateCredentials()
-          .add(credsToTicketMeth.invoke(krb5utilClass, serviceCred));
-    } catch (Exception e) {
-      throw new IOException("Can't get service ticket for: "
-          + serviceName, e);
-    }
-  }
-  
-  /**
    * Convert Kerberos principal name pattern to valid Kerberos principal
    * names. It replaces hostname pattern with hostname, which should be
    * fully-qualified domain name. If hostname is null or "0.0.0.0", it uses
@@ -220,6 +124,8 @@ public class SecurityUtil {
    * @return converted Kerberos principal name
    * @throws IOException if the client address cannot be determined
    */
+  @InterfaceAudience.Public
+  @InterfaceStability.Evolving
   public static String getServerPrincipal(String principalConfig,
       String hostname) throws IOException {
     String[] components = getComponents(principalConfig);
@@ -245,6 +151,8 @@ public class SecurityUtil {
    * @return converted Kerberos principal name
    * @throws IOException if the client address cannot be determined
    */
+  @InterfaceAudience.Public
+  @InterfaceStability.Evolving
   public static String getServerPrincipal(String principalConfig,
       InetAddress addr) throws IOException {
     String[] components = getComponents(principalConfig);
@@ -269,10 +177,10 @@ public class SecurityUtil {
   private static String replacePattern(String[] components, String hostname)
       throws IOException {
     String fqdn = hostname;
-    if (fqdn == null || fqdn.equals("") || fqdn.equals("0.0.0.0")) {
+    if (fqdn == null || fqdn.isEmpty() || fqdn.equals("0.0.0.0")) {
       fqdn = getLocalHostName();
     }
-    return components[0] + "/" + fqdn.toLowerCase() + "@" + components[2];
+    return components[0] + "/" + fqdn.toLowerCase(Locale.US) + "@" + components[2];
   }
   
   static String getLocalHostName() throws UnknownHostException {
@@ -292,6 +200,8 @@ public class SecurityUtil {
    *          the key to look for user's Kerberos principal name in conf
    * @throws IOException if login fails
    */
+  @InterfaceAudience.Public
+  @InterfaceStability.Evolving
   public static void login(final Configuration conf,
       final String keytabFileKey, final String userNameKey) throws IOException {
     login(conf, keytabFileKey, userNameKey, getLocalHostName());
@@ -312,6 +222,8 @@ public class SecurityUtil {
    *          hostname to use for substitution
    * @throws IOException if the config doesn't specify a keytab
    */
+  @InterfaceAudience.Public
+  @InterfaceStability.Evolving
   public static void login(final Configuration conf,
       final String keytabFileKey, final String userNameKey, String hostname)
       throws IOException {
@@ -378,12 +290,10 @@ public class SecurityUtil {
    */
   public static KerberosInfo 
   getKerberosInfo(Class<?> protocol, Configuration conf) {
-    synchronized (testProviders) {
-      for(SecurityInfo provider: testProviders) {
-        KerberosInfo result = provider.getKerberosInfo(protocol, conf);
-        if (result != null) {
-          return result;
-        }
+    for(SecurityInfo provider: testProviders) {
+      KerberosInfo result = provider.getKerberosInfo(protocol, conf);
+      if (result != null) {
+        return result;
       }
     }
     
@@ -406,13 +316,11 @@ public class SecurityUtil {
    * @return the TokenInfo or null if it has no KerberosInfo defined
    */
   public static TokenInfo getTokenInfo(Class<?> protocol, Configuration conf) {
-    synchronized (testProviders) {
-      for(SecurityInfo provider: testProviders) {
-        TokenInfo result = provider.getTokenInfo(protocol, conf);
-        if (result != null) {
-          return result;
-        }      
-      }
+    for(SecurityInfo provider: testProviders) {
+      TokenInfo result = provider.getTokenInfo(protocol, conf);
+      if (result != null) {
+        return result;
+      }      
     }
     
     synchronized (securityInfoProviders) {
@@ -504,6 +412,41 @@ public class SecurityUtil {
       return action.run();
     }
   }
+  
+  /**
+   * Perform the given action as the daemon's login user. If an
+   * InterruptedException is thrown, it is converted to an IOException.
+   *
+   * @param action the action to perform
+   * @return the result of the action
+   * @throws IOException in the event of error
+   */
+  public static <T> T doAsLoginUser(PrivilegedExceptionAction<T> action)
+      throws IOException {
+    return doAsUser(UserGroupInformation.getLoginUser(), action);
+  }
+
+  /**
+   * Perform the given action as the daemon's current user. If an
+   * InterruptedException is thrown, it is converted to an IOException.
+   *
+   * @param action the action to perform
+   * @return the result of the action
+   * @throws IOException in the event of error
+   */
+  public static <T> T doAsCurrentUser(PrivilegedExceptionAction<T> action)
+      throws IOException {
+    return doAsUser(UserGroupInformation.getCurrentUser(), action);
+  }
+
+  private static <T> T doAsUser(UserGroupInformation ugi,
+      PrivilegedExceptionAction<T> action) throws IOException {
+    try {
+      return ugi.doAs(action);
+    } catch (InterruptedException ie) {
+      throw new IOException(ie);
+    }
+  }
 
   /**
    * Resolves a host subject to the security requirements determined by
@@ -527,6 +470,7 @@ public class SecurityUtil {
    * Uses standard java host resolution
    */
   static class StandardHostResolver implements HostResolver {
+    @Override
     public InetAddress getByName(String host) throws UnknownHostException {
       return InetAddress.getByName(host);
     }
@@ -571,6 +515,7 @@ public class SecurityUtil {
      * @return InetAddress with the fully qualified hostname or ip
      * @throws UnknownHostException if host does not exist
      */
+    @Override
     public InetAddress getByName(String host) throws UnknownHostException {
       InetAddress addr = null;
 
@@ -656,10 +601,22 @@ public class SecurityUtil {
     }
   }
 
-  public static void initKrb5CipherSuites() {
-    if (UserGroupInformation.isSecurityEnabled()) {
-      System.setProperty("https.cipherSuites",
-          Krb5AndCertsSslSocketConnector.KRB5_CIPHER_SUITES.get(0));
+  public static AuthenticationMethod getAuthenticationMethod(Configuration conf) {
+    String value = conf.get(HADOOP_SECURITY_AUTHENTICATION, "simple");
+    try {
+      return Enum.valueOf(AuthenticationMethod.class, value.toUpperCase(Locale.ENGLISH));
+    } catch (IllegalArgumentException iae) {
+      throw new IllegalArgumentException("Invalid attribute value for " +
+          HADOOP_SECURITY_AUTHENTICATION + " of " + value);
     }
+  }
+
+  public static void setAuthenticationMethod(
+      AuthenticationMethod authenticationMethod, Configuration conf) {
+    if (authenticationMethod == null) {
+      authenticationMethod = AuthenticationMethod.SIMPLE;
+    }
+    conf.set(HADOOP_SECURITY_AUTHENTICATION,
+             authenticationMethod.toString().toLowerCase(Locale.ENGLISH));
   }
 }

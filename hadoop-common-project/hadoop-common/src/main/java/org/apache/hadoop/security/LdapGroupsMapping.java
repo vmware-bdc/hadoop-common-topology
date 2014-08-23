@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Hashtable;
 import java.util.List;
 
+import javax.naming.CommunicationException;
 import javax.naming.Context;
 import javax.naming.NamingEnumeration;
 import javax.naming.NamingException;
@@ -39,6 +40,7 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.IOUtils;
 
 /**
  * An implementation of {@link GroupMappingServiceProvider} which
@@ -143,7 +145,15 @@ public class LdapGroupsMapping
    */
   public static final String GROUP_NAME_ATTR_KEY = LDAP_CONFIG_PREFIX + ".search.attr.group.name";
   public static final String GROUP_NAME_ATTR_DEFAULT = "cn";
-  
+
+  /*
+   * LDAP {@link SearchControls} attribute to set the time limit
+   * for an invoked directory search. Prevents infinite wait cases.
+   */
+  public static final String DIRECTORY_SEARCH_TIMEOUT =
+    LDAP_CONFIG_PREFIX + ".directory.search.timeout";
+  public static final int DIRECTORY_SEARCH_TIMEOUT_DEFAULT = 10000; // 10s
+
   private static final Log LOG = LogFactory.getLog(LdapGroupsMapping.class);
 
   private static final SearchControls SEARCH_CONTROLS = new SearchControls();
@@ -166,6 +176,8 @@ public class LdapGroupsMapping
   private String groupMemberAttr;
   private String groupNameAttr;
 
+  public static int RECONNECT_RETRY_COUNT = 3;
+  
   /**
    * Returns list of groups for a user.
    * 
@@ -178,40 +190,70 @@ public class LdapGroupsMapping
    */
   @Override
   public synchronized List<String> getGroups(String user) throws IOException {
+    List<String> emptyResults = new ArrayList<String>();
+    /*
+     * Normal garbage collection takes care of removing Context instances when they are no longer in use. 
+     * Connections used by Context instances being garbage collected will be closed automatically.
+     * So in case connection is closed and gets CommunicationException, retry some times with new new DirContext/connection. 
+     */
+    try {
+      return doGetGroups(user);
+    } catch (CommunicationException e) {
+      LOG.warn("Connection is closed, will try to reconnect");
+    } catch (NamingException e) {
+      LOG.warn("Exception trying to get groups for user " + user + ": "
+          + e.getMessage());
+      return emptyResults;
+    }
+
+    int retryCount = 0;
+    while (retryCount ++ < RECONNECT_RETRY_COUNT) {
+      //reset ctx so that new DirContext can be created with new connection
+      this.ctx = null;
+      
+      try {
+        return doGetGroups(user);
+      } catch (CommunicationException e) {
+        LOG.warn("Connection being closed, reconnecting failed, retryCount = " + retryCount);
+      } catch (NamingException e) {
+        LOG.warn("Exception trying to get groups for user " + user + ":"
+            + e.getMessage());
+        return emptyResults;
+      }
+    }
+    
+    return emptyResults;
+  }
+  
+  List<String> doGetGroups(String user) throws NamingException {
     List<String> groups = new ArrayList<String>();
 
-    try {
-      DirContext ctx = getDirContext();
+    DirContext ctx = getDirContext();
 
-      // Search for the user. We'll only ever need to look at the first result
-      NamingEnumeration<SearchResult> results = ctx.search(baseDN,
-                                                           userSearchFilter,
-                                                           new Object[]{user},
-                                                           SEARCH_CONTROLS);
-      if (results.hasMoreElements()) {
-        SearchResult result = results.nextElement();
-        String userDn = result.getNameInNamespace();
+    // Search for the user. We'll only ever need to look at the first result
+    NamingEnumeration<SearchResult> results = ctx.search(baseDN,
+        userSearchFilter,
+        new Object[]{user},
+        SEARCH_CONTROLS);
+    if (results.hasMoreElements()) {
+      SearchResult result = results.nextElement();
+      String userDn = result.getNameInNamespace();
 
-        NamingEnumeration<SearchResult> groupResults =
+      NamingEnumeration<SearchResult> groupResults =
           ctx.search(baseDN,
-                     "(&" + groupSearchFilter + "(" + groupMemberAttr + "={0}))",
-                     new Object[]{userDn},
-                     SEARCH_CONTROLS);
-        while (groupResults.hasMoreElements()) {
-          SearchResult groupResult = groupResults.nextElement();
-          Attribute groupName = groupResult.getAttributes().get(groupNameAttr);
-          groups.add(groupName.get().toString());
-        }
+              "(&" + groupSearchFilter + "(" + groupMemberAttr + "={0}))",
+              new Object[]{userDn},
+              SEARCH_CONTROLS);
+      while (groupResults.hasMoreElements()) {
+        SearchResult groupResult = groupResults.nextElement();
+        Attribute groupName = groupResult.getAttributes().get(groupNameAttr);
+        groups.add(groupName.get().toString());
       }
-    } catch (NamingException e) {
-      LOG.warn("Exception trying to get groups for user " + user, e);
-      return new ArrayList<String>();
     }
 
     return groups;
   }
 
-  @SuppressWarnings("deprecation")
   DirContext getDirContext() throws NamingException {
     if (ctx == null) {
       // Set up the initial environment for LDAP connectivity
@@ -236,7 +278,7 @@ public class LdapGroupsMapping
 
     return ctx;
   }
-
+  
   /**
    * Caches groups, no need to do that for this provider
    */
@@ -270,15 +312,15 @@ public class LdapGroupsMapping
     useSsl = conf.getBoolean(LDAP_USE_SSL_KEY, LDAP_USE_SSL_DEFAULT);
     keystore = conf.get(LDAP_KEYSTORE_KEY, LDAP_KEYSTORE_DEFAULT);
     
-    keystorePass =
-        conf.get(LDAP_KEYSTORE_PASSWORD_KEY, LDAP_KEYSTORE_PASSWORD_DEFAULT);
+    keystorePass = getPassword(conf, LDAP_KEYSTORE_PASSWORD_KEY,
+        LDAP_KEYSTORE_PASSWORD_DEFAULT);
     if (keystorePass.isEmpty()) {
-      keystorePass = extractPassword(
-        conf.get(LDAP_KEYSTORE_PASSWORD_KEY, LDAP_KEYSTORE_PASSWORD_DEFAULT));
+      keystorePass = extractPassword(conf.get(LDAP_KEYSTORE_PASSWORD_FILE_KEY,
+          LDAP_KEYSTORE_PASSWORD_FILE_DEFAULT));
     }
     
     bindUser = conf.get(BIND_USER_KEY, BIND_USER_DEFAULT);
-    bindPassword = conf.get(BIND_PASSWORD_KEY, BIND_PASSWORD_DEFAULT);
+    bindPassword = getPassword(conf, BIND_PASSWORD_KEY, BIND_PASSWORD_DEFAULT);
     if (bindPassword.isEmpty()) {
       bindPassword = extractPassword(
           conf.get(BIND_PASSWORD_FILE_KEY, BIND_PASSWORD_FILE_DEFAULT));
@@ -294,9 +336,30 @@ public class LdapGroupsMapping
     groupNameAttr =
         conf.get(GROUP_NAME_ATTR_KEY, GROUP_NAME_ATTR_DEFAULT);
 
+    int dirSearchTimeout = conf.getInt(DIRECTORY_SEARCH_TIMEOUT, DIRECTORY_SEARCH_TIMEOUT_DEFAULT);
+    SEARCH_CONTROLS.setTimeLimit(dirSearchTimeout);
+
     this.conf = conf;
   }
-  
+
+  String getPassword(Configuration conf, String alias, String defaultPass) {
+    String password = null;
+    try {
+      char[] passchars = conf.getPassword(alias);
+      if (passchars != null) {
+        password = new String(passchars);
+      }
+      else {
+        password = defaultPass;
+      }
+    }
+    catch (IOException ioe) {
+      LOG.warn("Exception while trying to password for alias " + alias + ": "
+          + ioe.getMessage());
+    }
+    return password;
+  }
+
   String extractPassword(String pwFile) {
     if (pwFile.isEmpty()) {
       // If there is no password file defined, we'll assume that we should do
@@ -304,18 +367,20 @@ public class LdapGroupsMapping
       return "";
     }
     
+    Reader reader = null;
     try {
       StringBuilder password = new StringBuilder();
-      Reader reader = new FileReader(pwFile);
+      reader = new FileReader(pwFile);
       int c = reader.read();
       while (c > -1) {
         password.append((char)c);
         c = reader.read();
       }
-      reader.close();
-      return password.toString();
+      return password.toString().trim();
     } catch (IOException ioe) {
       throw new RuntimeException("Could not read password file: " + pwFile, ioe);
+    } finally {
+      IOUtils.cleanup(LOG, reader);
     }
   }
 }

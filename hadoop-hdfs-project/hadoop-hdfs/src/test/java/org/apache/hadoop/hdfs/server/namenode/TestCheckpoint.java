@@ -18,23 +18,38 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 import static org.apache.hadoop.hdfs.server.common.Util.fileAsURI;
-import junit.framework.TestCase;
-import java.net.InetSocketAddress;
+import static org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil.assertNNHasCheckpoints;
+import static org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil.getNameNodeCurrentDirs;
+import static org.apache.hadoop.test.MetricsAsserts.assertCounterGt;
+import static org.apache.hadoop.test.MetricsAsserts.assertGaugeGt;
+import static org.apache.hadoop.test.MetricsAsserts.getMetrics;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FilenameFilter;
 import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.lang.management.ManagementFactory;
+import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Random;
 
+import com.google.common.io.Files;
 import org.apache.commons.cli.ParseException;
-import org.apache.commons.logging.impl.Log4JLogger;
-import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdfs.DFSUtil;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileContext;
@@ -42,27 +57,41 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.DFSUtil.ErrorSimulator;
+import org.apache.hadoop.hdfs.DFSTestUtil;
+import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
+import org.apache.hadoop.hdfs.server.namenode.FileJournalManager.EditLogFile;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
+import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
 import org.apache.hadoop.hdfs.server.namenode.SecondaryNameNode.CheckpointStorage;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLog;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
-import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.metrics2.MetricsRecordBuilder;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.GenericTestUtils.DelayAnswer;
+import org.apache.hadoop.test.GenericTestUtils.LogCapturer;
+import org.apache.hadoop.test.PathUtils;
+import org.apache.hadoop.util.ExitUtil;
+import org.apache.hadoop.util.ExitUtil.ExitException;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.log4j.Level;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.mockito.ArgumentMatcher;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
@@ -74,44 +103,44 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.primitives.Ints;
 
-import static org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil.assertNNHasCheckpoints;
-import static org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil.getNameNodeCurrentDirs;
-
 /**
  * This class tests the creation and validation of a checkpoint.
  */
-public class TestCheckpoint extends TestCase {
+public class TestCheckpoint {
 
   static {
     ((Log4JLogger)FSImage.LOG).getLogger().setLevel(Level.ALL);
   }
 
   static final Log LOG = LogFactory.getLog(TestCheckpoint.class); 
+  static final String NN_METRICS = "NameNodeActivity";
   
   static final long seed = 0xDEADBEEFL;
   static final int blockSize = 4096;
   static final int fileSize = 8192;
   static final int numDatanodes = 3;
   short replication = 3;
-    
-  @Override
-  public void setUp() throws IOException {
-    FileUtil.fullyDeleteContents(new File(MiniDFSCluster.getBaseDirectory()));
-    ErrorSimulator.initializeErrorSimulationEvent(5);
-  }
 
-  static void writeFile(FileSystem fileSys, Path name, int repl)
-    throws IOException {
-    FSDataOutputStream stm = fileSys.create(name, true, fileSys.getConf()
-        .getInt(CommonConfigurationKeys.IO_FILE_BUFFER_SIZE_KEY, 4096),
-        (short) repl, blockSize);
-    byte[] buffer = new byte[TestCheckpoint.fileSize];
-    Random rand = new Random(TestCheckpoint.seed);
-    rand.nextBytes(buffer);
-    stm.write(buffer);
-    stm.close();
+  static final FilenameFilter tmpEditsFilter = new FilenameFilter() {
+    @Override
+    public boolean accept(File dir, String name) {
+      return name.startsWith(NameNodeFile.EDITS_TMP.getName());
+    }
+  };
+
+  private CheckpointFaultInjector faultInjector;
+    
+  @Before
+  public void setUp() {
+    FileUtil.fullyDeleteContents(new File(MiniDFSCluster.getBaseDirectory()));
+    faultInjector = Mockito.mock(CheckpointFaultInjector.class);
+    CheckpointFaultInjector.instance = faultInjector;
   }
   
+  @After
+  public void checkForSNNThreads() {
+    GenericTestUtils.assertNoThreadsMatching(".*SecondaryNameNode.*");
+  }
   
   static void checkFile(FileSystem fileSys, Path name, int repl)
     throws IOException {
@@ -131,12 +160,12 @@ public class TestCheckpoint extends TestCase {
   /*
    * Verify that namenode does not startup if one namedir is bad.
    */
+  @Test
   public void testNameDirError() throws IOException {
     LOG.info("Starting testNameDirError");
     Configuration conf = new HdfsConfiguration();
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-      .numDataNodes(0)
-      .build();
+    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0)
+        .build();
     
     Collection<URI> nameDirs = cluster.getNameDirs(0);
     cluster.shutdown();
@@ -147,22 +176,17 @@ public class TestCheckpoint extends TestCase {
       
       try {
         // Simulate the mount going read-only
-        dir.setWritable(false);
-        cluster = new MiniDFSCluster.Builder(conf)
-          .numDataNodes(0)
-          .format(false)
-          .build();
+        FileUtil.setWritable(dir, false);
+        cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0)
+            .format(false).build();
         fail("NN should have failed to start with " + dir + " set unreadable");
       } catch (IOException ioe) {
         GenericTestUtils.assertExceptionContains(
-            "storage directory does not exist or is not accessible",
-            ioe);
+            "storage directory does not exist or is not accessible", ioe);
       } finally {
-        if (cluster != null) {
-          cluster.shutdown();
-          cluster = null;
-        }
-        dir.setWritable(true);
+        cleanup(cluster);
+        cluster = null;
+        FileUtil.setWritable(dir, true);
       }
     }
   }
@@ -172,12 +196,13 @@ public class TestCheckpoint extends TestCase {
    * correctly (by removing the storage directory)
    * See https://issues.apache.org/jira/browse/HDFS-2011
    */
+  @Test
   public void testWriteTransactionIdHandlesIOE() throws Exception {
     LOG.info("Check IOException handled correctly by writeTransactionIdFile");
     ArrayList<URI> fsImageDirs = new ArrayList<URI>();
     ArrayList<URI> editsDirs = new ArrayList<URI>();
     File filePath =
-      new File(System.getProperty("test.build.data","/tmp"), "storageDirToCheck");
+      new File(PathUtils.getTestDir(getClass()), "storageDirToCheck");
     assertTrue("Couldn't create directory storageDirToCheck",
                filePath.exists() || filePath.mkdirs());
     fsImageDirs.add(filePath.toURI());
@@ -201,45 +226,157 @@ public class TestCheckpoint extends TestCase {
     assertTrue("Removed directory wasn't what was expected",
                listRsd.size() > 0 && listRsd.get(listRsd.size() - 1).getRoot().
                toString().indexOf("storageDirToCheck") != -1);
+    nnStorage.close();
+  }
+
+  /*
+   * Simulate exception during edit replay.
+   */
+  @Test(timeout=30000)
+  public void testReloadOnEditReplayFailure () throws IOException {
+    Configuration conf = new HdfsConfiguration();
+    FSDataOutputStream fos = null;
+    SecondaryNameNode secondary = null;
+    MiniDFSCluster cluster = null;
+    FileSystem fs = null;
+
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .build();
+      cluster.waitActive();
+      fs = cluster.getFileSystem();
+      secondary = startSecondaryNameNode(conf);
+      fos = fs.create(new Path("tmpfile0"));
+      fos.write(new byte[] { 0, 1, 2, 3 });
+      secondary.doCheckpoint();
+      fos.write(new byte[] { 0, 1, 2, 3 });
+      fos.hsync();
+
+      // Cause merge to fail in next checkpoint.
+      Mockito.doThrow(new IOException(
+          "Injecting failure during merge"))
+          .when(faultInjector).duringMerge();
+
+      try {
+        secondary.doCheckpoint();
+        fail("Fault injection failed.");
+      } catch (IOException ioe) {
+        // This is expected.
+      } 
+      Mockito.reset(faultInjector);
+ 
+      // The error must be recorded, so next checkpoint will reload image.
+      fos.write(new byte[] { 0, 1, 2, 3 });
+      fos.hsync();
+      
+      assertTrue("Another checkpoint should have reloaded image",
+          secondary.doCheckpoint());
+    } finally {
+      if (fs != null) {
+        fs.close();
+      }
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
+      Mockito.reset(faultInjector);
+    }
+  }
+
+  /*
+   * Simulate 2NN exit due to too many merge failures.
+   */
+  @Test(timeout=30000)
+  public void testTooManyEditReplayFailures() throws IOException {
+    Configuration conf = new HdfsConfiguration();
+    conf.set(DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_MAX_RETRIES_KEY, "1");
+    conf.set(DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_CHECK_PERIOD_KEY, "1");
+
+    FSDataOutputStream fos = null;
+    SecondaryNameNode secondary = null;
+    MiniDFSCluster cluster = null;
+    FileSystem fs = null;
+
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .checkExitOnShutdown(false).build();
+      cluster.waitActive();
+      fs = cluster.getFileSystem();
+      fos = fs.create(new Path("tmpfile0"));
+      fos.write(new byte[] { 0, 1, 2, 3 });
+
+      // Cause merge to fail in next checkpoint.
+      Mockito.doThrow(new IOException(
+          "Injecting failure during merge"))
+          .when(faultInjector).duringMerge();
+
+      secondary = startSecondaryNameNode(conf);
+      secondary.doWork();
+      // Fail if we get here.
+      fail("2NN did not exit.");
+    } catch (ExitException ee) {
+      // ignore
+      ExitUtil.resetFirstExitException();
+      assertEquals("Max retries", 1, secondary.getMergeErrorCount() - 1);
+    } finally {
+      if (fs != null) {
+        fs.close();
+      }
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
+      Mockito.reset(faultInjector);
+    }
   }
 
   /*
    * Simulate namenode crashing after rolling edit log.
    */
+  @Test
   public void testSecondaryNamenodeError1()
     throws IOException {
     LOG.info("Starting testSecondaryNamenodeError1");
     Configuration conf = new HdfsConfiguration();
     Path file1 = new Path("checkpointxx.dat");
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-                                               .numDataNodes(numDatanodes)
-                                               .build();
-    cluster.waitActive();
-    FileSystem fileSys = cluster.getFileSystem();
+    MiniDFSCluster cluster = null;
+    FileSystem fileSys = null;
+    SecondaryNameNode secondary = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .build();
+      cluster.waitActive();
+      fileSys = cluster.getFileSystem();
       assertTrue(!fileSys.exists(file1));
-      //
+      
       // Make the checkpoint fail after rolling the edits log.
-      //
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
-      ErrorSimulator.setErrorSimulation(0);
+      secondary = startSecondaryNameNode(conf);
+      
+      Mockito.doThrow(new IOException(
+          "Injecting failure after rolling edit logs"))
+          .when(faultInjector).afterSecondaryCallsRollEditLog();
 
       try {
         secondary.doCheckpoint();  // this should fail
         assertTrue(false);
       } catch (IOException e) {
+        // expected
       }
-      ErrorSimulator.clearErrorSimulation(0);
-      secondary.shutdown();
+      
+      Mockito.reset(faultInjector);
 
       //
       // Create a new file
       //
-      writeFile(fileSys, file1, replication);
+      DFSTestUtil.createFile(fileSys, file1, fileSize, fileSize, blockSize,
+          replication, seed);
       checkFile(fileSys, file1, replication);
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
 
     //
@@ -247,59 +384,71 @@ public class TestCheckpoint extends TestCase {
     // Then take another checkpoint to verify that the 
     // namenode restart accounted for the rolled edit logs.
     //
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
-                                              .format(false).build();
-    cluster.waitActive();
-    
-    fileSys = cluster.getFileSystem();
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .format(false).build();
+      cluster.waitActive();
+      fileSys = cluster.getFileSystem();
       checkFile(fileSys, file1, replication);
       cleanupFile(fileSys, file1);
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
+      secondary = startSecondaryNameNode(conf);
       secondary.doCheckpoint();
       secondary.shutdown();
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
 
   /*
    * Simulate a namenode crash after uploading new image
    */
+  @Test
   public void testSecondaryNamenodeError2() throws IOException {
     LOG.info("Starting testSecondaryNamenodeError2");
     Configuration conf = new HdfsConfiguration();
     Path file1 = new Path("checkpointyy.dat");
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-                                               .numDataNodes(numDatanodes)
-                                               .build();
-    cluster.waitActive();
-    FileSystem fileSys = cluster.getFileSystem();
+    MiniDFSCluster cluster = null;
+    FileSystem fileSys = null;
+    SecondaryNameNode secondary = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .build();
+      cluster.waitActive();
+      fileSys = cluster.getFileSystem();
       assertTrue(!fileSys.exists(file1));
       //
       // Make the checkpoint fail after uploading the new fsimage.
       //
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
-      ErrorSimulator.setErrorSimulation(1);
+      secondary = startSecondaryNameNode(conf);
+      
+      Mockito.doThrow(new IOException(
+          "Injecting failure after uploading new image"))
+          .when(faultInjector).afterSecondaryUploadsNewImage();
 
       try {
         secondary.doCheckpoint();  // this should fail
         assertTrue(false);
       } catch (IOException e) {
+        // expected
       }
-      ErrorSimulator.clearErrorSimulation(1);
-      secondary.shutdown();
+      Mockito.reset(faultInjector);
 
       //
       // Create a new file
       //
-      writeFile(fileSys, file1, replication);
+      DFSTestUtil.createFile(fileSys, file1, fileSize, fileSize, blockSize,
+          replication, seed);
       checkFile(fileSys, file1, replication);
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
 
     //
@@ -307,48 +456,58 @@ public class TestCheckpoint extends TestCase {
     // Then take another checkpoint to verify that the 
     // namenode restart accounted for the rolled edit logs.
     //
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes).format(false).build();
-    cluster.waitActive();
-    fileSys = cluster.getFileSystem();
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .format(false).build();
+      cluster.waitActive();
+      fileSys = cluster.getFileSystem();
       checkFile(fileSys, file1, replication);
       cleanupFile(fileSys, file1);
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
+      secondary = startSecondaryNameNode(conf);
       secondary.doCheckpoint();
       secondary.shutdown();
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
 
   /*
    * Simulate a secondary namenode crash after rolling the edit log.
    */
+  @Test
   public void testSecondaryNamenodeError3() throws IOException {
     LOG.info("Starting testSecondaryNamenodeError3");
     Configuration conf = new HdfsConfiguration();
     Path file1 = new Path("checkpointzz.dat");
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-                                               .numDataNodes(numDatanodes)
-                                               .build();
-
-    cluster.waitActive();
-    FileSystem fileSys = cluster.getFileSystem();
+    MiniDFSCluster cluster = null;
+    FileSystem fileSys = null;
+    SecondaryNameNode secondary = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .build();
+      cluster.waitActive();
+      fileSys = cluster.getFileSystem();
       assertTrue(!fileSys.exists(file1));
       //
       // Make the checkpoint fail after rolling the edit log.
       //
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
-      ErrorSimulator.setErrorSimulation(0);
+      secondary = startSecondaryNameNode(conf);
+
+      Mockito.doThrow(new IOException(
+          "Injecting failure after rolling edit logs"))
+          .when(faultInjector).afterSecondaryCallsRollEditLog();
 
       try {
         secondary.doCheckpoint();  // this should fail
         assertTrue(false);
       } catch (IOException e) {
+        // expected
       }
-      ErrorSimulator.clearErrorSimulation(0);
+      Mockito.reset(faultInjector);
       secondary.shutdown(); // secondary namenode crash!
 
       // start new instance of secondary and verify that 
@@ -357,16 +516,19 @@ public class TestCheckpoint extends TestCase {
       //
       secondary = startSecondaryNameNode(conf);
       secondary.doCheckpoint();  // this should work correctly
-      secondary.shutdown();
 
       //
       // Create a new file
       //
-      writeFile(fileSys, file1, replication);
+      DFSTestUtil.createFile(fileSys, file1, fileSize, fileSize, blockSize,
+          replication, seed);
       checkFile(fileSys, file1, replication);
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
 
     //
@@ -374,37 +536,54 @@ public class TestCheckpoint extends TestCase {
     // Then take another checkpoint to verify that the 
     // namenode restart accounted for the twice-rolled edit logs.
     //
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes).format(false).build();
-    cluster.waitActive();
-    fileSys = cluster.getFileSystem();
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .format(false).build();
+      cluster.waitActive();
+      fileSys = cluster.getFileSystem();
       checkFile(fileSys, file1, replication);
       cleanupFile(fileSys, file1);
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
+      secondary = startSecondaryNameNode(conf);
       secondary.doCheckpoint();
       secondary.shutdown();
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
 
   /**
-   * Simulate a secondary node failure to transfer image
-   * back to the name-node.
-   * Used to truncate primary fsimage file.
+   * Simulate a secondary node failure to transfer image. Uses an unchecked
+   * error and fail transfer before even setting the length header. This used to
+   * cause image truncation. Regression test for HDFS-3330.
    */
-  public void testSecondaryFailsToReturnImage() throws IOException {
+  @Test
+  public void testSecondaryFailsWithErrorBeforeSettingHeaders()
+      throws IOException {
+    Mockito.doThrow(new Error("If this exception is not caught by the " +
+        "name-node, fs image will be truncated."))
+        .when(faultInjector).beforeGetImageSetsHeaders();
+
+    doSecondaryFailsToReturnImage();
+  }
+
+  private void doSecondaryFailsToReturnImage() throws IOException {
     LOG.info("Starting testSecondaryFailsToReturnImage");
     Configuration conf = new HdfsConfiguration();
     Path file1 = new Path("checkpointRI.dat");
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-                                               .numDataNodes(numDatanodes)
-                                               .build();
-    cluster.waitActive();
-    FileSystem fileSys = cluster.getFileSystem();
-    FSImage image = cluster.getNameNode().getFSImage();
+    MiniDFSCluster cluster = null;
+    FileSystem fileSys = null;
+    FSImage image = null;
+    SecondaryNameNode secondary = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .build();
+      cluster.waitActive();
+      fileSys = cluster.getFileSystem();
+      image = cluster.getNameNode().getFSImage();
       assertTrue(!fileSys.exists(file1));
       StorageDirectory sd = image.getStorage().getStorageDir(0);
       
@@ -413,8 +592,7 @@ public class TestCheckpoint extends TestCase {
       //
       // Make the checkpoint
       //
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
-      ErrorSimulator.setErrorSimulation(2);
+      secondary = startSecondaryNameNode(conf);
 
       try {
         secondary.doCheckpoint();  // this should fail
@@ -424,7 +602,7 @@ public class TestCheckpoint extends TestCase {
         GenericTestUtils.assertExceptionContains(
             "If this exception is not caught", e);
       }
-      ErrorSimulator.clearErrorSimulation(2);
+      Mockito.reset(faultInjector);
 
       // Verify that image file sizes did not change.
       for (StorageDirectory sd2 :
@@ -435,11 +613,24 @@ public class TestCheckpoint extends TestCase {
         assertEquals(fsimageLength, len);
       }
 
-      secondary.shutdown();
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
+  }
+
+  private File filePathContaining(final String substring) {
+    return Mockito.argThat(
+        new ArgumentMatcher<File>() {
+          @Override
+          public boolean matches(Object argument) {
+            String path = ((File) argument).getAbsolutePath();
+            return path.contains(substring);
+          }
+        });
   }
 
   /**
@@ -447,10 +638,14 @@ public class TestCheckpoint extends TestCase {
    * The length header in the HTTP transfer should prevent
    * this from corrupting the NN.
    */
+  @Test
   public void testNameNodeImageSendFailWrongSize()
       throws IOException {
     LOG.info("Starting testNameNodeImageSendFailWrongSize");
-    doSendFailTest(3, "is not of the advertised size");
+    
+    Mockito.doReturn(true).when(faultInjector)
+      .shouldSendShortFile(filePathContaining("fsimage"));
+    doSendFailTest("is not of the advertised size");
   }
 
   /**
@@ -458,34 +653,38 @@ public class TestCheckpoint extends TestCase {
    * The digest header in the HTTP transfer should prevent
    * this from corrupting the NN.
    */
+  @Test
   public void testNameNodeImageSendFailWrongDigest()
       throws IOException {
     LOG.info("Starting testNameNodeImageSendFailWrongDigest");
-    doSendFailTest(4, "does not match advertised digest");
+
+    Mockito.doReturn(true).when(faultInjector)
+        .shouldCorruptAByte(Mockito.any(File.class));
+    doSendFailTest("does not match advertised digest");
   }
 
   /**
    * Run a test where the 2NN runs into some kind of error when
    * sending the checkpoint back to the NN.
-   * @param errorType the ErrorSimulator type to trigger
    * @param exceptionSubstring an expected substring of the triggered exception
    */
-  private void doSendFailTest(int errorType, String exceptionSubstring)
+  private void doSendFailTest(String exceptionSubstring)
       throws IOException {
     Configuration conf = new HdfsConfiguration();
-    Path file1 = new Path("checkpoint-doSendFailTest-" + errorType + ".dat");
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-                                               .numDataNodes(numDatanodes)
-                                               .build();
-    cluster.waitActive();
-    FileSystem fileSys = cluster.getFileSystem();
+    Path file1 = new Path("checkpoint-doSendFailTest-doSendFailTest.dat");
+    MiniDFSCluster cluster = null;
+    FileSystem fileSys = null;
+    SecondaryNameNode secondary = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .build();
+      cluster.waitActive();
+      fileSys = cluster.getFileSystem();
       assertTrue(!fileSys.exists(file1));
       //
       // Make the checkpoint fail after rolling the edit log.
       //
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
-      ErrorSimulator.setErrorSimulation(errorType);
+      secondary = startSecondaryNameNode(conf);
 
       try {
         secondary.doCheckpoint();  // this should fail
@@ -494,8 +693,9 @@ public class TestCheckpoint extends TestCase {
         // We only sent part of the image. Have to trigger this exception
         GenericTestUtils.assertExceptionContains(exceptionSubstring, e);
       }
-      ErrorSimulator.clearErrorSimulation(errorType);
+      Mockito.reset(faultInjector);
       secondary.shutdown(); // secondary namenode crash!
+      secondary = null;
 
       // start new instance of secondary and verify that 
       // a new rollEditLog succedes in spite of the fact that we had
@@ -503,16 +703,19 @@ public class TestCheckpoint extends TestCase {
       //
       secondary = startSecondaryNameNode(conf);
       secondary.doCheckpoint();  // this should work correctly
-      secondary.shutdown();
 
       //
       // Create a new file
       //
-      writeFile(fileSys, file1, replication);
+      DFSTestUtil.createFile(fileSys, file1, fileSize, fileSize, blockSize,
+          replication, seed);
       checkFile(fileSys, file1, replication);
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
   
@@ -520,23 +723,24 @@ public class TestCheckpoint extends TestCase {
    * Test that the NN locks its storage and edits directories, and won't start up
    * if the directories are already locked
    **/
+  @Test
   public void testNameDirLocking() throws IOException {
     Configuration conf = new HdfsConfiguration();
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-      .numDataNodes(0)
-      .build();
+    MiniDFSCluster cluster = null;
     
     // Start a NN, and verify that lock() fails in all of the configured
     // directories
     StorageDirectory savedSd = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
       NNStorage storage = cluster.getNameNode().getFSImage().getStorage();
       for (StorageDirectory sd : storage.dirIterable(null)) {
         assertLockFails(sd);
         savedSd = sd;
       }
     } finally {
-      cluster.shutdown();
+      cleanup(cluster);
+      cluster = null;
     }
     assertNotNull(savedSd);
     
@@ -549,22 +753,25 @@ public class TestCheckpoint extends TestCase {
    * Test that, if the edits dir is separate from the name dir, it is
    * properly locked.
    **/
+  @Test
   public void testSeparateEditsDirLocking() throws IOException {
     Configuration conf = new HdfsConfiguration();
-    File editsDir = new File(MiniDFSCluster.getBaseDirectory() +
-        "/testSeparateEditsDirLocking");
-    
+    File nameDir = new File(MiniDFSCluster.getBaseDirectory(), "name");
+    File editsDir = new File(MiniDFSCluster.getBaseDirectory(),
+        "testSeparateEditsDirLocking");
+
+    conf.set(DFSConfigKeys.DFS_NAMENODE_NAME_DIR_KEY,
+        nameDir.getAbsolutePath());
     conf.set(DFSConfigKeys.DFS_NAMENODE_EDITS_DIR_KEY,
         editsDir.getAbsolutePath());
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-      .manageNameDfsDirs(false)
-      .numDataNodes(0)
-      .build();
+    MiniDFSCluster cluster = null;
     
     // Start a NN, and verify that lock() fails in all of the configured
     // directories
     StorageDirectory savedSd = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).manageNameDfsDirs(false)
+          .numDataNodes(0).build();
       NNStorage storage = cluster.getNameNode().getFSImage().getStorage();
       for (StorageDirectory sd : storage.dirIterable(NameNodeDirType.EDITS)) {
         assertEquals(editsDir.getAbsoluteFile(), sd.getRoot());
@@ -572,7 +779,8 @@ public class TestCheckpoint extends TestCase {
         savedSd = sd;
       }
     } finally {
-      cluster.shutdown();
+      cleanup(cluster);
+      cluster = null;
     }
     assertNotNull(savedSd);
     
@@ -584,15 +792,14 @@ public class TestCheckpoint extends TestCase {
   /**
    * Test that the SecondaryNameNode properly locks its storage directories.
    */
+  @Test
   public void testSecondaryNameNodeLocking() throws Exception {
     // Start a primary NN so that the secondary will start successfully
     Configuration conf = new HdfsConfiguration();
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-      .numDataNodes(0)
-      .build();
-    
+    MiniDFSCluster cluster = null;
     SecondaryNameNode secondary = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
       StorageDirectory savedSd = null;
       // Start a secondary NN, then make sure that all of its storage
       // dirs got locked.
@@ -622,13 +829,49 @@ public class TestCheckpoint extends TestCase {
       }
       
     } finally {
-      if (secondary != null) {
-        secondary.shutdown();
-      }
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
   
+  /**
+   * Test that, an attempt to lock a storage that is already locked by a nodename,
+   * logs error message that includes JVM name of the namenode that locked it.
+   */
+  @Test
+  public void testStorageAlreadyLockedErrorMessage() throws Exception {
+    Configuration conf = new HdfsConfiguration();
+    MiniDFSCluster cluster = null;
+    StorageDirectory savedSd = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
+      NNStorage storage = cluster.getNameNode().getFSImage().getStorage();
+      for (StorageDirectory sd : storage.dirIterable(null)) {
+        assertLockFails(sd);
+        savedSd = sd;
+      }
+      
+      LogCapturer logs = GenericTestUtils.LogCapturer.captureLogs(LogFactory.getLog(Storage.class));
+      try {
+        // try to lock the storage that's already locked
+        savedSd.lock();
+        fail("Namenode should not be able to lock a storage that is already locked");
+      } catch (IOException ioe) {
+        // cannot read lock file on Windows, so message cannot get JVM name
+        String lockingJvmName = Path.WINDOWS ? "" :
+          " " + ManagementFactory.getRuntimeMXBean().getName();
+        String expectedLogMessage = "It appears that another namenode"
+          + lockingJvmName + " has already locked the storage directory";
+        assertTrue("Log output does not contain expected log message: "
+          + expectedLogMessage, logs.getOutput().contains(expectedLogMessage));
+      }
+    } finally {
+      cleanup(cluster);
+      cluster = null;
+    }
+  }
 
   /**
    * Assert that the given storage directory can't be locked, because
@@ -654,18 +897,17 @@ public class TestCheckpoint extends TestCase {
       Configuration conf, StorageDirectory sdToLock) throws IOException {
     // Lock the edits dir, then start the NN, and make sure it fails to start
     sdToLock.lock();
+    MiniDFSCluster cluster = null;
     try {      
-      MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-        .format(false)
-        .manageNameDfsDirs(false)
-        .numDataNodes(0)
-        .build();
+      cluster = new MiniDFSCluster.Builder(conf).format(false)
+          .manageNameDfsDirs(false).numDataNodes(0).build();
       assertFalse("cluster should fail to start after locking " +
           sdToLock, sdToLock.isLockSupported());
-      cluster.shutdown();
     } catch (IOException ioe) {
       GenericTestUtils.assertExceptionContains("already locked", ioe);
     } finally {
+      cleanup(cluster);
+      cluster = null;
       sdToLock.unlock();
     }
   }
@@ -677,15 +919,17 @@ public class TestCheckpoint extends TestCase {
    * 2. if the NN does not contain an image, importing a checkpoint
    *    succeeds and re-saves the image
    */
+  @Test
   public void testImportCheckpoint() throws Exception {
     Configuration conf = new HdfsConfiguration();
     Path testPath = new Path("/testfile");
     SecondaryNameNode snn = null;
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-      .numDataNodes(0)
-      .build();
-    Collection<URI> nameDirs = cluster.getNameDirs(0);
+    MiniDFSCluster cluster = null;
+    Collection<URI> nameDirs = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
+      nameDirs = cluster.getNameDirs(0);
+      
       // Make an entry in the namespace, used for verifying checkpoint
       // later.
       cluster.getFileSystem().mkdirs(testPath);
@@ -694,21 +938,16 @@ public class TestCheckpoint extends TestCase {
       snn = startSecondaryNameNode(conf);
       snn.doCheckpoint();
     } finally {
-      if (snn != null) {
-        snn.shutdown();
-      }
-      cluster.shutdown();
+      cleanup(snn);
+      cleanup(cluster);
       cluster = null;
     }
     
     LOG.info("Trying to import checkpoint when the NameNode already " +
     		"contains an image. This should fail.");
     try {
-      cluster = new MiniDFSCluster.Builder(conf)
-      .numDataNodes(0)
-      .format(false)
-      .startupOption(StartupOption.IMPORT)
-      .build();
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).format(false)
+          .startupOption(StartupOption.IMPORT).build();
       fail("NameNode did not fail to start when it already contained " +
       		"an image");
     } catch (IOException ioe) {
@@ -716,10 +955,8 @@ public class TestCheckpoint extends TestCase {
       GenericTestUtils.assertExceptionContains(
           "NameNode already contains an image", ioe);
     } finally {
-      if (cluster != null) {
-        cluster.shutdown();
-        cluster = null;
-      }
+      cleanup(cluster);
+      cluster = null;
     }
     
     LOG.info("Removing NN storage contents");
@@ -731,11 +968,8 @@ public class TestCheckpoint extends TestCase {
     
     LOG.info("Trying to import checkpoint");
     try {
-      cluster = new MiniDFSCluster.Builder(conf)
-        .format(false)
-        .numDataNodes(0)
-        .startupOption(StartupOption.IMPORT)
-        .build();
+      cluster = new MiniDFSCluster.Builder(conf).format(false).numDataNodes(0)
+          .startupOption(StartupOption.IMPORT).build();
       
       assertTrue("Path from checkpoint should exist after import",
           cluster.getFileSystem().exists(testPath));
@@ -743,9 +977,8 @@ public class TestCheckpoint extends TestCase {
       // Make sure that the image got saved on import
       FSImageTestUtil.assertNNHasCheckpoints(cluster, Ints.asList(3));
     } finally {
-      if (cluster != null) {
-        cluster.shutdown();
-      }
+      cleanup(cluster);
+      cluster = null;
     }
   }
   
@@ -775,18 +1008,22 @@ public class TestCheckpoint extends TestCase {
   /**
    * Tests checkpoint in HDFS.
    */
+  @Test
   public void testCheckpoint() throws IOException {
     Path file1 = new Path("checkpoint.dat");
     Path file2 = new Path("checkpoint2.dat");
     Configuration conf = new HdfsConfiguration();
     conf.set(DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY, "0.0.0.0:0");
     replication = (short)conf.getInt(DFSConfigKeys.DFS_REPLICATION_KEY, 3);
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-                                               .numDataNodes(numDatanodes).build();
-    cluster.waitActive();
-    FileSystem fileSys = cluster.getFileSystem();
-
+    
+    MiniDFSCluster cluster = null;
+    FileSystem fileSys = null;
+    SecondaryNameNode secondary = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(
+          numDatanodes).build();
+      cluster.waitActive();
+      fileSys = cluster.getFileSystem();
       //
       // verify that 'format' really blew away all pre-existing files
       //
@@ -796,50 +1033,69 @@ public class TestCheckpoint extends TestCase {
       //
       // Create file1
       //
-      writeFile(fileSys, file1, replication);
+      DFSTestUtil.createFile(fileSys, file1, fileSize, fileSize, blockSize,
+          replication, seed);
       checkFile(fileSys, file1, replication);
 
       //
       // Take a checkpoint
       //
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
+      secondary = startSecondaryNameNode(conf);
       secondary.doCheckpoint();
-      secondary.shutdown();
+
+      MetricsRecordBuilder rb = getMetrics(NN_METRICS);
+      assertCounterGt("GetImageNumOps", 0, rb);
+      assertCounterGt("GetEditNumOps", 0, rb);
+      assertCounterGt("PutImageNumOps", 0, rb);
+      assertGaugeGt("GetImageAvgTime", 0.0, rb);
+      assertGaugeGt("GetEditAvgTime", 0.0, rb);
+      assertGaugeGt("PutImageAvgTime", 0.0, rb);
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
 
     //
     // Restart cluster and verify that file1 still exist.
     //
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes).format(false).build();
-    cluster.waitActive();
-    fileSys = cluster.getFileSystem();
     Path tmpDir = new Path("/tmp_tmp");
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .format(false).build();
+      cluster.waitActive();
+      fileSys = cluster.getFileSystem();
+      
       // check that file1 still exists
       checkFile(fileSys, file1, replication);
       cleanupFile(fileSys, file1);
 
       // create new file file2
-      writeFile(fileSys, file2, replication);
+      DFSTestUtil.createFile(fileSys, file2, fileSize, fileSize, blockSize,
+          replication, seed);
       checkFile(fileSys, file2, replication);
 
       //
       // Take a checkpoint
       //
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
+      secondary = startSecondaryNameNode(conf);
       secondary.doCheckpoint();
+      
+      FSDirectory secondaryFsDir = secondary.getFSNamesystem().dir;
+      INode rootInMap = secondaryFsDir.getInode(secondaryFsDir.rootDir.getId());
+      assertSame(rootInMap, secondaryFsDir.rootDir);
       
       fileSys.delete(tmpDir, true);
       fileSys.mkdirs(tmpDir);
       secondary.doCheckpoint();
-      
-      secondary.shutdown();
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
 
     //
@@ -859,12 +1115,14 @@ public class TestCheckpoint extends TestCase {
     } finally {
       fileSys.close();
       cluster.shutdown();
+      cluster = null;
     }
   }
 
   /**
    * Tests save namespace.
    */
+  @Test
   public void testSaveNamespace() throws IOException {
     MiniDFSCluster cluster = null;
     DistributedFileSystem fs = null;
@@ -873,7 +1131,7 @@ public class TestCheckpoint extends TestCase {
       Configuration conf = new HdfsConfiguration();
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes).format(true).build();
       cluster.waitActive();
-      fs = (DistributedFileSystem)(cluster.getFileSystem());
+      fs = (cluster.getFileSystem());
       fc = FileContext.getFileContext(cluster.getURI(0));
 
       // Saving image without safe mode should fail
@@ -888,7 +1146,8 @@ public class TestCheckpoint extends TestCase {
       }
       // create new file
       Path file = new Path("namespace.dat");
-      writeFile(fs, file, replication);
+      DFSTestUtil.createFile(fs, file, fileSize, fileSize, blockSize,
+          replication, seed);
       checkFile(fs, file, replication);
 
       // create new link
@@ -913,7 +1172,8 @@ public class TestCheckpoint extends TestCase {
         throw new IOException(e);
       }
       
-      final int EXPECTED_TXNS_FIRST_SEG = 12;
+      // TODO: Fix the test to not require a hard-coded transaction count.
+      final int EXPECTED_TXNS_FIRST_SEG = 13;
       
       // the following steps should have happened:
       //   edits_inprogress_1 -> edits_1-12  (finalized)
@@ -955,47 +1215,49 @@ public class TestCheckpoint extends TestCase {
 
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes).format(false).build();
       cluster.waitActive();
-      fs = (DistributedFileSystem)(cluster.getFileSystem());
+      fs = (cluster.getFileSystem());
       checkFile(fs, file, replication);
       fc = FileContext.getFileContext(cluster.getURI(0));
       assertTrue(fc.getFileLinkStatus(symlink).isSymlink());
     } finally {
-      try {
-        if(fs != null) fs.close();
-        if(cluster!= null) cluster.shutdown();
-      } catch (Throwable t) {
-        LOG.error("Failed to shutdown", t);
-      }
+      if(fs != null) fs.close();
+      cleanup(cluster);
+      cluster = null;
     }
   }
   
   /* Test case to test CheckpointSignature */
-  @SuppressWarnings("deprecation")
+  @Test
   public void testCheckpointSignature() throws IOException {
 
     MiniDFSCluster cluster = null;
     Configuration conf = new HdfsConfiguration();
 
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
-        .format(true).build();
-    NameNode nn = cluster.getNameNode();
-    NamenodeProtocols nnRpc = nn.getRpcServer();
-
-    SecondaryNameNode secondary = startSecondaryNameNode(conf);
-    // prepare checkpoint image
-    secondary.doCheckpoint();
-    CheckpointSignature sig = nnRpc.rollEditLog();
-    // manipulate the CheckpointSignature fields
-    sig.setBlockpoolID("somerandomebpid");
-    sig.clusterID = "somerandomcid";
+    SecondaryNameNode secondary = null;
     try {
-      sig.validateStorageInfo(nn.getFSImage()); // this should fail
-      assertTrue("This test is expected to fail.", false);
-    } catch (Exception ignored) {
-    }
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .format(true).build();
+      NameNode nn = cluster.getNameNode();
+      NamenodeProtocols nnRpc = nn.getRpcServer();
 
-    secondary.shutdown();
-    cluster.shutdown();
+      secondary = startSecondaryNameNode(conf);
+      // prepare checkpoint image
+      secondary.doCheckpoint();
+      CheckpointSignature sig = nnRpc.rollEditLog();
+      // manipulate the CheckpointSignature fields
+      sig.setBlockpoolID("somerandomebpid");
+      sig.clusterID = "somerandomcid";
+      try {
+        sig.validateStorageInfo(nn.getFSImage()); // this should fail
+        assertTrue("This test is expected to fail.", false);
+      } catch (Exception ignored) {
+      }
+    } finally {
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
+    }
   }
   
   /**
@@ -1005,6 +1267,7 @@ public class TestCheckpoint extends TestCase {
    * - it then fails again for the same reason
    * - it then tries to checkpoint a third time
    */
+  @Test
   public void testCheckpointAfterTwoFailedUploads() throws IOException {
     MiniDFSCluster cluster = null;
     SecondaryNameNode secondary = null;
@@ -1017,7 +1280,9 @@ public class TestCheckpoint extends TestCase {
   
       secondary = startSecondaryNameNode(conf);
 
-      ErrorSimulator.setErrorSimulation(1);
+      Mockito.doThrow(new IOException(
+          "Injecting failure after rolling edit logs"))
+          .when(faultInjector).afterSecondaryCallsRollEditLog();
       
       // Fail to checkpoint once
       try {
@@ -1025,7 +1290,7 @@ public class TestCheckpoint extends TestCase {
         fail("Should have failed upload");
       } catch (IOException ioe) {
         LOG.info("Got expected failure", ioe);
-        assertTrue(ioe.toString().contains("Simulating error1"));
+        assertTrue(ioe.toString().contains("Injecting failure"));
       }
 
       // Fail to checkpoint again
@@ -1034,21 +1299,19 @@ public class TestCheckpoint extends TestCase {
         fail("Should have failed upload");
       } catch (IOException ioe) {
         LOG.info("Got expected failure", ioe);
-        assertTrue(ioe.toString().contains("Simulating error1"));
+        assertTrue(ioe.toString().contains("Injecting failure"));
       } finally {
-        ErrorSimulator.clearErrorSimulation(1);
+        Mockito.reset(faultInjector);
       }
 
       // Now with the cleared error simulation, it should succeed
       secondary.doCheckpoint();
       
     } finally {
-      if (secondary != null) {
-        secondary.shutdown();
-      }
-      if (cluster != null) {
-        cluster.shutdown();
-      }
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
   
@@ -1059,56 +1322,72 @@ public class TestCheckpoint extends TestCase {
    * 
    * @throws IOException
    */
+  @Test
   public void testMultipleSecondaryNamenodes() throws IOException {
     Configuration conf = new HdfsConfiguration();
     String nameserviceId1 = "ns1";
     String nameserviceId2 = "ns2";
-    conf.set(DFSConfigKeys.DFS_FEDERATION_NAMESERVICES, nameserviceId1
+    conf.set(DFSConfigKeys.DFS_NAMESERVICES, nameserviceId1
         + "," + nameserviceId2);
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-        .nnTopology(MiniDFSNNTopology.simpleFederatedTopology(2))
-        .build();
-    Configuration snConf1 = new HdfsConfiguration(cluster.getConfiguration(0));
-    Configuration snConf2 = new HdfsConfiguration(cluster.getConfiguration(1));
-    InetSocketAddress nn1RpcAddress =
-      cluster.getNameNode(0).getNameNodeAddress();
-    InetSocketAddress nn2RpcAddress =
-      cluster.getNameNode(1).getNameNodeAddress();
-    String nn1 = nn1RpcAddress.getHostName() + ":" + nn1RpcAddress.getPort();
-    String nn2 = nn2RpcAddress.getHostName() + ":" + nn2RpcAddress.getPort();
+    MiniDFSCluster cluster = null;
+    SecondaryNameNode secondary1 = null;
+    SecondaryNameNode secondary2 = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf)
+          .nnTopology(MiniDFSNNTopology.simpleFederatedTopology(
+              conf.get(DFSConfigKeys.DFS_NAMESERVICES)))
+          .build();
+      Configuration snConf1 = new HdfsConfiguration(cluster.getConfiguration(0));
+      Configuration snConf2 = new HdfsConfiguration(cluster.getConfiguration(1));
+      InetSocketAddress nn1RpcAddress = cluster.getNameNode(0)
+          .getNameNodeAddress();
+      InetSocketAddress nn2RpcAddress = cluster.getNameNode(1)
+          .getNameNodeAddress();
+      String nn1 = nn1RpcAddress.getHostName() + ":" + nn1RpcAddress.getPort();
+      String nn2 = nn2RpcAddress.getHostName() + ":" + nn2RpcAddress.getPort();
 
-    // Set the Service Rpc address to empty to make sure the node specific
-    // setting works
-    snConf1.set(DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, "");
-    snConf2.set(DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, "");
+      // Set the Service Rpc address to empty to make sure the node specific
+      // setting works
+      snConf1.set(DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, "");
+      snConf2.set(DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, "");
 
-    // Set the nameserviceIds
-    snConf1.set(DFSUtil.addKeySuffixes(
-        DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, nameserviceId1), nn1);
-    snConf2.set(DFSUtil.addKeySuffixes(
-        DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, nameserviceId2), nn2);
+      // Set the nameserviceIds
+      snConf1.set(DFSUtil.addKeySuffixes(
+          DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, nameserviceId1),
+          nn1);
+      snConf2.set(DFSUtil.addKeySuffixes(
+          DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, nameserviceId2),
+          nn2);
 
-    SecondaryNameNode secondary1 = startSecondaryNameNode(snConf1);
-    SecondaryNameNode secondary2 = startSecondaryNameNode(snConf2);
+      secondary1 = startSecondaryNameNode(snConf1);
+      secondary2 = startSecondaryNameNode(snConf2);
 
-    // make sure the two secondary namenodes are talking to correct namenodes.
-    assertEquals(secondary1.getNameNodeAddress().getPort(), nn1RpcAddress.getPort());
-    assertEquals(secondary2.getNameNodeAddress().getPort(), nn2RpcAddress.getPort());
-    assertTrue(secondary1.getNameNodeAddress().getPort() != secondary2
-        .getNameNodeAddress().getPort());
+      // make sure the two secondary namenodes are talking to correct namenodes.
+      assertEquals(secondary1.getNameNodeAddress().getPort(),
+          nn1RpcAddress.getPort());
+      assertEquals(secondary2.getNameNodeAddress().getPort(),
+          nn2RpcAddress.getPort());
+      assertTrue(secondary1.getNameNodeAddress().getPort() != secondary2
+          .getNameNodeAddress().getPort());
 
-    // both should checkpoint.
-    secondary1.doCheckpoint();
-    secondary2.doCheckpoint();
-    secondary1.shutdown();
-    secondary2.shutdown();
-    cluster.shutdown();
+      // both should checkpoint.
+      secondary1.doCheckpoint();
+      secondary2.doCheckpoint();
+    } finally {
+      cleanup(secondary1);
+      secondary1 = null;
+      cleanup(secondary2);
+      secondary2 = null;
+      cleanup(cluster);
+      cluster = null;
+    }
   }
   
   /**
    * Test that the secondary doesn't have to re-download image
    * if it hasn't changed.
    */
+  @Test
   public void testSecondaryImageDownload() throws IOException {
     LOG.info("Starting testSecondaryImageDownload");
     Configuration conf = new HdfsConfiguration();
@@ -1120,12 +1399,13 @@ public class TestCheckpoint extends TestCase {
     cluster.waitActive();
     FileSystem fileSys = cluster.getFileSystem();
     FSImage image = cluster.getNameNode().getFSImage();
+    SecondaryNameNode secondary = null;
     try {
       assertTrue(!fileSys.exists(dir));
       //
       // Make the checkpoint
       //
-      SecondaryNameNode secondary = startSecondaryNameNode(conf);
+      secondary = startSecondaryNameNode(conf);
 
       File secondaryDir = new File(MiniDFSCluster.getBaseDirectory(), "namesecondary1");
       File secondaryCurrent = new File(secondaryDir, "current");
@@ -1163,19 +1443,251 @@ public class TestCheckpoint extends TestCase {
       
       for (StorageDirectory sd :
         image.getStorage().dirIterable(NameNodeDirType.IMAGE)) {
-        File imageFile = NNStorage.getImageFile(sd,
+        File imageFile = NNStorage.getImageFile(sd, NameNodeFile.IMAGE,
             expectedTxIdToDownload + 5);
         assertTrue("Image size increased",
             imageFile.length() > fsimageLength);
       }
 
-      secondary.shutdown();
     } finally {
       fileSys.close();
-      cluster.shutdown();
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
   
+  /**
+   * Test NN restart if a failure happens in between creating the fsimage
+   * MD5 file and renaming the fsimage.
+   */
+  @Test(timeout=30000)
+  public void testFailureBeforeRename () throws IOException {
+    Configuration conf = new HdfsConfiguration();
+    FSDataOutputStream fos = null;
+    SecondaryNameNode secondary = null;
+    MiniDFSCluster cluster = null;
+    FileSystem fs = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .build();
+      cluster.waitActive();
+      fs = cluster.getFileSystem();
+      secondary = startSecondaryNameNode(conf);
+      fos = fs.create(new Path("tmpfile0"));
+      fos.write(new byte[] { 0, 1, 2, 3 });
+      secondary.doCheckpoint();
+      fos.write(new byte[] { 0, 1, 2, 3 });
+      fos.hsync();
+
+      // Cause merge to fail in next checkpoint.
+      Mockito.doThrow(new IOException(
+          "Injecting failure after MD5Rename"))
+          .when(faultInjector).afterMD5Rename();
+
+      try {
+        secondary.doCheckpoint();
+        fail("Fault injection failed.");
+      } catch (IOException ioe) {
+        // This is expected.
+      }
+      Mockito.reset(faultInjector);
+      // Namenode should still restart successfully
+      cluster.restartNameNode();
+    } finally {
+      if (fs != null) {
+        fs.close();
+      }
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
+      Mockito.reset(faultInjector);
+    }
+  }
+
+  /**
+   * Test that a fault while downloading edits does not prevent future
+   * checkpointing
+   */
+  @Test(timeout = 30000)
+  public void testEditFailureBeforeRename() throws IOException {
+    Configuration conf = new HdfsConfiguration();
+    SecondaryNameNode secondary = null;
+    MiniDFSCluster cluster = null;
+    FileSystem fs = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .build();
+      cluster.waitActive();
+      fs = cluster.getFileSystem();
+      secondary = startSecondaryNameNode(conf);
+      DFSTestUtil.createFile(fs, new Path("tmpfile0"), 1024, (short) 1, 0l);
+      secondary.doCheckpoint();
+
+      // Cause edit rename to fail during next checkpoint
+      Mockito.doThrow(new IOException("Injecting failure before edit rename"))
+          .when(faultInjector).beforeEditsRename();
+      DFSTestUtil.createFile(fs, new Path("tmpfile1"), 1024, (short) 1, 0l);
+
+      try {
+        secondary.doCheckpoint();
+        fail("Fault injection failed.");
+      } catch (IOException ioe) {
+        GenericTestUtils.assertExceptionContains(
+            "Injecting failure before edit rename", ioe);
+      }
+      Mockito.reset(faultInjector);
+      // truncate the tmp edits file to simulate a partial download
+      for (StorageDirectory sd : secondary.getFSImage().getStorage()
+          .dirIterable(NameNodeDirType.EDITS)) {
+        File[] tmpEdits = sd.getCurrentDir().listFiles(tmpEditsFilter);
+        assertTrue(
+            "Expected a single tmp edits file in directory " + sd.toString(),
+            tmpEdits.length == 1);
+        RandomAccessFile randFile = new RandomAccessFile(tmpEdits[0], "rw");
+        randFile.setLength(0);
+        randFile.close();
+      }
+      // Next checkpoint should succeed
+      secondary.doCheckpoint();
+    } finally {
+      if (secondary != null) {
+        secondary.shutdown();
+      }
+      if (fs != null) {
+        fs.close();
+      }
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+      Mockito.reset(faultInjector);
+    }
+  }
+  
+  /**
+   * Test that a fault while downloading edits the first time after the 2NN
+   * starts up does not prevent future checkpointing.
+   */
+  @Test(timeout = 30000)
+  public void testEditFailureOnFirstCheckpoint() throws IOException {
+    Configuration conf = new HdfsConfiguration();
+    SecondaryNameNode secondary = null;
+    MiniDFSCluster cluster = null;
+    FileSystem fs = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .build();
+      cluster.waitActive();
+      fs = cluster.getFileSystem();
+      fs.mkdirs(new Path("test-file-1"));
+      
+      // Make sure the on-disk fsimage on the NN has txid > 0.
+      FSNamesystem fsns = cluster.getNamesystem();
+      fsns.enterSafeMode(false);
+      fsns.saveNamespace();
+      fsns.leaveSafeMode();
+      
+      secondary = startSecondaryNameNode(conf);
+
+      // Cause edit rename to fail during next checkpoint
+      Mockito.doThrow(new IOException("Injecting failure before edit rename"))
+          .when(faultInjector).beforeEditsRename();
+      
+      try {
+        secondary.doCheckpoint();
+        fail("Fault injection failed.");
+      } catch (IOException ioe) {
+        GenericTestUtils.assertExceptionContains(
+            "Injecting failure before edit rename", ioe);
+      }
+      Mockito.reset(faultInjector);
+      
+      // Next checkpoint should succeed
+      secondary.doCheckpoint();
+    } finally {
+      if (secondary != null) {
+        secondary.shutdown();
+      }
+      if (fs != null) {
+        fs.close();
+      }
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+      Mockito.reset(faultInjector);
+    }
+  }
+
+  /**
+   * Test that the secondary namenode correctly deletes temporary edits
+   * on startup.
+   */
+  @Test(timeout = 60000)
+  public void testDeleteTemporaryEditsOnStartup() throws IOException {
+    Configuration conf = new HdfsConfiguration();
+    SecondaryNameNode secondary = null;
+    MiniDFSCluster cluster = null;
+    FileSystem fs = null;
+
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .build();
+      cluster.waitActive();
+      fs = cluster.getFileSystem();
+      secondary = startSecondaryNameNode(conf);
+      DFSTestUtil.createFile(fs, new Path("tmpfile0"), 1024, (short) 1, 0l);
+      secondary.doCheckpoint();
+
+      // Cause edit rename to fail during next checkpoint
+      Mockito.doThrow(new IOException("Injecting failure before edit rename"))
+          .when(faultInjector).beforeEditsRename();
+      DFSTestUtil.createFile(fs, new Path("tmpfile1"), 1024, (short) 1, 0l);
+
+      try {
+        secondary.doCheckpoint();
+        fail("Fault injection failed.");
+      } catch (IOException ioe) {
+        GenericTestUtils.assertExceptionContains(
+            "Injecting failure before edit rename", ioe);
+      }
+      Mockito.reset(faultInjector);
+      // Verify that a temp edits file is present
+      for (StorageDirectory sd : secondary.getFSImage().getStorage()
+          .dirIterable(NameNodeDirType.EDITS)) {
+        File[] tmpEdits = sd.getCurrentDir().listFiles(tmpEditsFilter);
+        assertTrue(
+            "Expected a single tmp edits file in directory " + sd.toString(),
+            tmpEdits.length == 1);
+      }
+      // Restart 2NN
+      secondary.shutdown();
+      secondary = startSecondaryNameNode(conf);
+      // Verify that tmp files were deleted
+      for (StorageDirectory sd : secondary.getFSImage().getStorage()
+          .dirIterable(NameNodeDirType.EDITS)) {
+        File[] tmpEdits = sd.getCurrentDir().listFiles(tmpEditsFilter);
+        assertTrue(
+            "Did not expect a tmp edits file in directory " + sd.toString(),
+            tmpEdits.length == 0);
+      }
+      // Next checkpoint should succeed
+      secondary.doCheckpoint();
+    } finally {
+      if (secondary != null) {
+        secondary.shutdown();
+      }
+      if (fs != null) {
+        fs.close();
+      }
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+      Mockito.reset(faultInjector);
+    }
+  }
+
   /**
    * Test case where two secondary namenodes are checkpointing the same
    * NameNode. This differs from {@link #testMultipleSecondaryNamenodes()}
@@ -1191,15 +1703,15 @@ public class TestCheckpoint extends TestCase {
    * It verifies that this works even though the earlier-txid checkpoint gets
    * uploaded after the later-txid checkpoint.
    */
+  @Test
   public void testMultipleSecondaryNNsAgainstSameNN() throws Exception {
     Configuration conf = new HdfsConfiguration();
-
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-    .numDataNodes(0)
-    .format(true).build();
-
+    MiniDFSCluster cluster = null;
     SecondaryNameNode secondary1 = null, secondary2 = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).format(true)
+          .build();
+
       // Start 2NNs
       secondary1 = startSecondaryNameNode(conf, 1);
       secondary2 = startSecondaryNameNode(conf, 2);
@@ -1242,20 +1754,23 @@ public class TestCheckpoint extends TestCase {
       
       // NN should have received new checkpoint
       assertEquals(6, storage.getMostRecentCheckpointTxId());
+      
+      // Validate invariant that files named the same are the same.
+      assertParallelFilesInvariant(cluster, ImmutableList.of(secondary1, secondary2));
+  
+      // NN should have removed the checkpoint at txid 2 at this point, but has
+      // one at txid 6
+      assertNNHasCheckpoints(cluster, ImmutableList.of(4,6));
     } finally {
       cleanup(secondary1);
+      secondary1 = null;
       cleanup(secondary2);
+      secondary2 = null;
       if (cluster != null) {
         cluster.shutdown();
+        cluster = null;
       }
     }
-    
-    // Validate invariant that files named the same are the same.
-    assertParallelFilesInvariant(cluster, ImmutableList.of(secondary1, secondary2));
-
-    // NN should have removed the checkpoint at txid 2 at this point, but has
-    // one at txid 6
-    assertNNHasCheckpoints(cluster, ImmutableList.of(4,6));
   }
   
   
@@ -1276,15 +1791,15 @@ public class TestCheckpoint extends TestCase {
    * It verifies that one of the two gets an error that it's uploading a
    * duplicate checkpoint, and the other one succeeds.
    */
+  @Test
   public void testMultipleSecondaryNNsAgainstSameNN2() throws Exception {
     Configuration conf = new HdfsConfiguration();
-
-    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
-    .numDataNodes(0)
-    .format(true).build();
-
+    MiniDFSCluster cluster = null;
     SecondaryNameNode secondary1 = null, secondary2 = null;
     try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).format(true)
+          .build();
+
       // Start 2NNs
       secondary1 = startSecondaryNameNode(conf, 1);
       secondary2 = startSecondaryNameNode(conf, 2);
@@ -1298,6 +1813,7 @@ public class TestCheckpoint extends TestCase {
       final Answer<Object> delegator = new GenericTestUtils.DelegateAnswer(origNN);
       NamenodeProtocol spyNN = Mockito.mock(NamenodeProtocol.class, delegator);
       DelayAnswer delayer = new DelayAnswer(LOG) {
+        @Override
         protected Object passThrough(InvocationOnMock invocation) throws Throwable {
           return delegator.answer(invocation);
         }
@@ -1348,19 +1864,20 @@ public class TestCheckpoint extends TestCase {
       
       // NN should have received new checkpoint
       assertEquals(8, storage.getMostRecentCheckpointTxId());
+      
+      // Validate invariant that files named the same are the same.
+      assertParallelFilesInvariant(cluster, ImmutableList.of(secondary1, secondary2));
+      // Validate that the NN received checkpoints at expected txids
+      // (i.e that both checkpoints went through)
+      assertNNHasCheckpoints(cluster, ImmutableList.of(6,8));
     } finally {
       cleanup(secondary1);
+      secondary1 = null;
       cleanup(secondary2);
-      if (cluster != null) {
-        cluster.shutdown();
-      }
+      secondary2 = null;
+      cleanup(cluster);
+      cluster = null;
     }
-    
-    // Validate invariant that files named the same are the same.
-    assertParallelFilesInvariant(cluster, ImmutableList.of(secondary1, secondary2));
-    // Validate that the NN received checkpoints at expected txids
-    // (i.e that both checkpoints went through)
-    assertNNHasCheckpoints(cluster, ImmutableList.of(6,8));
   }
   
   /**
@@ -1368,6 +1885,7 @@ public class TestCheckpoint extends TestCase {
    * is running. The secondary should shut itself down if if talks to a NN
    * with the wrong namespace.
    */
+  @Test
   public void testReformatNNBetweenCheckpoints() throws IOException {
     MiniDFSCluster cluster = null;
     SecondaryNameNode secondary = null;
@@ -1381,7 +1899,12 @@ public class TestCheckpoint extends TestCase {
           .format(true).build();
       int origPort = cluster.getNameNodePort();
       int origHttpPort = cluster.getNameNode().getHttpAddress().getPort();
-      secondary = startSecondaryNameNode(conf);
+      Configuration snnConf = new Configuration(conf);
+      File checkpointDir = new File(MiniDFSCluster.getBaseDirectory(),
+        "namesecondary");
+      snnConf.set(DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_DIR_KEY,
+        checkpointDir.getAbsolutePath());
+      secondary = startSecondaryNameNode(snnConf);
 
       // secondary checkpoints once
       secondary.doCheckpoint();
@@ -1399,10 +1922,10 @@ public class TestCheckpoint extends TestCase {
       
       // Start a new NN with the same host/port.
       cluster = new MiniDFSCluster.Builder(conf)
-        .numDataNodes(0)
-        .nameNodePort(origPort)
-        .nameNodeHttpPort(origHttpPort)
-        .format(true).build();
+          .numDataNodes(0)
+          .nameNodePort(origPort)
+          .nameNodeHttpPort(origHttpPort)
+          .format(true).build();
 
       try {
         secondary.doCheckpoint();
@@ -1412,12 +1935,10 @@ public class TestCheckpoint extends TestCase {
         assertTrue(ioe.toString().contains("Inconsistent checkpoint"));
       }
     } finally {
-      if (secondary != null) {
-        secondary.shutdown();
-      }
-      if (cluster != null) {
-        cluster.shutdown();
-      }
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }  
   }
   
@@ -1425,6 +1946,7 @@ public class TestCheckpoint extends TestCase {
    * Test that the primary NN will not serve any files to a 2NN who doesn't
    * share its namespace ID, and also will not accept any files from one.
    */
+  @Test
   public void testNamespaceVerifiedOnFileTransfer() throws IOException {
     MiniDFSCluster cluster = null;
     
@@ -1434,8 +1956,9 @@ public class TestCheckpoint extends TestCase {
           .format(true).build();
       
       NamenodeProtocols nn = cluster.getNameNodeRpc();
-      String fsName = NetUtils.getHostPortString(
-          cluster.getNameNode().getHttpAddress());
+      URL fsName = DFSUtil.getInfoServer(
+          cluster.getNameNode().getServiceRpcAddress(), conf,
+          DFSUtil.getHttpClientScheme(conf)).toURL();
 
       // Make a finalized log on the server side. 
       nn.rollEditLog();
@@ -1446,8 +1969,15 @@ public class TestCheckpoint extends TestCase {
       Mockito.doReturn(Lists.newArrayList(new File("/wont-be-written")))
         .when(dstImage).getFiles(
             Mockito.<NameNodeDirType>anyObject(), Mockito.anyString());
-      
-      Mockito.doReturn(new StorageInfo(1, 1, "X", 1).toColonSeparatedString())
+
+      File mockImageFile = File.createTempFile("image", "");
+      FileOutputStream imageFile = new FileOutputStream(mockImageFile);
+      imageFile.write("data".getBytes());
+      imageFile.close();
+      Mockito.doReturn(mockImageFile).when(dstImage)
+          .findImageFile(Mockito.any(NameNodeFile.class), Mockito.anyLong());
+
+      Mockito.doReturn(new StorageInfo(1, 1, "X", 1, NodeType.NAME_NODE).toColonSeparatedString())
         .when(dstImage).toColonSeparatedString();
 
       try {
@@ -1467,17 +1997,16 @@ public class TestCheckpoint extends TestCase {
       }
 
       try {
-        InetSocketAddress fakeAddr = new InetSocketAddress(1);
-        TransferFsImage.uploadImageFromStorage(fsName, fakeAddr, dstImage, 0);
+        TransferFsImage.uploadImageFromStorage(fsName, conf, dstImage,
+            NameNodeFile.IMAGE, 0);
         fail("Storage info was not verified");
       } catch (IOException ioe) {
         String msg = StringUtils.stringifyException(ioe);
         assertTrue(msg, msg.contains("but the secondary expected"));
       }
     } finally {
-      if (cluster != null) {
-        cluster.shutdown();
-      }
+      cleanup(cluster);
+      cluster = null;
     }  
   }
 
@@ -1485,7 +2014,7 @@ public class TestCheckpoint extends TestCase {
    * Test that, if a storage directory is failed when a checkpoint occurs,
    * the non-failed storage directory receives the checkpoint.
    */
-  @SuppressWarnings("deprecation")
+  @Test
   public void testCheckpointWithFailedStorageDir() throws Exception {
     MiniDFSCluster cluster = null;
     SecondaryNameNode secondary = null;
@@ -1510,7 +2039,7 @@ public class TestCheckpoint extends TestCase {
       StorageDirectory sd1 = storage.getStorageDir(1);
       
       currentDir = sd0.getCurrentDir();
-      currentDir.setExecutable(false);
+      FileUtil.setExecutable(currentDir, false);
 
       // Upload checkpoint when NN has a bad storage dir. This should
       // succeed and create the checkpoint in the good dir.
@@ -1520,7 +2049,7 @@ public class TestCheckpoint extends TestCase {
           new File(sd1.getCurrentDir(), NNStorage.getImageFileName(2)));
       
       // Restore the good dir
-      currentDir.setExecutable(true);
+      FileUtil.setExecutable(currentDir, true);
       nn.restoreFailedStorage("true");
       nn.rollEditLog();
 
@@ -1531,14 +2060,12 @@ public class TestCheckpoint extends TestCase {
       assertParallelFilesInvariant(cluster, ImmutableList.of(secondary));
     } finally {
       if (currentDir != null) {
-        currentDir.setExecutable(true);
+        FileUtil.setExecutable(currentDir, true);
       }
-      if (secondary != null) {
-        secondary.shutdown();
-      }
-      if (cluster != null) {
-        cluster.shutdown();
-      }
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
   
@@ -1549,7 +2076,7 @@ public class TestCheckpoint extends TestCase {
    * should function correctly.
    * @throws Exception
    */
-  @SuppressWarnings("deprecation")
+  @Test
   public void testCheckpointWithSeparateDirsAfterNameFails() throws Exception {
     MiniDFSCluster cluster = null;
     SecondaryNameNode secondary = null;
@@ -1567,10 +2094,8 @@ public class TestCheckpoint extends TestCase {
         fileAsURI(new File(base_dir, "namesecondary1")).toString());
 
     try {
-      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0)
-          .format(true)
-          .manageNameDfsDirs(false)
-          .build();
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).format(true)
+          .manageNameDfsDirs(false).build();
   
       secondary = startSecondaryNameNode(conf);
 
@@ -1584,7 +2109,7 @@ public class TestCheckpoint extends TestCase {
       StorageDirectory sd0 = storage.getStorageDir(0);
       assertEquals(NameNodeDirType.IMAGE, sd0.getStorageDirType());
       currentDir = sd0.getCurrentDir();
-      currentDir.setExecutable(false);
+      assertEquals(0, FileUtil.chmod(currentDir.getAbsolutePath(), "000"));
 
       // Try to upload checkpoint -- this should fail since there are no
       // valid storage dirs
@@ -1597,7 +2122,7 @@ public class TestCheckpoint extends TestCase {
       }
       
       // Restore the good dir
-      currentDir.setExecutable(true);
+      assertEquals(0, FileUtil.chmod(currentDir.getAbsolutePath(), "755"));
       nn.restoreFailedStorage("true");
       nn.rollEditLog();
 
@@ -1608,20 +2133,19 @@ public class TestCheckpoint extends TestCase {
       assertParallelFilesInvariant(cluster, ImmutableList.of(secondary));
     } finally {
       if (currentDir != null) {
-        currentDir.setExecutable(true);
+        FileUtil.chmod(currentDir.getAbsolutePath(), "755");
       }
-      if (secondary != null) {
-        secondary.shutdown();
-      }
-      if (cluster != null) {
-        cluster.shutdown();
-      }
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
   
   /**
    * Test that the 2NN triggers a checkpoint after the configurable interval
    */
+  @Test(timeout=30000)
   public void testCheckpointTriggerOnTxnCount() throws Exception {
     MiniDFSCluster cluster = null;
     SecondaryNameNode secondary = null;
@@ -1631,12 +2155,12 @@ public class TestCheckpoint extends TestCase {
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_CHECK_PERIOD_KEY, 1);
     
     try {
-      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0)
+      cluster = new MiniDFSCluster.Builder(conf)
+          .numDataNodes(0)
           .format(true).build();
       FileSystem fs = cluster.getFileSystem();
       secondary = startSecondaryNameNode(conf);
-      Thread t = new Thread(secondary);
-      t.start();
+      secondary.startCheckpointThread();
       final NNStorage storage = secondary.getFSImage().getStorage();
 
       // 2NN should checkpoint at startup
@@ -1662,9 +2186,9 @@ public class TestCheckpoint extends TestCase {
       }, 200, 15000);
     } finally {
       cleanup(secondary);
-      if (cluster != null) {
-        cluster.shutdown();
-      }
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
 
@@ -1675,10 +2199,10 @@ public class TestCheckpoint extends TestCase {
    * logs that connect the 2NN's old checkpoint to the current txid
    * get archived. Then, the 2NN tries to checkpoint again.
    */
+  @Test
   public void testSecondaryHasVeryOutOfDateImage() throws IOException {
     MiniDFSCluster cluster = null;
     SecondaryNameNode secondary = null;
-    
     Configuration conf = new HdfsConfiguration();
 
     try {
@@ -1692,26 +2216,158 @@ public class TestCheckpoint extends TestCase {
 
       // Now primary NN saves namespace 3 times
       NamenodeProtocols nn = cluster.getNameNodeRpc();
-      nn.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+      nn.setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
       for (int i = 0; i < 3; i++) {
         nn.saveNamespace();
       }
-      nn.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+      nn.setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
       
       // Now the secondary tries to checkpoint again with its
       // old image in memory.
       secondary.doCheckpoint();
       
     } finally {
-      if (secondary != null) {
-        secondary.shutdown();
-      }
-      if (cluster != null) {
-        cluster.shutdown();
-      }
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
     }
   }
   
+  /**
+   * Regression test for HDFS-3678 "Edit log files are never being purged from 2NN"
+   */
+  @Test
+  public void testSecondaryPurgesEditLogs() throws IOException {
+    MiniDFSCluster cluster = null;
+    SecondaryNameNode secondary = null;
+    Configuration conf = new HdfsConfiguration();
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_NUM_EXTRA_EDITS_RETAINED_KEY, 0);
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).format(true)
+          .build();
+      
+      FileSystem fs = cluster.getFileSystem();
+      fs.mkdirs(new Path("/foo"));
+  
+      secondary = startSecondaryNameNode(conf);
+      
+      // Checkpoint a few times. Doing this will cause a log roll, and thus
+      // several edit log segments on the 2NN.
+      for (int i = 0; i < 5; i++) {
+        secondary.doCheckpoint();
+      }
+      
+      // Make sure there are no more edit log files than there should be.
+      List<File> checkpointDirs = getCheckpointCurrentDirs(secondary);
+      for (File checkpointDir : checkpointDirs) {
+        List<EditLogFile> editsFiles = FileJournalManager.matchEditLogs(
+            checkpointDir);
+        assertEquals("Edit log files were not purged from 2NN", 1,
+            editsFiles.size());
+      }
+      
+    } finally {
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
+    }
+  }
+  
+  /**
+   * Regression test for HDFS-3835 - "Long-lived 2NN cannot perform a
+   * checkpoint if security is enabled and the NN restarts without outstanding
+   * delegation tokens"
+   */
+  @Test
+  public void testSecondaryNameNodeWithDelegationTokens() throws IOException {
+    MiniDFSCluster cluster = null;
+    SecondaryNameNode secondary = null;
+    
+    Configuration conf = new HdfsConfiguration();
+    conf.setBoolean(
+        DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_ALWAYS_USE_KEY, true);
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .format(true).build();
+      
+      assertNotNull(cluster.getNamesystem().getDelegationToken(new Text("atm")));
+  
+      secondary = startSecondaryNameNode(conf);
+
+      // Checkpoint once, so the 2NN loads the DT into its in-memory sate.
+      secondary.doCheckpoint();
+      
+      // Perform a saveNamespace, so that the NN has a new fsimage, and the 2NN
+      // therefore needs to download a new fsimage the next time it performs a
+      // checkpoint.
+      cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
+      cluster.getNameNodeRpc().saveNamespace();
+      cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
+      
+      // Ensure that the 2NN can still perform a checkpoint.
+      secondary.doCheckpoint();
+    } finally {
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
+    }
+  }
+
+  /**
+   * Regression test for HDFS-3849.  This makes sure that when we re-load the
+   * FSImage in the 2NN, we clear the existing leases.
+   */
+  @Test
+  public void testSecondaryNameNodeWithSavedLeases() throws IOException {
+    MiniDFSCluster cluster = null;
+    SecondaryNameNode secondary = null;
+    FSDataOutputStream fos = null;
+    Configuration conf = new HdfsConfiguration();
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
+          .format(true).build();
+      FileSystem fs = cluster.getFileSystem();
+      fos = fs.create(new Path("tmpfile"));
+      fos.write(new byte[] { 0, 1, 2, 3 });
+      fos.hflush();
+      assertEquals(1, cluster.getNamesystem().getLeaseManager().countLease());
+
+      secondary = startSecondaryNameNode(conf);
+      assertEquals(0, secondary.getFSNamesystem().getLeaseManager().countLease());
+
+      // Checkpoint once, so the 2NN loads the lease into its in-memory sate.
+      secondary.doCheckpoint();
+      assertEquals(1, secondary.getFSNamesystem().getLeaseManager().countLease());
+      fos.close();
+      fos = null;
+
+      // Perform a saveNamespace, so that the NN has a new fsimage, and the 2NN
+      // therefore needs to download a new fsimage the next time it performs a
+      // checkpoint.
+      cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
+      cluster.getNameNodeRpc().saveNamespace();
+      cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
+      
+      // Ensure that the 2NN can still perform a checkpoint.
+      secondary.doCheckpoint();
+      
+      // And the leases have been cleared...
+      assertEquals(0, secondary.getFSNamesystem().getLeaseManager().countLease());
+    } finally {
+      if (fos != null) {
+        fos.close();
+      }
+      cleanup(secondary);
+      secondary = null;
+      cleanup(cluster);
+      cluster = null;
+    }
+  }
+  
+  @Test
   public void testCommandLineParsing() throws ParseException {
     SecondaryNameNode.CommandLineOpts opts =
       new SecondaryNameNode.CommandLineOpts();
@@ -1738,15 +2394,59 @@ public class TestCheckpoint extends TestCase {
     try {
       opts.parse("-geteditsize", "-checkpoint");
       fail("Should have failed bad parsing for two actions");
-    } catch (ParseException e) {}
+    } catch (ParseException e) {
+      LOG.warn("Encountered ", e);
+    }
     
     try {
       opts.parse("-checkpoint", "xx");
       fail("Should have failed for bad checkpoint arg");
-    } catch (ParseException e) {}
+    } catch (ParseException e) {
+      LOG.warn("Encountered ", e);
+    }
   }
 
-  private void cleanup(SecondaryNameNode snn) {
+  @Test
+  public void testLegacyOivImage() throws Exception {
+    MiniDFSCluster cluster = null;
+    SecondaryNameNode secondary = null;
+    File tmpDir = Files.createTempDir();
+    Configuration conf = new HdfsConfiguration();
+    conf.set(DFSConfigKeys.DFS_NAMENODE_LEGACY_OIV_IMAGE_DIR_KEY,
+        tmpDir.getAbsolutePath());
+    conf.set(DFSConfigKeys.DFS_NAMENODE_NUM_CHECKPOINTS_RETAINED_KEY,
+        "2");
+
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0)
+              .format(true).build();
+
+      secondary = startSecondaryNameNode(conf);
+
+      // Checkpoint once
+      secondary.doCheckpoint();
+      String files1[] = tmpDir.list();
+      assertEquals("Only one file is expected", 1, files1.length);
+
+      // Perform more checkpointngs and check whether retention management
+      // is working.
+      secondary.doCheckpoint();
+      secondary.doCheckpoint();
+      String files2[] = tmpDir.list();
+      assertEquals("Two files are expected", 2, files2.length);
+
+      // Verify that the first file is deleted.
+      for (String fName : files2) {
+        assertFalse(fName.equals(files1[0]));
+      }
+    } finally {
+      cleanup(secondary);
+      cleanup(cluster);
+      tmpDir.delete();
+    }
+  }
+
+  private static void cleanup(SecondaryNameNode snn) {
     if (snn != null) {
       try {
         snn.shutdown();
@@ -1756,6 +2456,15 @@ public class TestCheckpoint extends TestCase {
     }
   }
 
+  private static void cleanup(MiniDFSCluster cluster) {
+    if (cluster != null) {
+      try {
+        cluster.shutdown();
+      } catch (Exception e) {
+        LOG.warn("Could not shutdown MiniDFSCluster ", e);
+      }
+    }
+  }
 
   /**
    * Assert that if any two files have the same name across the 2NNs
@@ -1772,16 +2481,16 @@ public class TestCheckpoint extends TestCase {
         ImmutableSet.of("VERSION"));    
   }
   
-  private List<File> getCheckpointCurrentDirs(SecondaryNameNode secondary) {
+  private static List<File> getCheckpointCurrentDirs(SecondaryNameNode secondary) {
     List<File> ret = Lists.newArrayList();
-    for (URI u : secondary.getCheckpointDirs()) {
-      File checkpointDir = new File(u.getPath());
+    for (String u : secondary.getCheckpointDirectories()) {
+      File checkpointDir = new File(URI.create(u).getPath());
       ret.add(new File(checkpointDir, "current"));
     }
     return ret;
   }
 
-  private CheckpointStorage spyOnSecondaryImage(SecondaryNameNode secondary1) {
+  private static CheckpointStorage spyOnSecondaryImage(SecondaryNameNode secondary1) {
     CheckpointStorage spy = Mockito.spy((CheckpointStorage)secondary1.getFSImage());;
     secondary1.setFSImage(spy);
     return spy;
@@ -1815,3 +2524,4 @@ public class TestCheckpoint extends TestCase {
   }
 
 }
+

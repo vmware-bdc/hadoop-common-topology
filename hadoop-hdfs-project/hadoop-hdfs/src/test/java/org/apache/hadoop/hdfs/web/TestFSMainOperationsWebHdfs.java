@@ -17,9 +17,6 @@
  */
 package org.apache.hadoop.hdfs.web;
 
-import static org.apache.hadoop.fs.FileSystemTestHelper.exists;
-import static org.apache.hadoop.fs.FileSystemTestHelper.getTestRootPath;
-
 import java.io.IOException;
 import java.net.URI;
 import java.security.PrivilegedExceptionAction;
@@ -27,10 +24,12 @@ import java.security.PrivilegedExceptionAction;
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSMainOperationsBaseTest;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.server.datanode.web.resources.DatanodeWebHdfsMethods;
 import org.apache.hadoop.hdfs.web.resources.ExceptionHandler;
@@ -50,11 +49,22 @@ public class TestFSMainOperationsWebHdfs extends FSMainOperationsBaseTest {
 
   private static MiniDFSCluster cluster = null;
   private static Path defaultWorkingDirectory;
+  private static FileSystem fileSystem;
+  
+  public TestFSMainOperationsWebHdfs() {
+    super("/tmp/TestFSMainOperationsWebHdfs");
+  }
+
+  @Override
+  protected FileSystem createFileSystem() throws Exception {
+    return fileSystem;
+  }
 
   @BeforeClass
   public static void setupCluster() {
     final Configuration conf = new Configuration();
     conf.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, 1024);
     try {
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       cluster.waitActive();
@@ -70,14 +80,14 @@ public class TestFSMainOperationsWebHdfs extends FSMainOperationsBaseTest {
       final UserGroupInformation current = UserGroupInformation.getCurrentUser();
       final UserGroupInformation ugi = UserGroupInformation.createUserForTesting(
           current.getShortUserName() + "x", new String[]{"user"});
-      fSys = ugi.doAs(new PrivilegedExceptionAction<FileSystem>() {
+      fileSystem = ugi.doAs(new PrivilegedExceptionAction<FileSystem>() {
         @Override
         public FileSystem run() throws Exception {
           return FileSystem.get(new URI(uri), conf);
         }
       });
 
-      defaultWorkingDirectory = fSys.getWorkingDirectory();
+      defaultWorkingDirectory = fileSystem.getWorkingDirectory();
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
@@ -96,6 +106,31 @@ public class TestFSMainOperationsWebHdfs extends FSMainOperationsBaseTest {
     return defaultWorkingDirectory;
   }
 
+  @Test
+  public void testConcat() throws Exception {
+    Path[] paths = {new Path("/test/hadoop/file1"),
+                    new Path("/test/hadoop/file2"),
+                    new Path("/test/hadoop/file3")};
+
+    DFSTestUtil.createFile(fSys, paths[0], 1024, (short) 3, 0);
+    DFSTestUtil.createFile(fSys, paths[1], 1024, (short) 3, 0);
+    DFSTestUtil.createFile(fSys, paths[2], 1024, (short) 3, 0);
+
+    Path catPath = new Path("/test/hadoop/catFile");
+    DFSTestUtil.createFile(fSys, catPath, 1024, (short) 3, 0);
+    Assert.assertTrue(exists(fSys, catPath));
+
+    fSys.concat(catPath, paths);
+
+    Assert.assertFalse(exists(fSys, paths[0]));
+    Assert.assertFalse(exists(fSys, paths[1]));
+    Assert.assertFalse(exists(fSys, paths[2]));
+
+    FileStatus fileStatus = fSys.getFileStatus(catPath);
+    Assert.assertEquals(1024*4, fileStatus.getLen());
+  }
+
+  @Override
   @Test
   public void testMkdirsFailsForSubdirectoryOfExistingFile() throws Exception {
     Path testDir = getTestRootPath(fSys, "test/hadoop");
@@ -131,4 +166,5 @@ public class TestFSMainOperationsWebHdfs extends FSMainOperationsBaseTest {
       // also okay for HDFS.
     }    
   }
+
 }

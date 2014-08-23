@@ -23,18 +23,19 @@ import java.util.List;
 
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeStatus;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReceivedAndDeletedRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReceivedAndDeletedResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReportRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.BlockReportResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.CacheReportRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.CacheReportResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.CommitBlockSynchronizationRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.CommitBlockSynchronizationResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.ErrorReportRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.ErrorReportResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.HeartbeatRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.HeartbeatResponseProto;
-import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.ProcessUpgradeRequestProto;
-import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.ProcessUpgradeResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.ReceivedDeletedBlockInfoProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.RegisterDatanodeRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.RegisterDatanodeResponseProto;
@@ -42,7 +43,6 @@ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.ReportBadBlo
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.ReportBadBlocksResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.StorageBlockReportProto;
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.StorageReceivedDeletedBlocksProto;
-import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.StorageReportProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.DatanodeIDProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.LocatedBlockProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.VersionRequestProto;
@@ -56,7 +56,6 @@ import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
-import org.apache.hadoop.hdfs.server.protocol.UpgradeCommand;
 
 import com.google.protobuf.RpcController;
 import com.google.protobuf.ServiceException;
@@ -65,15 +64,17 @@ public class DatanodeProtocolServerSideTranslatorPB implements
     DatanodeProtocolPB {
 
   private final DatanodeProtocol impl;
-  private static final ErrorReportResponseProto ERROR_REPORT_RESPONSE_PROTO = 
-      ErrorReportResponseProto.newBuilder().build();
+  private static final ErrorReportResponseProto
+      VOID_ERROR_REPORT_RESPONSE_PROTO = 
+          ErrorReportResponseProto.newBuilder().build();
   private static final BlockReceivedAndDeletedResponseProto 
-      BLOCK_RECEIVED_AND_DELETE_RESPONSE = 
+      VOID_BLOCK_RECEIVED_AND_DELETE_RESPONSE = 
           BlockReceivedAndDeletedResponseProto.newBuilder().build();
-  private static final ReportBadBlocksResponseProto REPORT_BAD_BLOCK_RESPONSE = 
-      ReportBadBlocksResponseProto.newBuilder().build();
+  private static final ReportBadBlocksResponseProto
+      VOID_REPORT_BAD_BLOCK_RESPONSE = 
+          ReportBadBlocksResponseProto.newBuilder().build();
   private static final CommitBlockSynchronizationResponseProto 
-      COMMIT_BLOCK_SYNCHRONIZATION_RESPONSE_PROTO =
+      VOID_COMMIT_BLOCK_SYNCHRONIZATION_RESPONSE_PROTO =
           CommitBlockSynchronizationResponseProto.newBuilder().build();
 
   public DatanodeProtocolServerSideTranslatorPB(DatanodeProtocol impl) {
@@ -101,17 +102,12 @@ public class DatanodeProtocolServerSideTranslatorPB implements
       HeartbeatRequestProto request) throws ServiceException {
     HeartbeatResponse response;
     try {
-      List<StorageReportProto> list = request.getReportsList();
-      StorageReport[] report = new StorageReport[list.size()];
-      int i = 0;
-      for (StorageReportProto p : list) {
-        report[i++] = new StorageReport(p.getStorageID(), p.getFailed(),
-            p.getCapacity(), p.getDfsUsed(), p.getRemaining(),
-            p.getBlockPoolUsed());
-      }
+      final StorageReport[] report = PBHelper.convertStorageReports(
+          request.getReportsList());
       response = impl.sendHeartbeat(PBHelper.convert(request.getRegistration()),
-          report, request.getXmitsInProgress(), request.getXceiverCount(),
-          request.getFailedVolumes());
+          report, request.getCacheCapacity(), request.getCacheUsed(),
+          request.getXmitsInProgress(),
+          request.getXceiverCount(), request.getFailedVolumes());
     } catch (IOException e) {
       throw new ServiceException(e);
     }
@@ -126,6 +122,12 @@ public class DatanodeProtocolServerSideTranslatorPB implements
       }
     }
     builder.setHaStatus(PBHelper.convert(response.getNameNodeHaState()));
+    RollingUpgradeStatus rollingUpdateStatus = response
+        .getRollingUpdateStatus();
+    if (rollingUpdateStatus != null) {
+      builder.setRollingUpgradeStatus(PBHelper
+          .convertRollingUpgradeStatus(rollingUpdateStatus));
+    }
     return builder.build();
   }
 
@@ -161,6 +163,27 @@ public class DatanodeProtocolServerSideTranslatorPB implements
   }
 
   @Override
+  public CacheReportResponseProto cacheReport(RpcController controller,
+      CacheReportRequestProto request) throws ServiceException {
+    DatanodeCommand cmd = null;
+    try {
+      cmd = impl.cacheReport(
+          PBHelper.convert(request.getRegistration()),
+          request.getBlockPoolId(),
+          request.getBlocksList());
+    } catch (IOException e) {
+      throw new ServiceException(e);
+    }
+    CacheReportResponseProto.Builder builder =
+        CacheReportResponseProto.newBuilder();
+    if (cmd != null) {
+      builder.setCmd(PBHelper.convert(cmd));
+    }
+    return builder.build();
+  }
+
+
+  @Override
   public BlockReceivedAndDeletedResponseProto blockReceivedAndDeleted(
       RpcController controller, BlockReceivedAndDeletedRequestProto request)
       throws ServiceException {
@@ -175,7 +198,12 @@ public class DatanodeProtocolServerSideTranslatorPB implements
       for (int j = 0; j < list.size(); j++) {
         rdBlocks[j] = PBHelper.convert(list.get(j));
       }
-      info[i] = new StorageReceivedDeletedBlocks(sBlock.getStorageID(), rdBlocks);
+      if (sBlock.hasStorage()) {
+        info[i] = new StorageReceivedDeletedBlocks(
+            PBHelper.convert(sBlock.getStorage()), rdBlocks);
+      } else {
+        info[i] = new StorageReceivedDeletedBlocks(sBlock.getStorageUuid(), rdBlocks);
+      }
     }
     try {
       impl.blockReceivedAndDeleted(PBHelper.convert(request.getRegistration()),
@@ -183,7 +211,7 @@ public class DatanodeProtocolServerSideTranslatorPB implements
     } catch (IOException e) {
       throw new ServiceException(e);
     }
-    return BLOCK_RECEIVED_AND_DELETE_RESPONSE;
+    return VOID_BLOCK_RECEIVED_AND_DELETE_RESPONSE;
   }
 
   @Override
@@ -195,7 +223,7 @@ public class DatanodeProtocolServerSideTranslatorPB implements
     } catch (IOException e) {
       throw new ServiceException(e);
     }
-    return ERROR_REPORT_RESPONSE_PROTO;
+    return VOID_ERROR_REPORT_RESPONSE_PROTO;
   }
 
   @Override
@@ -212,25 +240,6 @@ public class DatanodeProtocolServerSideTranslatorPB implements
   }
 
   @Override
-  public ProcessUpgradeResponseProto processUpgrade(RpcController controller,
-      ProcessUpgradeRequestProto request) throws ServiceException {
-    UpgradeCommand ret;
-    try {
-      UpgradeCommand cmd = request.hasCmd() ? PBHelper
-          .convert(request.getCmd()) : null;
-      ret = impl.processUpgradeCommand(cmd);
-    } catch (IOException e) {
-      throw new ServiceException(e);
-    }
-    ProcessUpgradeResponseProto.Builder builder = 
-        ProcessUpgradeResponseProto.newBuilder();
-    if (ret != null) {
-      builder.setCmd(PBHelper.convert(ret));
-    }
-    return builder.build();
-  }
-
-  @Override
   public ReportBadBlocksResponseProto reportBadBlocks(RpcController controller,
       ReportBadBlocksRequestProto request) throws ServiceException {
     List<LocatedBlockProto> lbps = request.getBlocksList();
@@ -243,7 +252,7 @@ public class DatanodeProtocolServerSideTranslatorPB implements
     } catch (IOException e) {
       throw new ServiceException(e);
     }
-    return REPORT_BAD_BLOCK_RESPONSE;
+    return VOID_REPORT_BAD_BLOCK_RESPONSE;
   }
 
   @Override
@@ -264,6 +273,6 @@ public class DatanodeProtocolServerSideTranslatorPB implements
     } catch (IOException e) {
       throw new ServiceException(e);
     }
-    return COMMIT_BLOCK_SYNCHRONIZATION_RESPONSE_PROTO;
+    return VOID_COMMIT_BLOCK_SYNCHRONIZATION_RESPONSE_PROTO;
   }
 }

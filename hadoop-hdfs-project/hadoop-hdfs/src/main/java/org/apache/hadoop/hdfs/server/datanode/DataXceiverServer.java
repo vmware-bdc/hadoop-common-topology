@@ -18,23 +18,20 @@
 package org.apache.hadoop.hdfs.server.datanode;
 
 import java.io.IOException;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.channels.AsynchronousCloseException;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Set;
+import java.util.HashMap;
 
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.server.balancer.Balancer;
+import org.apache.hadoop.hdfs.net.Peer;
+import org.apache.hadoop.hdfs.net.PeerServer;
 import org.apache.hadoop.hdfs.util.DataTransferThrottler;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.Daemon;
 
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Server used for receiving/sending a block of data.
@@ -45,11 +42,11 @@ import org.apache.hadoop.util.Daemon;
 class DataXceiverServer implements Runnable {
   public static final Log LOG = DataNode.LOG;
   
-  ServerSocket ss;
-  DataNode datanode;
-  // Record all sockets opened for data transfer
-  Set<Socket> childSockets = Collections.synchronizedSet(
-                                       new HashSet<Socket>());
+  private final PeerServer peerServer;
+  private final DataNode datanode;
+  private final HashMap<Peer, Thread> peers = new HashMap<Peer, Thread>();
+  private final HashMap<Peer, DataXceiver> peersXceiver = new HashMap<Peer, DataXceiver>();
+  private boolean closed = false;
   
   /**
    * Maximal number of concurrent xceivers per node.
@@ -67,14 +64,17 @@ class DataXceiverServer implements Runnable {
    */
   static class BlockBalanceThrottler extends DataTransferThrottler {
    private int numThreads;
+   private int maxThreads;
    
    /**Constructor
     * 
     * @param bandwidth Total amount of bandwidth can be used for balancing 
     */
-   private BlockBalanceThrottler(long bandwidth) {
+   private BlockBalanceThrottler(long bandwidth, int maxThreads) {
      super(bandwidth);
+     this.maxThreads = maxThreads;
      LOG.info("Balancing bandwith is "+ bandwidth + " bytes/s");
+     LOG.info("Number threads for balancing is "+ maxThreads);
    }
    
    /** Check if the block move can start. 
@@ -83,7 +83,7 @@ class DataXceiverServer implements Runnable {
     * the counter is incremented; False otherwise.
     */
    synchronized boolean acquire() {
-     if (numThreads >= Balancer.MAX_NUM_CONCURRENT_MOVES) {
+     if (numThreads >= maxThreads) {
        return false;
      }
      numThreads++;
@@ -96,23 +96,20 @@ class DataXceiverServer implements Runnable {
    }
   }
 
-  BlockBalanceThrottler balanceThrottler;
+  final BlockBalanceThrottler balanceThrottler;
   
   /**
    * We need an estimate for block size to check if the disk partition has
-   * enough space. For now we set it to be the default block size set
-   * in the server side configuration, which is not ideal because the
-   * default block size should be a client-size configuration. 
-   * A better solution is to include in the header the estimated block size,
-   * i.e. either the actual block size or the default block size.
+   * enough space. Newer clients pass the expected block size to the DataNode.
+   * For older clients we just use the server-side default block size.
    */
-  long estimateBlockSize;
+  final long estimateBlockSize;
   
   
-  DataXceiverServer(ServerSocket ss, Configuration conf, 
+  DataXceiverServer(PeerServer peerServer, Configuration conf,
       DataNode datanode) {
     
-    this.ss = ss;
+    this.peerServer = peerServer;
     this.datanode = datanode;
     
     this.maxXceiverCount = 
@@ -124,17 +121,18 @@ class DataXceiverServer implements Runnable {
     
     //set up parameter for cluster balancing
     this.balanceThrottler = new BlockBalanceThrottler(
-      conf.getLong(DFSConfigKeys.DFS_DATANODE_BALANCE_BANDWIDTHPERSEC_KEY, 
-                   DFSConfigKeys.DFS_DATANODE_BALANCE_BANDWIDTHPERSEC_DEFAULT));
+        conf.getLong(DFSConfigKeys.DFS_DATANODE_BALANCE_BANDWIDTHPERSEC_KEY,
+            DFSConfigKeys.DFS_DATANODE_BALANCE_BANDWIDTHPERSEC_DEFAULT),
+        conf.getInt(DFSConfigKeys.DFS_DATANODE_BALANCE_MAX_NUM_CONCURRENT_MOVES_KEY,
+            DFSConfigKeys.DFS_DATANODE_BALANCE_MAX_NUM_CONCURRENT_MOVES_DEFAULT));
   }
 
   @Override
   public void run() {
-    while (datanode.shouldRun) {
-      Socket s = null;
+    Peer peer = null;
+    while (datanode.shouldRun && !datanode.shutdownForUpgrade) {
       try {
-        s = ss.accept();
-        s.setTcpNoDelay(true);
+        peer = peerServer.accept();
 
         // Make sure the xceiver count is not exceeded
         int curXceiverCount = datanode.getXceiverCount();
@@ -144,21 +142,22 @@ class DataXceiverServer implements Runnable {
               + maxXceiverCount);
         }
 
-        new Daemon(datanode.threadGroup, new DataXceiver(s, datanode, this))
+        new Daemon(datanode.threadGroup,
+            DataXceiver.create(peer, datanode, this))
             .start();
       } catch (SocketTimeoutException ignored) {
         // wake up to see if should continue to run
       } catch (AsynchronousCloseException ace) {
         // another thread closed our listener socket - that's expected during shutdown,
         // but not in other circumstances
-        if (datanode.shouldRun) {
+        if (datanode.shouldRun && !datanode.shutdownForUpgrade) {
           LOG.warn(datanode.getDisplayName() + ":DataXceiverServer: ", ace);
         }
       } catch (IOException ie) {
-        IOUtils.closeSocket(s);
+        IOUtils.cleanup(null, peer);
         LOG.warn(datanode.getDisplayName() + ":DataXceiverServer: ", ie);
       } catch (OutOfMemoryError ie) {
-        IOUtils.closeSocket(s);
+        IOUtils.cleanup(null, peer);
         // DataNode can run out of memory if there is too many transfers.
         // Log the event, Sleep for 30 seconds, other transfers may complete by
         // then.
@@ -174,33 +173,114 @@ class DataXceiverServer implements Runnable {
         datanode.shouldRun = false;
       }
     }
+
+    // Close the server to stop reception of more requests.
     try {
-      ss.close();
+      peerServer.close();
+      closed = true;
     } catch (IOException ie) {
       LOG.warn(datanode.getDisplayName()
           + " :DataXceiverServer: close exception", ie);
     }
-  }
-  
-  void kill() {
-    assert datanode.shouldRun == false :
-      "shoudRun should be set to false before killing";
-    try {
-      this.ss.close();
-    } catch (IOException ie) {
-      LOG.warn(datanode.getDisplayName() + ":DataXceiverServer.kill(): ", ie);
-    }
 
-    // close all the sockets that were accepted earlier
-    synchronized (childSockets) {
-      for (Iterator<Socket> it = childSockets.iterator();
-           it.hasNext();) {
-        Socket thissock = it.next();
+    // if in restart prep stage, notify peers before closing them.
+    if (datanode.shutdownForUpgrade) {
+      restartNotifyPeers();
+      // Each thread needs some time to process it. If a thread needs
+      // to send an OOB message to the client, but blocked on network for
+      // long time, we need to force its termination.
+      LOG.info("Shutting down DataXceiverServer before restart");
+      // Allow roughly up to 2 seconds.
+      for (int i = 0; getNumPeers() > 0 && i < 10; i++) {
         try {
-          thissock.close();
-        } catch (IOException e) {
+          Thread.sleep(200);
+        } catch (InterruptedException e) {
+          // ignore
         }
       }
     }
+    // Close all peers.
+    closeAllPeers();
+  }
+
+  void kill() {
+    assert (datanode.shouldRun == false || datanode.shutdownForUpgrade) :
+      "shoudRun should be set to false or restarting should be true"
+      + " before killing";
+    try {
+      this.peerServer.close();
+      this.closed = true;
+    } catch (IOException ie) {
+      LOG.warn(datanode.getDisplayName() + ":DataXceiverServer.kill(): ", ie);
+    }
+  }
+  
+  synchronized void addPeer(Peer peer, Thread t, DataXceiver xceiver)
+      throws IOException {
+    if (closed) {
+      throw new IOException("Server closed.");
+    }
+    peers.put(peer, t);
+    peersXceiver.put(peer, xceiver);
+  }
+
+  synchronized void closePeer(Peer peer) {
+    peers.remove(peer);
+    peersXceiver.remove(peer);
+    IOUtils.cleanup(null, peer);
+  }
+
+  // Sending OOB to all peers
+  public synchronized void sendOOBToPeers() {
+    if (!datanode.shutdownForUpgrade) {
+      return;
+    }
+
+    for (Peer p : peers.keySet()) {
+      try {
+        peersXceiver.get(p).sendOOB();
+      } catch (IOException e) {
+        LOG.warn("Got error when sending OOB message.", e);
+      } catch (InterruptedException e) {
+        LOG.warn("Interrupted when sending OOB message.");
+      }
+    }
+  }
+  
+  // Notify all peers of the shutdown and restart.
+  // datanode.shouldRun should still be true and datanode.restarting should
+  // be set true before calling this method.
+  synchronized void restartNotifyPeers() {
+    assert (datanode.shouldRun == true && datanode.shutdownForUpgrade);
+    for (Peer p : peers.keySet()) {
+      // interrupt each and every DataXceiver thread.
+      peers.get(p).interrupt();
+    }
+  }
+
+  // Close all peers and clear the map.
+  synchronized void closeAllPeers() {
+    LOG.info("Closing all peers.");
+    for (Peer p : peers.keySet()) {
+      IOUtils.cleanup(LOG, p);
+    }
+    peers.clear();
+    peersXceiver.clear();
+  }
+
+  // Return the number of peers.
+  synchronized int getNumPeers() {
+    return peers.size();
+  }
+
+  // Return the number of peers and DataXceivers.
+  @VisibleForTesting
+  synchronized int getNumPeersXceiver() {
+    return peersXceiver.size();
+  }
+  
+  synchronized void releasePeer(Peer peer) {
+    peers.remove(peer);
+    peersXceiver.remove(peer);
   }
 }

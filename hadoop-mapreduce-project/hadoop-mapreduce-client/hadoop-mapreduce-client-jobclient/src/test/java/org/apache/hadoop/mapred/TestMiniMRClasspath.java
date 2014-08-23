@@ -169,11 +169,11 @@ public class TestMiniMRClasspath {
       final int jobTrackerPort = 60050;
 
       Configuration conf = new Configuration();
-      dfs = new MiniDFSCluster(conf, 1, true, null);
+      dfs = new MiniDFSCluster.Builder(conf).build();
       fileSys = dfs.getFileSystem();
       namenode = fileSys.getUri().toString();
       mr = new MiniMRCluster(taskTrackers, namenode, 3);
-      JobConf jobConf = new JobConf();
+      JobConf jobConf = mr.createJobConf();
       String result;
       result = launchWordCount(fileSys.getUri(), jobConf,
           "The quick brown fox\nhas many silly\n" + "red fox sox\n", 3, 1);
@@ -201,11 +201,11 @@ public class TestMiniMRClasspath {
       final int taskTrackers = 4;
 
       Configuration conf = new Configuration();
-      dfs = new MiniDFSCluster(conf, 1, true, null);
+      dfs = new MiniDFSCluster.Builder(conf).build();
       fileSys = dfs.getFileSystem();
       namenode = fileSys.getUri().toString();
       mr = new MiniMRCluster(taskTrackers, namenode, 3);      
-      JobConf jobConf = new JobConf();
+      JobConf jobConf = mr.createJobConf();
       String result;
       
       result = launchExternal(fileSys.getUri(), jobConf,

@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -40,8 +41,8 @@ import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.LeaseManager;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
@@ -72,7 +73,7 @@ public class TestBalancerWithMultipleNameNodes {
   private static final Random RANDOM = new Random();
 
   static {
-    Balancer.setBlockMoveWaitTime(1000L) ;
+    Dispatcher.setBlockMoveWaitTime(1000L) ;
   }
 
   /** Common objects used in various methods. */
@@ -96,7 +97,7 @@ public class TestBalancerWithMultipleNameNodes {
 
   /* create a file with a length of <code>fileLen</code> */
   private static void createFile(Suite s, int index, long len
-      ) throws IOException {
+      ) throws IOException, InterruptedException, TimeoutException {
     final FileSystem fs = s.cluster.getFileSystem(index);
     DFSTestUtil.createFile(fs, FILE_PATH, len, s.replication, RANDOM.nextLong());
     DFSTestUtil.waitReplication(fs, FILE_PATH, s.replication);
@@ -106,7 +107,7 @@ public class TestBalancerWithMultipleNameNodes {
    * whose used space to be <code>size</code>
    */
   private static ExtendedBlock[][] generateBlocks(Suite s, long size
-      ) throws IOException {
+      ) throws IOException, InterruptedException, TimeoutException {
     final ExtendedBlock[][] blocks = new ExtendedBlock[s.clients.length][];
     for(int n = 0; n < s.clients.length; n++) {
       final long fileLen = size/s.replication;
@@ -158,8 +159,8 @@ public class TestBalancerWithMultipleNameNodes {
 
     // start rebalancing
     final Collection<URI> namenodes = DFSUtil.getNsServiceRpcUris(s.conf);
-    final int r = Balancer.run(namenodes, Balancer.Parameters.DEFALUT, s.conf);
-    Assert.assertEquals(Balancer.ReturnStatus.SUCCESS.code, r);
+    final int r = Balancer.run(namenodes, Balancer.Parameters.DEFAULT, s.conf);
+    Assert.assertEquals(ExitStatus.SUCCESS.getExitCode(), r);
 
     LOG.info("BALANCER 2");
     wait(s.clients, totalUsed, totalCapacity);
@@ -194,7 +195,7 @@ public class TestBalancerWithMultipleNameNodes {
       balanced = true;
       for(int d = 0; d < used.length; d++) {
         final double p = used[d]*100.0/cap[d];
-        balanced = p <= avg + Balancer.Parameters.DEFALUT.threshold;
+        balanced = p <= avg + Balancer.Parameters.DEFAULT.threshold;
         if (!balanced) {
           if (i % 100 == 0) {
             LOG.warn("datanodes " + d + " is not yet balanced: "

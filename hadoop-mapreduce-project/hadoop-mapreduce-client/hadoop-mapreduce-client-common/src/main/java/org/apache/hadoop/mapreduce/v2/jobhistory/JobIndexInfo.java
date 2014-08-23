@@ -18,10 +18,11 @@
 
 package org.apache.hadoop.mapreduce.v2.jobhistory;
 
+import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 
 /**
- * Maintains information which may be used by the jobHistroy indexing
+ * Maintains information which may be used by the jobHistory indexing
  * system.
  */
 public class JobIndexInfo {
@@ -34,12 +35,20 @@ public class JobIndexInfo {
   private int numMaps;
   private int numReduces;
   private String jobStatus;
+  private long jobStartTime;
   
   public JobIndexInfo() {
   }
   
   public JobIndexInfo(long submitTime, long finishTime, String user,
       String jobName, JobId jobId, int numMaps, int numReduces, String jobStatus) {
+    this(submitTime, finishTime, user, jobName, jobId, numMaps, numReduces,
+         jobStatus, JobConf.DEFAULT_QUEUE_NAME);
+  }
+
+  public JobIndexInfo(long submitTime, long finishTime, String user,
+                      String jobName, JobId jobId, int numMaps, int numReduces,
+                      String jobStatus, String queueName) {
     this.submitTime = submitTime;
     this.finishTime = finishTime;
     this.user = user;
@@ -48,8 +57,10 @@ public class JobIndexInfo {
     this.numMaps = numMaps;
     this.numReduces = numReduces;
     this.jobStatus = jobStatus;
+    this.jobStartTime = -1;
+    this.queueName = queueName;
   }
-  
+
   public long getSubmitTime() {
     return submitTime;
   }
@@ -103,6 +114,12 @@ public class JobIndexInfo {
   }
   public void setJobStatus(String jobStatus) {
     this.jobStatus = jobStatus;
+  }
+  public long getJobStartTime() {
+      return jobStartTime;
+  }
+  public void setJobStartTime(long lTime) {
+      this.jobStartTime = lTime;
   }
 
   @Override

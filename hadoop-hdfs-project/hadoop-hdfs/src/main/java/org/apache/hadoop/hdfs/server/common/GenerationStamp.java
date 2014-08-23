@@ -18,16 +18,17 @@
 package org.apache.hadoop.hdfs.server.common;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.util.SequentialNumber;
 
 /****************************************************************
  * A GenerationStamp is a Hadoop FS primitive, identified by a long.
  ****************************************************************/
 @InterfaceAudience.Private
-public class GenerationStamp implements Comparable<GenerationStamp> {
+public class GenerationStamp extends SequentialNumber {
   /**
-   * The first valid generation stamp.
+   * The last reserved generation stamp.
    */
-  public static final long FIRST_VALID_STAMP = 1000L;
+  public static final long LAST_RESERVED_STAMP = 1000L;
 
   /**
    * Generation stamp of blocks that pre-date the introduction
@@ -35,60 +36,10 @@ public class GenerationStamp implements Comparable<GenerationStamp> {
    */
   public static final long GRANDFATHER_GENERATION_STAMP = 0;
 
-  private volatile long genstamp;
-
   /**
-   * Create a new instance, initialized to FIRST_VALID_STAMP.
+   * Create a new instance, initialized to {@link #LAST_RESERVED_STAMP}.
    */
   public GenerationStamp() {
-    this(GenerationStamp.FIRST_VALID_STAMP);
-  }
-
-  /**
-   * Create a new instance, initialized to the specified value.
-   */
-  GenerationStamp(long stamp) {
-    this.genstamp = stamp;
-  }
-
-  /**
-   * Returns the current generation stamp
-   */
-  public long getStamp() {
-    return this.genstamp;
-  }
-
-  /**
-   * Sets the current generation stamp
-   */
-  public void setStamp(long stamp) {
-    this.genstamp = stamp;
-  }
-
-  /**
-   * First increments the counter and then returns the stamp 
-   */
-  public synchronized long nextStamp() {
-    this.genstamp++;
-    return this.genstamp;
-  }
-
-  @Override // Comparable
-  public int compareTo(GenerationStamp that) {
-    return this.genstamp < that.genstamp ? -1 :
-           this.genstamp > that.genstamp ? 1 : 0;
-  }
-
-  @Override // Object
-  public boolean equals(Object o) {
-    if (!(o instanceof GenerationStamp)) {
-      return false;
-    }
-    return compareTo((GenerationStamp)o) == 0;
-  }
-
-  @Override // Object
-  public int hashCode() {
-    return (int) (genstamp^(genstamp>>>32));
+    super(LAST_RESERVED_STAMP);
   }
 }

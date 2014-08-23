@@ -19,26 +19,52 @@ package org.apache.hadoop.hdfs;
 
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_FAILOVER_PROXY_PROVIDER_KEY_PREFIX;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketAddress;
+import java.lang.reflect.Field;
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.List;
+
+import javax.net.SocketFactory;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider;
+import org.apache.hadoop.hdfs.server.namenode.ha.IPFailoverProxyProvider;
 import org.apache.hadoop.hdfs.server.namenode.ha.HATestUtil;
+import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.io.retry.DefaultFailoverProxyProvider;
+import org.apache.hadoop.io.retry.FailoverProxyProvider;
+import org.apache.hadoop.net.ConnectTimeoutException;
+import org.apache.hadoop.net.StandardSocketFactory;
+import org.apache.hadoop.security.SecurityUtil;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.StringUtils;
+import org.hamcrest.BaseMatcher;
+import org.hamcrest.Description;
 import org.junit.After;
+import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Mockito;
+
+import sun.net.spi.nameservice.NameService;
 
 public class TestDFSClientFailover {
   
@@ -47,7 +73,7 @@ public class TestDFSClientFailover {
   private static final Path TEST_FILE = new Path("/tmp/failover-test-file");
   private static final int FILE_LENGTH_TO_VERIFY = 100;
   
-  private Configuration conf = new Configuration();
+  private final Configuration conf = new Configuration();
   private MiniDFSCluster cluster;
   
   @Before
@@ -62,6 +88,11 @@ public class TestDFSClientFailover {
   @After
   public void tearDownCluster() throws IOException {
     cluster.shutdown();
+  }
+
+  @After
+  public void clearConfig() {
+    SecurityUtil.setTokenServiceUseIp(true);
   }
 
   /**
@@ -92,16 +123,73 @@ public class TestDFSClientFailover {
   }
   
   /**
+   * Test that even a non-idempotent method will properly fail-over if the
+   * first IPC attempt times out trying to connect. Regression test for
+   * HDFS-4404. 
+   */
+  @Test
+  public void testFailoverOnConnectTimeout() throws Exception {
+    conf.setClass(CommonConfigurationKeysPublic.HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_KEY,
+        InjectingSocketFactory.class, SocketFactory.class);
+    // Set up the InjectingSocketFactory to throw a ConnectTimeoutException
+    // when connecting to the first NN.
+    InjectingSocketFactory.portToInjectOn = cluster.getNameNodePort(0);
+
+    FileSystem fs = HATestUtil.configureFailoverFs(cluster, conf);
+    
+    // Make the second NN the active one.
+    cluster.shutdownNameNode(0);
+    cluster.transitionToActive(1);
+    
+    // Call a non-idempotent method, and ensure the failover of the call proceeds
+    // successfully.
+    IOUtils.closeStream(fs.create(TEST_FILE));
+  }
+  
+  private static class InjectingSocketFactory extends StandardSocketFactory {
+
+    static final SocketFactory defaultFactory = SocketFactory.getDefault();
+
+    static int portToInjectOn;
+    
+    @Override
+    public Socket createSocket() throws IOException {
+      Socket spy = Mockito.spy(defaultFactory.createSocket());
+      // Simplify our spying job by not having to also spy on the channel
+      Mockito.doReturn(null).when(spy).getChannel();
+      // Throw a ConnectTimeoutException when connecting to our target "bad"
+      // host.
+      Mockito.doThrow(new ConnectTimeoutException("injected"))
+        .when(spy).connect(
+            Mockito.argThat(new MatchesPort()),
+            Mockito.anyInt());
+      return spy;
+    }
+
+    private class MatchesPort extends BaseMatcher<SocketAddress> {
+      @Override
+      public boolean matches(Object arg0) {
+        return ((InetSocketAddress)arg0).getPort() == portToInjectOn;
+      }
+
+      @Override
+      public void describeTo(Description desc) {
+        desc.appendText("matches port " + portToInjectOn);
+      }
+    }
+  }
+  
+  /**
    * Regression test for HDFS-2683.
    */
   @Test
   public void testLogicalUriShouldNotHavePorts() {
-    Configuration conf = new HdfsConfiguration();
-    conf.set(DFS_CLIENT_FAILOVER_PROXY_PROVIDER_KEY_PREFIX + ".foo",
-        ConfiguredFailoverProxyProvider.class.getName());
-    Path p = new Path("hdfs://foo:12345/");
+    Configuration config = new HdfsConfiguration(conf);
+    String logicalName = HATestUtil.getLogicalHostname(cluster);
+    HATestUtil.setFailoverConfigurations(cluster, config, logicalName);
+    Path p = new Path("hdfs://" + logicalName + ":12345/");
     try {
-      p.getFileSystem(conf).exists(p);
+      p.getFileSystem(config).exists(p);
       fail("Did not fail with fake FS");
     } catch (IOException ioe) {
       GenericTestUtils.assertExceptionContains(
@@ -132,4 +220,147 @@ public class TestDFSClientFailover {
           "Could not find any configured addresses for URI " + uri));
     }
   }
+
+  /**
+   * Spy on the Java DNS infrastructure.
+   * This likely only works on Sun-derived JDKs, but uses JUnit's
+   * Assume functionality so that any tests using it are skipped on
+   * incompatible JDKs.
+   */
+  private NameService spyOnNameService() {
+    try {
+      Field f = InetAddress.class.getDeclaredField("nameServices");
+      f.setAccessible(true);
+      Assume.assumeNotNull(f);
+      @SuppressWarnings("unchecked")
+      List<NameService> nsList = (List<NameService>) f.get(null);
+
+      NameService ns = nsList.get(0);
+      Log log = LogFactory.getLog("NameServiceSpy");
+      
+      ns = Mockito.mock(NameService.class,
+          new GenericTestUtils.DelegateAnswer(log, ns));
+      nsList.set(0, ns);
+      return ns;
+    } catch (Throwable t) {
+      LOG.info("Unable to spy on DNS. Skipping test.", t);
+      // In case the JDK we're testing on doesn't work like Sun's, just
+      // skip the test.
+      Assume.assumeNoException(t);
+      throw new RuntimeException(t);
+    }
+  }
+  
+  /**
+   * Test that the client doesn't ever try to DNS-resolve the logical URI.
+   * Regression test for HADOOP-9150.
+   */
+  @Test
+  public void testDoesntDnsResolveLogicalURI() throws Exception {
+    NameService spyNS = spyOnNameService();
+    
+    FileSystem fs = HATestUtil.configureFailoverFs(cluster, conf);
+    String logicalHost = fs.getUri().getHost();
+    Path qualifiedRoot = fs.makeQualified(new Path("/"));
+    
+    // Make a few calls against the filesystem.
+    fs.getCanonicalServiceName();
+    fs.listStatus(qualifiedRoot);
+    
+    // Ensure that the logical hostname was never resolved.
+    Mockito.verify(spyNS, Mockito.never()).lookupAllHostAddr(Mockito.eq(logicalHost));
+  }
+  
+  /**
+   * Same test as above, but for FileContext.
+   */
+  @Test
+  public void testFileContextDoesntDnsResolveLogicalURI() throws Exception {
+    NameService spyNS = spyOnNameService();
+    FileSystem fs = HATestUtil.configureFailoverFs(cluster, conf);
+    String logicalHost = fs.getUri().getHost();
+    Configuration haClientConf = fs.getConf();
+    
+    FileContext fc = FileContext.getFileContext(haClientConf);
+    Path root = new Path("/");
+    fc.listStatus(root);
+    fc.listStatus(fc.makeQualified(root));
+    fc.getDefaultFileSystem().getCanonicalServiceName();
+
+    // Ensure that the logical hostname was never resolved.
+    Mockito.verify(spyNS, Mockito.never()).lookupAllHostAddr(Mockito.eq(logicalHost));
+  }
+
+  /** Dummy implementation of plain FailoverProxyProvider */
+  public static class DummyLegacyFailoverProxyProvider<T>
+      implements FailoverProxyProvider<T> {
+    private Class<T> xface;
+    private T proxy;
+    public DummyLegacyFailoverProxyProvider(Configuration conf, URI uri,
+        Class<T> xface) {
+      try {
+        this.proxy = NameNodeProxies.createNonHAProxy(conf,
+            NameNode.getAddress(uri), xface,
+            UserGroupInformation.getCurrentUser(), false).getProxy();
+        this.xface = xface;
+      } catch (IOException ioe) {
+      }
+    }
+
+    @Override
+    public Class<T> getInterface() {
+      return xface;
+    }
+
+    @Override
+    public ProxyInfo<T> getProxy() {
+      return new ProxyInfo<T>(proxy, "dummy");
+    }
+
+    @Override
+    public void performFailover(T currentProxy) {
+    }
+
+    @Override
+    public void close() throws IOException {
+    }
+  }
+
+  /**
+   * Test to verify legacy proxy providers are correctly wrapped.
+   */
+  @Test
+  public void testWrappedFailoverProxyProvider() throws Exception {
+    // setup the config with the dummy provider class
+    Configuration config = new HdfsConfiguration(conf);
+    String logicalName = HATestUtil.getLogicalHostname(cluster);
+    HATestUtil.setFailoverConfigurations(cluster, config, logicalName);
+    config.set(DFS_CLIENT_FAILOVER_PROXY_PROVIDER_KEY_PREFIX + "." + logicalName,
+        DummyLegacyFailoverProxyProvider.class.getName());
+    Path p = new Path("hdfs://" + logicalName + "/");
+
+    // not to use IP address for token service
+    SecurityUtil.setTokenServiceUseIp(false);
+
+    // Logical URI should be used.
+    assertTrue("Legacy proxy providers should use logical URI.",
+        HAUtil.useLogicalUri(config, p.toUri()));
+  }
+
+  /**
+   * Test to verify IPFailoverProxyProvider is not requiring logical URI.
+   */
+  @Test
+  public void testIPFailoverProxyProviderLogicalUri() throws Exception {
+    // setup the config with the IP failover proxy provider class
+    Configuration config = new HdfsConfiguration(conf);
+    URI nnUri = cluster.getURI(0);
+    config.set(DFS_CLIENT_FAILOVER_PROXY_PROVIDER_KEY_PREFIX + "." +
+        nnUri.getHost(),
+        IPFailoverProxyProvider.class.getName());
+
+    assertFalse("IPFailoverProxyProvider should not use logical URI.",
+        HAUtil.useLogicalUri(config, nnUri));
+  }
+
 }

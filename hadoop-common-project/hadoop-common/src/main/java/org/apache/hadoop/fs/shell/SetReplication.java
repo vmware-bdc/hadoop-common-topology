@@ -25,7 +25,7 @@ import java.util.List;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.BlockLocation;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIOException;
+import org.apache.hadoop.fs.PathIOException;
 
 /**
  * Modifies the replication factor
@@ -39,11 +39,14 @@ class SetReplication extends FsCommand {
   }
   
   public static final String NAME = "setrep";
-  public static final String USAGE = "[-R] [-w] <rep> <path/file> ...";
+  public static final String USAGE = "[-R] [-w] <rep> <path> ...";
   public static final String DESCRIPTION =
-    "Set the replication level of a file.\n" +
-    "The -R flag requests a recursive change of replication level\n" +
-    "for an entire tree.";
+    "Set the replication level of a file. If <path> is a directory " +
+    "then the command recursively changes the replication factor of " +
+    "all files under the directory tree rooted at <path>.\n" +
+    "-w: It requests that the command waits for the replication " +
+    "to complete. This can potentially take a very long time.\n" +
+    "-R: It is accepted for backwards compatibility. It has no effect.";
   
   protected short newRep = 0;
   protected List<PathData> waitList = new LinkedList<PathData>();
@@ -54,7 +57,7 @@ class SetReplication extends FsCommand {
     CommandFormat cf = new CommandFormat(2, Integer.MAX_VALUE, "R", "w");
     cf.parse(args);
     waitOpt = cf.getOpt("w");
-    setRecursive(cf.getOpt("R"));
+    setRecursive(true);
     
     try {
       newRep = Short.parseShort(args.removeFirst());

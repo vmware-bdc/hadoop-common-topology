@@ -18,9 +18,12 @@
 package org.apache.hadoop.mapred;
 
 import java.io.IOException;
+import java.util.Random;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -39,6 +42,8 @@ import org.apache.hadoop.security.UserGroupInformation;
  * instead
  */
 @Deprecated
+@InterfaceAudience.Public
+@InterfaceStability.Evolving
 public class MiniMRCluster {
   private static final Log LOG = LogFactory.getLog(MiniMRCluster.class);
 
@@ -177,8 +182,10 @@ public class MiniMRCluster {
       int numTrackerToExclude, Clock clock) throws IOException {
     if (conf == null) conf = new JobConf();
     FileSystem.setDefaultUri(conf, namenode);
+    String identifier = this.getClass().getSimpleName() + "_"
+        + Integer.toString(new Random().nextInt(Integer.MAX_VALUE));
     mrClientCluster = MiniMRClientClusterFactory.create(this.getClass(),
-        numTaskTrackers, conf);
+        identifier, numTaskTrackers, conf);
   }
 
   public UserGroupInformation getUgi() {

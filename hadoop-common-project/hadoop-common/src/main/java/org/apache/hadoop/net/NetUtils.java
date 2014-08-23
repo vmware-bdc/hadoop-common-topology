@@ -20,11 +20,13 @@ package org.apache.hadoop.net;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Constructor;
 import java.net.BindException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.NoRouteToHostException;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketAddress;
 import java.net.SocketException;
@@ -48,6 +50,7 @@ import org.apache.commons.net.util.SubnetUtils.SubnetInfo;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.ipc.VersionedProtocol;
 import org.apache.hadoop.security.SecurityUtil;
@@ -110,7 +113,9 @@ public class NetUtils {
    */
   public static SocketFactory getDefaultSocketFactory(Configuration conf) {
 
-    String propValue = conf.get("hadoop.rpc.socket.factory.class.default");
+    String propValue = conf.get(
+        CommonConfigurationKeysPublic.HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_KEY,
+        CommonConfigurationKeysPublic.HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_DEFAULT);
     if ((propValue == null) || (propValue.length() == 0))
       return SocketFactory.getDefault();
 
@@ -140,7 +145,7 @@ public class NetUtils {
 
   /**
    * Util method to build socket addr from either:
-   *   <host>:<post>
+   *   <host>:<port>
    *   <fs>://<host>:<port>/<path>
    */
   public static InetSocketAddress createSocketAddr(String target) {
@@ -150,7 +155,7 @@ public class NetUtils {
   /**
    * Util method to build socket addr from either:
    *   <host>
-   *   <host>:<post>
+   *   <host>:<port>
    *   <fs>://<host>:<port>/<path>
    */
   public static InetSocketAddress createSocketAddr(String target,
@@ -351,8 +356,18 @@ public class NetUtils {
    * @return socket address that a client can use to connect to the server.
    */
   public static InetSocketAddress getConnectAddress(Server server) {
-    InetSocketAddress addr = server.getListenerAddress();
-    if (addr.getAddress().isAnyLocalAddress()) {
+    return getConnectAddress(server.getListenerAddress());
+  }
+  
+  /**
+   * Returns an InetSocketAddress that a client can use to connect to the
+   * given listening address.
+   * 
+   * @param addr of a listener
+   * @return socket address that a client can use to connect to the server.
+   */
+  public static InetSocketAddress getConnectAddress(InetSocketAddress addr) {
+    if (!addr.isUnresolved() && addr.getAddress().isAnyLocalAddress()) {
       try {
         addr = new InetSocketAddress(InetAddress.getLocalHost(), addr.getPort());
       } catch (UnknownHostException uhe) {
@@ -364,53 +379,44 @@ public class NetUtils {
   }
   
   /**
-   * Same as getInputStream(socket, socket.getSoTimeout()).<br><br>
+   * Same as <code>getInputStream(socket, socket.getSoTimeout()).</code>
+   * <br><br>
    * 
-   * From documentation for {@link #getInputStream(Socket, long)}:<br>
-   * Returns InputStream for the socket. If the socket has an associated
-   * SocketChannel then it returns a 
-   * {@link SocketInputStream} with the given timeout. If the socket does not
-   * have a channel, {@link Socket#getInputStream()} is returned. In the later
-   * case, the timeout argument is ignored and the timeout set with 
-   * {@link Socket#setSoTimeout(int)} applies for reads.<br><br>
-   *
-   * Any socket created using socket factories returned by {@link NetUtils},
-   * must use this interface instead of {@link Socket#getInputStream()}.
-   *     
    * @see #getInputStream(Socket, long)
-   * 
-   * @param socket
-   * @return InputStream for reading from the socket.
-   * @throws IOException
    */
-  public static InputStream getInputStream(Socket socket) 
+  public static SocketInputWrapper getInputStream(Socket socket) 
                                            throws IOException {
     return getInputStream(socket, socket.getSoTimeout());
   }
-  
+
   /**
-   * Returns InputStream for the socket. If the socket has an associated
-   * SocketChannel then it returns a 
-   * {@link SocketInputStream} with the given timeout. If the socket does not
-   * have a channel, {@link Socket#getInputStream()} is returned. In the later
-   * case, the timeout argument is ignored and the timeout set with 
-   * {@link Socket#setSoTimeout(int)} applies for reads.<br><br>
+   * Return a {@link SocketInputWrapper} for the socket and set the given
+   * timeout. If the socket does not have an associated channel, then its socket
+   * timeout will be set to the specified value. Otherwise, a
+   * {@link SocketInputStream} will be created which reads with the configured
+   * timeout.
    * 
-   * Any socket created using socket factories returned by {@link NetUtils},
+   * Any socket created using socket factories returned by {@link #NetUtils},
    * must use this interface instead of {@link Socket#getInputStream()}.
-   *     
+   * 
+   * In general, this should be called only once on each socket: see the note
+   * in {@link SocketInputWrapper#setTimeout(long)} for more information.
+   *
    * @see Socket#getChannel()
    * 
    * @param socket
-   * @param timeout timeout in milliseconds. This may not always apply. zero
-   *        for waiting as long as necessary.
-   * @return InputStream for reading from the socket.
+   * @param timeout timeout in milliseconds. zero for waiting as
+   *                long as necessary.
+   * @return SocketInputWrapper for reading from the socket.
    * @throws IOException
    */
-  public static InputStream getInputStream(Socket socket, long timeout) 
+  public static SocketInputWrapper getInputStream(Socket socket, long timeout) 
                                            throws IOException {
-    return (socket.getChannel() == null) ? 
-          socket.getInputStream() : new SocketInputStream(socket, timeout);
+    InputStream stm = (socket.getChannel() == null) ? 
+          socket.getInputStream() : new SocketInputStream(socket);
+    SocketInputWrapper w = new SocketInputWrapper(socket, stm);
+    w.setTimeout(timeout);
+    return w;
   }
   
   /**
@@ -492,7 +498,7 @@ public class NetUtils {
    * also takes a local address and port to bind the socket to. 
    * 
    * @param socket
-   * @param address the remote address
+   * @param endpoint the remote address
    * @param localAddr the local address to bind the socket to
    * @param timeout timeout in milliseconds
    */
@@ -515,11 +521,15 @@ public class NetUtils {
       socket.bind(localAddr);
     }
 
-    if (ch == null) {
-      // let the default implementation handle it.
-      socket.connect(endpoint, timeout);
-    } else {
-      SocketIOWithTimeout.connect(ch, endpoint, timeout);
+    try {
+      if (ch == null) {
+        // let the default implementation handle it.
+        socket.connect(endpoint, timeout);
+      } else {
+        SocketIOWithTimeout.connect(ch, endpoint, timeout);
+      }
+    } catch (SocketTimeoutException ste) {
+      throw new ConnectTimeoutException(ste.getMessage());
     }
 
     // There is a very rare case allowed by the TCP specification, such that
@@ -547,16 +557,11 @@ public class NetUtils {
    * @return its IP address in the string format
    */
   public static String normalizeHostName(String name) {
-    if (Character.digit(name.charAt(0), 10) != -1) { // it is an IP
+    try {
+      return InetAddress.getByName(name).getHostAddress();
+    } catch (UnknownHostException e) {
       return name;
-    } else {
-      try {
-        InetAddress ipAddress = InetAddress.getByName(name);
-        return ipAddress.getHostAddress();
-      } catch (UnknownHostException e) {
-        return name;
-      }
-    }
+    }    
   }
   
   /** 
@@ -722,7 +727,7 @@ public class NetUtils {
               + see("BindException"));
     } else if (exception instanceof ConnectException) {
       // connection refused; include the host:port in the error
-      return (ConnectException) new ConnectException(
+      return wrapWithMessage(exception, 
           "Call From "
               + localHost
               + " to "
@@ -732,32 +737,28 @@ public class NetUtils {
               + " failed on connection exception: "
               + exception
               + ";"
-              + see("ConnectionRefused"))
-          .initCause(exception);
+              + see("ConnectionRefused"));
     } else if (exception instanceof UnknownHostException) {
-      return (UnknownHostException) new UnknownHostException(
+      return wrapWithMessage(exception,
           "Invalid host name: "
               + getHostDetailsAsString(destHost, destPort, localHost)
               + exception
               + ";"
-              + see("UnknownHost"))
-          .initCause(exception);
+              + see("UnknownHost"));
     } else if (exception instanceof SocketTimeoutException) {
-      return (SocketTimeoutException) new SocketTimeoutException(
+      return wrapWithMessage(exception,
           "Call From "
               + localHost + " to " + destHost + ":" + destPort
               + " failed on socket timeout exception: " + exception
               + ";"
-              + see("SocketTimeout"))
-          .initCause(exception);
+              + see("SocketTimeout"));
     } else if (exception instanceof NoRouteToHostException) {
-      return (NoRouteToHostException) new NoRouteToHostException(
+      return wrapWithMessage(exception,
           "No Route to Host from  "
               + localHost + " to " + destHost + ":" + destPort
               + " failed on socket timeout exception: " + exception
               + ";"
-              + see("NoRouteToHost"))
-          .initCause(exception);
+              + see("NoRouteToHost"));
     }
     else {
       return (IOException) new IOException("Failed on local exception: "
@@ -771,6 +772,21 @@ public class NetUtils {
 
   private static String see(final String entry) {
     return FOR_MORE_DETAILS_SEE + HADOOP_WIKI + entry;
+  }
+  
+  @SuppressWarnings("unchecked")
+  private static <T extends IOException> T wrapWithMessage(
+      T exception, String msg) {
+    Class<? extends Throwable> clazz = exception.getClass();
+    try {
+      Constructor<? extends Throwable> ctor = clazz.getConstructor(String.class);
+      Throwable t = ctor.newInstance(msg);
+      return (T)(t.initCause(exception));
+    } catch (Throwable e) {
+      LOG.warn("Unable to wrap exception of type " +
+          clazz + ": it has no (String) constructor", e);
+      return exception;
+    }
   }
 
   /**
@@ -868,5 +884,24 @@ public class NetUtils {
       }
     }
     return addrs;
+  }
+
+  /**
+   * Return a free port number. There is no guarantee it will remain free, so
+   * it should be used immediately.
+   *
+   * @returns A free port for binding a local socket
+   */
+  public static int getFreeSocketPort() {
+    int port = 0;
+    try {
+      ServerSocket s = new ServerSocket(0);
+      port = s.getLocalPort();
+      s.close();
+      return port;
+    } catch (IOException e) {
+      // Could not get a free port. Return default port 0.
+    }
+    return port;
   }
 }

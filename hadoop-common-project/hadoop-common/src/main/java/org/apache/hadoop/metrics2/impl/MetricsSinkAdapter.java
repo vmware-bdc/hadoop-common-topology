@@ -18,12 +18,15 @@
 
 package org.apache.hadoop.metrics2.impl;
 
+import java.io.Closeable;
 import java.util.Random;
+import java.util.concurrent.*;
 
 import static com.google.common.base.Preconditions.*;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.metrics2.lib.MutableGaugeInt;
 import org.apache.hadoop.metrics2.lib.MetricsRegistry;
 import org.apache.hadoop.metrics2.lib.MutableCounterInt;
@@ -32,6 +35,7 @@ import org.apache.hadoop.metrics2.MetricsRecordBuilder;
 import static org.apache.hadoop.metrics2.util.Contracts.*;
 import org.apache.hadoop.metrics2.MetricsFilter;
 import org.apache.hadoop.metrics2.MetricsSink;
+import org.apache.hadoop.util.Time;
 
 /**
  * An adapter class for metrics sink and associated filters
@@ -47,6 +51,7 @@ class MetricsSinkAdapter implements SinkQueue.Consumer<MetricsBuffer> {
   private volatile boolean stopping = false;
   private volatile boolean inError = false;
   private final int period, firstRetryDelay, retryCount;
+  private final long oobPutTimeout;
   private final float retryBackoff;
   private final MetricsRegistry registry = new MetricsRegistry("sinkadapter");
   private final MutableStat latency;
@@ -68,6 +73,8 @@ class MetricsSinkAdapter implements SinkQueue.Consumer<MetricsBuffer> {
     this.period = checkArg(period, period > 0, "period");
     firstRetryDelay = checkArg(retryDelay, retryDelay > 0, "retry delay");
     this.retryBackoff = checkArg(retryBackoff, retryBackoff>1, "retry backoff");
+    oobPutTimeout = (long)
+        (firstRetryDelay * Math.pow(retryBackoff, retryCount) * 1000);
     this.retryCount = retryCount;
     this.queue = new SinkQueue<MetricsBuffer>(checkArg(queueCapacity,
         queueCapacity > 0, "queue capacity"));
@@ -94,6 +101,23 @@ class MetricsSinkAdapter implements SinkQueue.Consumer<MetricsBuffer> {
     }
     return true; // OK
   }
+  
+  public boolean putMetricsImmediate(MetricsBuffer buffer) {
+    WaitableMetricsBuffer waitableBuffer =
+        new WaitableMetricsBuffer(buffer);
+    if (!queue.enqueue(waitableBuffer)) {
+      LOG.warn(name + " has a full queue and can't consume the given metrics.");
+      dropped.incr();
+      return false;
+    }
+    if (!waitableBuffer.waitTillNotified(oobPutTimeout)) {
+      LOG.warn(name +
+          " couldn't fulfill an immediate putMetrics request in time." +
+          " Abandoning.");
+      return false;
+    }
+    return true;
+  }
 
   void publishMetricsFromQueue() {
     int retryDelay = firstRetryDelay;
@@ -106,11 +130,9 @@ class MetricsSinkAdapter implements SinkQueue.Consumer<MetricsBuffer> {
         retryDelay = firstRetryDelay;
         n = retryCount;
         inError = false;
-      }
-      catch (InterruptedException e) {
+      } catch (InterruptedException e) {
         LOG.info(name +" thread interrupted.");
-      }
-      catch (Exception e) {
+      } catch (Exception e) {
         if (n > 0) {
           int retryWindow = Math.max(0, 1000 / 2 * retryDelay - minDelay);
           int awhile = rng.nextInt(retryWindow) + minDelay;
@@ -123,8 +145,7 @@ class MetricsSinkAdapter implements SinkQueue.Consumer<MetricsBuffer> {
             LOG.info(name +" thread interrupted while waiting for retry", e2);
           }
           --n;
-        }
-        else {
+        } else {
           if (!inError) {
             LOG.error("Got sink exception and over retry limit, "+
                       "suppressing further error messages", e);
@@ -158,7 +179,10 @@ class MetricsSinkAdapter implements SinkQueue.Consumer<MetricsBuffer> {
     }
     if (ts > 0) {
       sink.flush();
-      latency.add(System.currentTimeMillis() - ts);
+      latency.add(Time.now() - ts);
+    }
+    if (buffer instanceof WaitableMetricsBuffer) {
+      ((WaitableMetricsBuffer)buffer).notifyAnyWaiters();
     }
     LOG.debug("Done");
   }
@@ -173,9 +197,11 @@ class MetricsSinkAdapter implements SinkQueue.Consumer<MetricsBuffer> {
     sinkThread.interrupt();
     try {
       sinkThread.join();
-    }
-    catch (InterruptedException e) {
+    } catch (InterruptedException e) {
       LOG.warn("Stop interrupted", e);
+    }
+    if (sink instanceof Closeable) {
+      IOUtils.cleanup(LOG, (Closeable)sink);
     }
   }
 
@@ -193,5 +219,27 @@ class MetricsSinkAdapter implements SinkQueue.Consumer<MetricsBuffer> {
 
   MetricsSink sink() {
     return sink;
+  }
+
+  static class WaitableMetricsBuffer extends MetricsBuffer {
+    private final Semaphore notificationSemaphore =
+        new Semaphore(0);
+
+    public WaitableMetricsBuffer(MetricsBuffer metricsBuffer) {
+      super(metricsBuffer);
+    }
+
+    public boolean waitTillNotified(long millisecondsToWait) {
+      try {
+        return notificationSemaphore.tryAcquire(millisecondsToWait,
+            TimeUnit.MILLISECONDS);
+      } catch (InterruptedException e) {
+        return false;
+      }
+    }
+
+    public void notifyAnyWaiters() {
+      notificationSemaphore.release();
+    }
   }
 }

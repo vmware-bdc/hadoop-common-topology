@@ -38,7 +38,7 @@ import org.junit.Before;
 
 public class TestViewFileSystemLocalFileSystem extends ViewFileSystemBaseTest {
 
-
+  @Override
   @Before
   public void setUp() throws Exception {
     // create the test root on local_fs
@@ -47,9 +47,10 @@ public class TestViewFileSystemLocalFileSystem extends ViewFileSystemBaseTest {
     
   }
 
+  @Override
   @After
   public void tearDown() throws Exception {
-    fsTarget.delete(FileSystemTestHelper.getTestRootPath(fsTarget), true);
+    fsTarget.delete(fileSystemTestHelper.getTestRootPath(fsTarget), true);
     super.tearDown();
   }
 }

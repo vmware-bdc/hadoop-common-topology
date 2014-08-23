@@ -17,6 +17,12 @@
  */
 package org.apache.hadoop.hdfs.server.namenode.ha;
 
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 import java.io.File;
 import java.io.IOException;
 import java.net.URISyntaxException;
@@ -27,6 +33,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.ha.HAServiceProtocol.RequestSource;
+import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
 import org.apache.hadoop.ha.ServiceFailedException;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
@@ -39,8 +47,6 @@ import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-
-import static org.junit.Assert.*;
 
 public class TestInitializeSharedEdits {
 
@@ -90,7 +96,7 @@ public class TestInitializeSharedEdits {
     } catch (IOException ioe) {
       LOG.info("Got expected exception", ioe);
       GenericTestUtils.assertExceptionContains(
-          "Cannot start an HA namenode with name dirs that need recovery", ioe);
+          "storage directory does not exist or is not accessible", ioe);
     }
     try {
       cluster.restartNameNode(1, false);
@@ -98,7 +104,7 @@ public class TestInitializeSharedEdits {
     } catch (IOException ioe) {
       LOG.info("Got expected exception", ioe);
       GenericTestUtils.assertExceptionContains(
-          "Cannot start an HA namenode with name dirs that need recovery", ioe);
+          "storage directory does not exist or is not accessible", ioe);
     }
   }
   
@@ -111,7 +117,8 @@ public class TestInitializeSharedEdits {
     cluster.restartNameNode(1, true);
     
     // Make sure HA is working.
-    cluster.getNameNode(0).getRpcServer().transitionToActive();
+    cluster.getNameNode(0).getRpcServer().transitionToActive(
+        new StateChangeRequestInfo(RequestSource.REQUEST_BY_USER));
     FileSystem fs = null;
     try {
       Path newPath = new Path(TEST_PATH, pathSuffix);
@@ -152,15 +159,22 @@ public class TestInitializeSharedEdits {
   }
   
   @Test
-  public void testDontOverWriteExistingDir() {
+  public void testFailWhenNoSharedEditsSpecified() throws Exception {
+    Configuration confNoShared = new Configuration(conf);
+    confNoShared.unset(DFSConfigKeys.DFS_NAMENODE_SHARED_EDITS_DIR_KEY);
+    assertFalse(NameNode.initializeSharedEdits(confNoShared, true));
+  }
+  
+  @Test
+  public void testDontOverWriteExistingDir() throws IOException {
     assertFalse(NameNode.initializeSharedEdits(conf, false));
     assertTrue(NameNode.initializeSharedEdits(conf, false));
   }
   
   @Test
-  public void testInitializeSharedEditsConfiguresGenericConfKeys() {
+  public void testInitializeSharedEditsConfiguresGenericConfKeys() throws IOException {
     Configuration conf = new Configuration();
-    conf.set(DFSConfigKeys.DFS_FEDERATION_NAMESERVICES, "ns1");
+    conf.set(DFSConfigKeys.DFS_NAMESERVICES, "ns1");
     conf.set(DFSUtil.addKeySuffixes(DFSConfigKeys.DFS_HA_NAMENODES_KEY_PREFIX,
         "ns1"), "nn1,nn2");
     conf.set(DFSUtil.addKeySuffixes(DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY,

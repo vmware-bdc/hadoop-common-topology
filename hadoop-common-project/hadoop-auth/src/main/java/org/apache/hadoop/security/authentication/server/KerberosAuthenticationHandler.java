@@ -21,6 +21,7 @@ import org.apache.hadoop.security.authentication.util.KerberosUtil;
 import org.ietf.jgss.GSSContext;
 import org.ietf.jgss.GSSCredential;
 import org.ietf.jgss.GSSManager;
+import org.ietf.jgss.Oid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,16 +34,20 @@ import javax.security.auth.login.LoginException;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+
 import java.io.File;
 import java.io.IOException;
-import java.security.Principal;
 import java.security.PrivilegedActionException;
 import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.regex.Pattern;
+
+import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
 
 /**
  * The {@link KerberosAuthenticationHandler} implements the Kerberos SPNEGO authentication mechanism for HTTP.
@@ -77,18 +82,33 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
     @Override
     public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
       Map<String, String> options = new HashMap<String, String>();
-      options.put("keyTab", keytab);
-      options.put("principal", principal);
-      options.put("useKeyTab", "true");
-      options.put("storeKey", "true");
-      options.put("doNotPrompt", "true");
-      options.put("useTicketCache", "true");
-      options.put("renewTGT", "true");
+      if (IBM_JAVA) {
+        options.put("useKeytab",
+            keytab.startsWith("file://") ? keytab : "file://" + keytab);
+        options.put("principal", principal);
+        options.put("credsType", "acceptor");
+      } else {
+        options.put("keyTab", keytab);
+        options.put("principal", principal);
+        options.put("useKeyTab", "true");
+        options.put("storeKey", "true");
+        options.put("doNotPrompt", "true");
+        options.put("useTicketCache", "true");
+        options.put("renewTGT", "true");
+        options.put("isInitiator", "false");
+      }
       options.put("refreshKrb5Config", "true");
-      options.put("isInitiator", "false");
       String ticketCache = System.getenv("KRB5CCNAME");
       if (ticketCache != null) {
-        options.put("ticketCache", ticketCache);
+        if (IBM_JAVA) {
+          options.put("useDefaultCcache", "true");
+          // The first value searched when "useDefaultCcache" is used.
+          System.setProperty("KRB5CCNAME", ticketCache);
+          options.put("renewTGT", "true");
+          options.put("credsType", "both");
+        } else {
+          options.put("ticketCache", ticketCache);
+        }
       }
       if (LOG.isDebugEnabled()) {
         options.put("debug", "true");
@@ -122,10 +142,29 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
    */
   public static final String NAME_RULES = TYPE + ".name.rules";
 
-  private String principal;
+  private String type;
   private String keytab;
   private GSSManager gssManager;
-  private LoginContext loginContext;
+  private Subject serverSubject = new Subject();
+  private List<LoginContext> loginContexts = new ArrayList<LoginContext>();
+
+  /**
+   * Creates a Kerberos SPNEGO authentication handler with the default
+   * auth-token type, <code>kerberos</code>.
+   */
+  public KerberosAuthenticationHandler() {
+    this(TYPE);
+  }
+
+  /**
+   * Creates a Kerberos SPNEGO authentication handler with a custom auth-token
+   * type.
+   *
+   * @param type auth-token type.
+   */
+  public KerberosAuthenticationHandler(String type) {
+    this.type = type;
+  }
 
   /**
    * Initializes the authentication handler instance.
@@ -141,7 +180,7 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
   @Override
   public void init(Properties config) throws ServletException {
     try {
-      principal = config.getProperty(PRINCIPAL, principal);
+      String principal = config.getProperty(PRINCIPAL);
       if (principal == null || principal.trim().length() == 0) {
         throw new ServletException("Principal not defined in configuration");
       }
@@ -152,23 +191,40 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
       if (!new File(keytab).exists()) {
         throw new ServletException("Keytab does not exist: " + keytab);
       }
+      
+      // use all SPNEGO principals in the keytab if a principal isn't
+      // specifically configured
+      final String[] spnegoPrincipals;
+      if (principal.equals("*")) {
+        spnegoPrincipals = KerberosUtil.getPrincipalNames(
+            keytab, Pattern.compile("HTTP/.*"));
+        if (spnegoPrincipals.length == 0) {
+          throw new ServletException("Principals do not exist in the keytab");
+        }
+      } else {
+        spnegoPrincipals = new String[]{principal};
+      }
 
       String nameRules = config.getProperty(NAME_RULES, null);
       if (nameRules != null) {
         KerberosName.setRules(nameRules);
       }
       
-      Set<Principal> principals = new HashSet<Principal>();
-      principals.add(new KerberosPrincipal(principal));
-      Subject subject = new Subject(false, principals, new HashSet<Object>(), new HashSet<Object>());
-
-      KerberosConfiguration kerberosConfiguration = new KerberosConfiguration(keytab, principal);
-
-      LOG.info("Login using keytab "+keytab+", for principal "+principal);
-      loginContext = new LoginContext("", subject, null, kerberosConfiguration);
-      loginContext.login();
-
-      Subject serverSubject = loginContext.getSubject();
+      for (String spnegoPrincipal : spnegoPrincipals) {
+        LOG.info("Login using keytab {}, for principal {}",
+            keytab, spnegoPrincipal);
+        final KerberosConfiguration kerberosConfiguration =
+            new KerberosConfiguration(keytab, spnegoPrincipal);
+        final LoginContext loginContext =
+            new LoginContext("", serverSubject, null, kerberosConfiguration);
+        try {
+          loginContext.login();
+        } catch (LoginException le) {
+          LOG.warn("Failed to login as [{}]", spnegoPrincipal, le);
+          throw new AuthenticationException(le);          
+        }
+        loginContexts.add(loginContext);
+      }
       try {
         gssManager = Subject.doAs(serverSubject, new PrivilegedExceptionAction<GSSManager>() {
 
@@ -180,7 +236,6 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
       } catch (PrivilegedActionException ex) {
         throw ex.getException();
       }
-      LOG.info("Initialized, principal [{}] from keytab [{}]", principal, keytab);
     } catch (Exception ex) {
       throw new ServletException(ex);
     }
@@ -193,14 +248,16 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
    */
   @Override
   public void destroy() {
-    try {
-      if (loginContext != null) {
+    keytab = null;
+    serverSubject = null;
+    for (LoginContext loginContext : loginContexts) {
+      try {
         loginContext.logout();
-        loginContext = null;
+      } catch (LoginException ex) {
+        LOG.warn(ex.getMessage(), ex);
       }
-    } catch (LoginException ex) {
-      LOG.warn(ex.getMessage(), ex);
     }
+    loginContexts.clear();
   }
 
   /**
@@ -211,16 +268,16 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
    */
   @Override
   public String getType() {
-    return TYPE;
+    return type;
   }
 
   /**
-   * Returns the Kerberos principal used by the authentication handler.
+   * Returns the Kerberos principals used by the authentication handler.
    *
-   * @return the Kerberos principal used by the authentication handler.
+   * @return the Kerberos principals used by the authentication handler.
    */
-  protected String getPrincipal() {
-    return principal;
+  protected Set<KerberosPrincipal> getPrincipals() {
+    return serverSubject.getPrincipals(KerberosPrincipal.class);
   }
 
   /**
@@ -230,6 +287,27 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
    */
   protected String getKeytab() {
     return keytab;
+  }
+
+  /**
+   * This is an empty implementation, it always returns <code>TRUE</code>.
+   *
+   *
+   *
+   * @param token the authentication token if any, otherwise <code>NULL</code>.
+   * @param request the HTTP client request.
+   * @param response the HTTP client response.
+   *
+   * @return <code>TRUE</code>
+   * @throws IOException it is never thrown.
+   * @throws AuthenticationException it is never thrown.
+   */
+  @Override
+  public boolean managementOperation(AuthenticationToken token,
+                                     HttpServletRequest request,
+                                     HttpServletResponse response)
+    throws IOException, AuthenticationException {
+    return true;
   }
 
   /**
@@ -265,7 +343,7 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
       authorization = authorization.substring(KerberosAuthenticator.NEGOTIATE.length()).trim();
       final Base64 base64 = new Base64(0);
       final byte[] clientToken = base64.decode(authorization);
-      Subject serverSubject = loginContext.getSubject();
+      final String serverName = request.getServerName();
       try {
         token = Subject.doAs(serverSubject, new PrivilegedExceptionAction<AuthenticationToken>() {
 
@@ -273,8 +351,18 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
           public AuthenticationToken run() throws Exception {
             AuthenticationToken token = null;
             GSSContext gssContext = null;
+            GSSCredential gssCreds = null;
             try {
-              gssContext = gssManager.createContext((GSSCredential) null);
+              gssCreds = gssManager.createCredential(
+                  gssManager.createName(
+                      KerberosUtil.getServicePrincipal("HTTP", serverName),
+                      KerberosUtil.getOidInstance("NT_GSS_KRB5_PRINCIPAL")),
+                  GSSCredential.INDEFINITE_LIFETIME,
+                  new Oid[]{
+                    KerberosUtil.getOidInstance("GSS_SPNEGO_MECH_OID"),
+                    KerberosUtil.getOidInstance("GSS_KRB5_MECH_OID")},
+                  GSSCredential.ACCEPT_ONLY);
+              gssContext = gssManager.createContext(gssCreds);
               byte[] serverToken = gssContext.acceptSecContext(clientToken, 0, clientToken.length);
               if (serverToken != null && serverToken.length > 0) {
                 String authenticate = base64.encodeToString(serverToken);
@@ -288,13 +376,16 @@ public class KerberosAuthenticationHandler implements AuthenticationHandler {
                 String clientPrincipal = gssContext.getSrcName().toString();
                 KerberosName kerberosName = new KerberosName(clientPrincipal);
                 String userName = kerberosName.getShortName();
-                token = new AuthenticationToken(userName, clientPrincipal, TYPE);
+                token = new AuthenticationToken(userName, clientPrincipal, getType());
                 response.setStatus(HttpServletResponse.SC_OK);
                 LOG.trace("SPNEGO completed for principal [{}]", clientPrincipal);
               }
             } finally {
               if (gssContext != null) {
                 gssContext.dispose();
+              }
+              if (gssCreds != null) {
+                gssCreds.dispose();
               }
             }
             return token;

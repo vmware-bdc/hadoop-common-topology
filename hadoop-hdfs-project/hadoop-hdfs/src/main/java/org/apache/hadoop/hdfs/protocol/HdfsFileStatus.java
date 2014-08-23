@@ -17,8 +17,12 @@
  */
 package org.apache.hadoop.hdfs.protocol;
 
+import java.net.URI;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.fs.FileEncryptionInfo;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSUtil;
@@ -29,17 +33,23 @@ import org.apache.hadoop.hdfs.DFSUtil;
 @InterfaceStability.Evolving
 public class HdfsFileStatus {
 
-  private byte[] path;  // local name of the inode that's encoded in java UTF8
-  private byte[] symlink; // symlink target encoded in java UTF8 or null
-  private long length;
-  private boolean isdir;
-  private short block_replication;
-  private long blocksize;
-  private long modification_time;
-  private long access_time;
-  private FsPermission permission;
-  private String owner;
-  private String group;
+  private final byte[] path;  // local name of the inode that's encoded in java UTF8
+  private final byte[] symlink; // symlink target encoded in java UTF8 or null
+  private final long length;
+  private final boolean isdir;
+  private final short block_replication;
+  private final long blocksize;
+  private final long modification_time;
+  private final long access_time;
+  private final FsPermission permission;
+  private final String owner;
+  private final String group;
+  private final long fileId;
+
+  private final FileEncryptionInfo feInfo;
+  
+  // Used by dir, not including dot and dotdot. Always zero for a regular file.
+  private final int childrenNum;
   
   public static final byte[] EMPTY_NAME = new byte[0];
 
@@ -55,11 +65,13 @@ public class HdfsFileStatus {
    * @param owner the owner of the path
    * @param group the group of the path
    * @param path the local name in java UTF8 encoding the same as that in-memory
+   * @param fileId the file id
+   * @param feInfo the file's encryption info
    */
   public HdfsFileStatus(long length, boolean isdir, int block_replication,
-                    long blocksize, long modification_time, long access_time,
-                    FsPermission permission, String owner, String group, 
-                    byte[] symlink, byte[] path) {
+      long blocksize, long modification_time, long access_time,
+      FsPermission permission, String owner, String group, byte[] symlink,
+    byte[] path, long fileId, int childrenNum, FileEncryptionInfo feInfo) {
     this.length = length;
     this.isdir = isdir;
     this.block_replication = (short)block_replication;
@@ -67,18 +79,24 @@ public class HdfsFileStatus {
     this.modification_time = modification_time;
     this.access_time = access_time;
     this.permission = (permission == null) ? 
-                      FsPermission.getDefault() : permission;
+        ((isdir || symlink!=null) ? 
+            FsPermission.getDefault() : 
+            FsPermission.getFileDefault()) :
+        permission;
     this.owner = (owner == null) ? "" : owner;
     this.group = (group == null) ? "" : group;
     this.symlink = symlink;
     this.path = path;
+    this.fileId = fileId;
+    this.childrenNum = childrenNum;
+    this.feInfo = feInfo;
   }
 
   /**
    * Get the length of this file, in bytes.
    * @return the length of this file, in bytes.
    */
-  final public long getLen() {
+  public final long getLen() {
     return length;
   }
 
@@ -86,7 +104,7 @@ public class HdfsFileStatus {
    * Is this a directory?
    * @return true if this is a directory
    */
-  final public boolean isDir() {
+  public final boolean isDir() {
     return isdir;
   }
 
@@ -102,7 +120,7 @@ public class HdfsFileStatus {
    * Get the block size of the file.
    * @return the number of bytes
    */
-  final public long getBlockSize() {
+  public final long getBlockSize() {
     return blocksize;
   }
 
@@ -110,7 +128,7 @@ public class HdfsFileStatus {
    * Get the replication factor of a file.
    * @return the replication factor of a file.
    */
-  final public short getReplication() {
+  public final short getReplication() {
     return block_replication;
   }
 
@@ -118,7 +136,7 @@ public class HdfsFileStatus {
    * Get the modification time of the file.
    * @return the modification time of file in milliseconds since January 1, 1970 UTC.
    */
-  final public long getModificationTime() {
+  public final long getModificationTime() {
     return modification_time;
   }
 
@@ -126,7 +144,7 @@ public class HdfsFileStatus {
    * Get the access time of the file.
    * @return the access time of file in milliseconds since January 1, 1970 UTC.
    */
-  final public long getAccessTime() {
+  public final long getAccessTime() {
     return access_time;
   }
 
@@ -134,7 +152,7 @@ public class HdfsFileStatus {
    * Get FsPermission associated with the file.
    * @return permssion
    */
-  final public FsPermission getPermission() {
+  public final FsPermission getPermission() {
     return permission;
   }
   
@@ -142,7 +160,7 @@ public class HdfsFileStatus {
    * Get the owner of the file.
    * @return owner of the file
    */
-  final public String getOwner() {
+  public final String getOwner() {
     return owner;
   }
   
@@ -150,7 +168,7 @@ public class HdfsFileStatus {
    * Get the group associated with the file.
    * @return group for the file. 
    */
-  final public String getGroup() {
+  public final String getGroup() {
     return group;
   }
   
@@ -158,7 +176,7 @@ public class HdfsFileStatus {
    * Check if the local name is empty
    * @return true if the name is empty
    */
-  final public boolean isEmptyLocalName() {
+  public final boolean isEmptyLocalName() {
     return path.length == 0;
   }
 
@@ -166,7 +184,7 @@ public class HdfsFileStatus {
    * Get the string representation of the local name
    * @return the local name in string
    */
-  final public String getLocalName() {
+  public final String getLocalName() {
     return DFSUtil.bytes2String(path);
   }
   
@@ -174,7 +192,7 @@ public class HdfsFileStatus {
    * Get the Java UTF8 representation of the local name
    * @return the local name in java UTF8
    */
-  final public byte[] getLocalNameInBytes() {
+  public final byte[] getLocalNameInBytes() {
     return path;
   }
 
@@ -183,7 +201,7 @@ public class HdfsFileStatus {
    * @param parent the parent path
    * @return the full path in string
    */
-  final public String getFullName(final String parent) {
+  public final String getFullName(final String parent) {
     if (isEmptyLocalName()) {
       return parent;
     }
@@ -201,7 +219,7 @@ public class HdfsFileStatus {
    * @param parent the parent path
    * @return the full path
    */
-  final public Path getFullPath(final Path parent) {
+  public final Path getFullPath(final Path parent) {
     if (isEmptyLocalName()) {
       return parent;
     }
@@ -213,11 +231,33 @@ public class HdfsFileStatus {
    * Get the string representation of the symlink.
    * @return the symlink as a string.
    */
-  final public String getSymlink() {
+  public final String getSymlink() {
     return DFSUtil.bytes2String(symlink);
   }
   
-  final public byte[] getSymlinkInBytes() {
+  public final byte[] getSymlinkInBytes() {
     return symlink;
+  }
+  
+  public final long getFileId() {
+    return fileId;
+  }
+  
+  public final FileEncryptionInfo getFileEncryptionInfo() {
+    return feInfo;
+  }
+
+  public final int getChildrenNum() {
+    return childrenNum;
+  }
+
+  public final FileStatus makeQualified(URI defaultUri, Path path) {
+    return new FileStatus(getLen(), isDir(), getReplication(),
+        getBlockSize(), getModificationTime(),
+        getAccessTime(),
+        getPermission(), getOwner(), getGroup(),
+        isSymlink() ? new Path(getSymlink()) : null,
+        (getFullPath(path)).makeQualified(
+            defaultUri, null)); // fully-qualify path
   }
 }

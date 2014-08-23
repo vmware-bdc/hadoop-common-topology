@@ -29,8 +29,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -63,7 +61,8 @@ public class TestGangliaMetrics {
   public void testTagsForPrefix() throws Exception {
     ConfigBuilder cb = new ConfigBuilder()
       .add("test.sink.ganglia.tagsForPrefix.all", "*")
-      .add("test.sink.ganglia.tagsForPrefix.some", "NumActiveSinks, NumActiveSources")
+      .add("test.sink.ganglia.tagsForPrefix.some", "NumActiveSinks, " +
+              "NumActiveSources")
       .add("test.sink.ganglia.tagsForPrefix.none", "");
     GangliaSink30 sink = new GangliaSink30();
     sink.init(cb.subset("test.sink.ganglia"));
@@ -115,31 +114,23 @@ public class TestGangliaMetrics {
     final int expectedCountFromGanglia30 = expectedMetrics.length;
     final int expectedCountFromGanglia31 = 2 * expectedMetrics.length;
 
-    // use latch to make sure we received required records before shutting
-    // down the MetricSystem
-    CountDownLatch latch = new CountDownLatch(
-        expectedCountFromGanglia30 + expectedCountFromGanglia31);
-
     // Setup test for GangliaSink30
     AbstractGangliaSink gsink30 = new GangliaSink30();
     gsink30.init(cb.subset("test"));
-    MockDatagramSocket mockds30 = new MockDatagramSocket(latch);
+    MockDatagramSocket mockds30 = new MockDatagramSocket();
     GangliaMetricsTestHelper.setDatagramSocket(gsink30, mockds30);
 
     // Setup test for GangliaSink31
     AbstractGangliaSink gsink31 = new GangliaSink31();
     gsink31.init(cb.subset("test"));
-    MockDatagramSocket mockds31 = new MockDatagramSocket(latch);
+    MockDatagramSocket mockds31 = new MockDatagramSocket();
     GangliaMetricsTestHelper.setDatagramSocket(gsink31, mockds31);
 
     // register the sinks
     ms.register("gsink30", "gsink30 desc", gsink30);
     ms.register("gsink31", "gsink31 desc", gsink31);
-    ms.onTimerEvent();  // trigger something interesting
+    ms.publishMetricsNow(); // publish the metrics
 
-    // wait for all records and the stop MetricSystem.  Without this
-    // sometime the ms gets shutdown before all the sinks have consumed
-    latch.await(200, TimeUnit.MILLISECONDS);
     ms.stop();
 
     // check GanfliaSink30 data
@@ -198,22 +189,12 @@ public class TestGangliaMetrics {
    */
   private class MockDatagramSocket extends DatagramSocket {
     private ArrayList<byte[]> capture;
-    private CountDownLatch latch;
 
     /**
      * @throws SocketException
      */
     public MockDatagramSocket() throws SocketException {
       capture = new  ArrayList<byte[]>();
-    }
-
-    /**
-     * @param latch
-     * @throws SocketException
-     */
-    public MockDatagramSocket(CountDownLatch latch) throws SocketException {
-      this();
-      this.latch = latch;
     }
 
     /* (non-Javadoc)
@@ -225,9 +206,6 @@ public class TestGangliaMetrics {
       byte[] bytes = new byte[p.getLength()];
       System.arraycopy(p.getData(), p.getOffset(), bytes, 0, p.getLength());
       capture.add(bytes);
-
-      // decrement the latch
-      latch.countDown();
     }
 
     /**

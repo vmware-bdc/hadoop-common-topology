@@ -39,7 +39,6 @@ import org.apache.hadoop.ipc.ProtobufRpcEngine;
 import org.apache.hadoop.ipc.ProtocolMetaInterface;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.RpcClientUtil;
-import org.apache.hadoop.ipc.RpcPayloadHeader.RpcKind;
 import org.apache.hadoop.security.UserGroupInformation;
 
 import com.google.protobuf.RpcController;
@@ -110,7 +109,7 @@ public class InterDatanodeProtocolTranslatorPB implements
         .setNewLength(newLength).setRecoveryId(recoveryId).build();
     try {
       return rpcProxy.updateReplicaUnderRecovery(NULL_CONTROLLER, req
-          ).getStorageID();
+          ).getStorageUuid();
     } catch (ServiceException e) {
       throw ProtobufHelper.getRemoteException(e);
     }
@@ -119,7 +118,7 @@ public class InterDatanodeProtocolTranslatorPB implements
   @Override
   public boolean isMethodSupported(String methodName) throws IOException {
     return RpcClientUtil.isMethodSupported(rpcProxy,
-        InterDatanodeProtocolPB.class, RpcKind.RPC_PROTOCOL_BUFFER,
+        InterDatanodeProtocolPB.class, RPC.RpcKind.RPC_PROTOCOL_BUFFER,
         RPC.getProtocolVersion(InterDatanodeProtocolPB.class), methodName);
   }
 }

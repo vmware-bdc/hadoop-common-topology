@@ -20,6 +20,7 @@ option java_package = "org.apache.hadoop.mapreduce.v2.proto";
 option java_outer_classname = "MRProtos";
 option java_generic_services = true;
 option java_generate_equals_and_hash = true;
+package hadoop.mapreduce;
 
 import "yarn_protos.proto";
 
@@ -29,7 +30,7 @@ enum TaskTypeProto {
 }
 
 message JobIdProto {
-  optional ApplicationIdProto app_id = 1;
+  optional hadoop.yarn.ApplicationIdProto app_id = 1;
   optional int32 id = 2;
 }
 
@@ -50,8 +51,7 @@ enum TaskStateProto {
   TS_RUNNING = 3;
   TS_SUCCEEDED = 4;
   TS_FAILED = 5;
-  TS_KILL_WAIT = 6;
-  TS_KILLED = 7;
+  TS_KILLED = 6;
 }
 
 enum PhaseProto {
@@ -93,18 +93,12 @@ message TaskReportProto {
 
 enum TaskAttemptStateProto {
   TA_NEW = 1;
-  TA_UNASSIGNED = 2;
-  TA_ASSIGNED = 3;
-  TA_RUNNING = 4;
-  TA_COMMIT_PENDING = 5;
-  TA_SUCCESS_CONTAINER_CLEANUP = 6;
-  TA_SUCCEEDED = 7;
-  TA_FAIL_CONTAINER_CLEANUP = 8;
-  TA_FAIL_TASK_CLEANUP = 9;
-  TA_FAILED = 10;
-  TA_KILL_CONTAINER_CLEANUP = 11;
-  TA_KILL_TASK_CLEANUP = 12;
-  TA_KILLED = 13;
+  TA_STARTING = 2;
+  TA_RUNNING = 3;
+  TA_COMMIT_PENDING = 4;
+  TA_SUCCEEDED = 5;
+  TA_FAILED = 6;
+  TA_KILLED = 7;
 }
 
 message TaskAttemptReportProto {
@@ -122,7 +116,7 @@ message TaskAttemptReportProto {
   optional string node_manager_host = 12;
   optional int32 node_manager_port = 13;
   optional int32 node_manager_http_port = 14;
-  optional ContainerIdProto container_id = 15;
+  optional hadoop.yarn.ContainerIdProto container_id = 15;
 }
 
 enum JobStateProto {
@@ -131,9 +125,8 @@ enum JobStateProto {
   J_RUNNING = 3;
   J_SUCCEEDED = 4;
   J_FAILED = 5;
-  J_KILL_WAIT = 6;
-  J_KILLED = 7;
-  J_ERROR = 8;
+  J_KILLED = 6;
+  J_ERROR = 7;
 }
 
 message JobReportProto {
@@ -156,9 +149,9 @@ message JobReportProto {
 }
 
 message AMInfoProto {
-  optional ApplicationAttemptIdProto application_attempt_id = 1;
+  optional hadoop.yarn.ApplicationAttemptIdProto application_attempt_id = 1;
   optional int64 start_time = 2;
-  optional ContainerIdProto container_id = 3;
+  optional hadoop.yarn.ContainerIdProto container_id = 3;
   optional string node_manager_host = 4;
   optional int32 node_manager_port = 5;
   optional int32 node_manager_http_port = 6;

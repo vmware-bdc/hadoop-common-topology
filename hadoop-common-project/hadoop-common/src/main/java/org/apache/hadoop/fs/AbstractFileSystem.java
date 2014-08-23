@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.fs;
 
-
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
@@ -39,8 +38,12 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem.Statistics;
+import org.apache.hadoop.fs.Options.ChecksumOpt;
 import org.apache.hadoop.fs.Options.CreateOpts;
 import org.apache.hadoop.fs.Options.Rename;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.InvalidPathException;
 import org.apache.hadoop.security.AccessControlException;
@@ -84,14 +87,20 @@ public abstract class AbstractFileSystem {
   }
   
   /**
-   * Prohibits names which contain a ".", "..", ":" or "/" 
+   * Returns true if the specified string is considered valid in the path part
+   * of a URI by this file system.  The default implementation enforces the rules
+   * of HDFS, but subclasses may override this method to implement specific
+   * validation rules for specific file systems.
+   * 
+   * @param src String source filename to check, path part of the URI
+   * @return boolean true if the specified string is considered valid
    */
-  private static boolean isValidName(String src) {
-    // Check for ".." "." ":" "/"
+  public boolean isValidName(String src) {
+    // Prohibit ".." "." and anything containing ":"
     StringTokenizer tokens = new StringTokenizer(src, Path.SEPARATOR);
     while(tokens.hasMoreTokens()) {
       String element = tokens.nextToken();
-      if (element.equals("target/generated-sources") ||
+      if (element.equals("..") ||
           element.equals(".")  ||
           (element.indexOf(":") >= 0)) {
         return false;
@@ -346,24 +355,27 @@ public abstract class AbstractFileSystem {
             path);
       } else {
         throw new InvalidPathException(
-            "Path without scheme with non-null autorhrity:" + path);
+            "Path without scheme with non-null authority:" + path);
       }
     }
     String thisScheme = this.getUri().getScheme();
-    String thisAuthority = this.getUri().getAuthority();
+    String thisHost = this.getUri().getHost();
+    String thatHost = uri.getHost();
     
-    // Schemes and authorities must match.
+    // Schemes and hosts must match.
     // Allow for null Authority for file:///
     if (!thisScheme.equalsIgnoreCase(thatScheme) ||
-       (thisAuthority != null && 
-            !thisAuthority.equalsIgnoreCase(thatAuthority)) ||
-       (thisAuthority == null && thatAuthority != null)) {
+       (thisHost != null && 
+            !thisHost.equalsIgnoreCase(thatHost)) ||
+       (thisHost == null && thatHost != null)) {
       throw new InvalidPathException("Wrong FS: " + path + ", expected: "
           + this.getUri());
     }
     
+    // Ports must match, unless this FS instance is using the default port, in
+    // which case the port may be omitted from the given URI
     int thisPort = this.getUri().getPort();
-    int thatPort = path.toUri().getPort();
+    int thatPort = uri.getPort();
     if (thatPort == -1) { // -1 => defaultPort of Uri scheme
       thatPort = this.getUriDefaultPort();
     }
@@ -464,6 +476,7 @@ public abstract class AbstractFileSystem {
     short replication = -1;
     long blockSize = -1;
     int bytesPerChecksum = -1;
+    ChecksumOpt checksumOpt = null;
     FsPermission permission = null;
     Progressable progress = null;
     Boolean createParent = null;
@@ -493,6 +506,12 @@ public abstract class AbstractFileSystem {
               "BytesPerChecksum option is set multiple times");
         }
         bytesPerChecksum = ((CreateOpts.BytesPerChecksum) iOpt).getValue();
+      } else if (CreateOpts.ChecksumParam.class.isInstance(iOpt)) {
+        if (checksumOpt != null) {
+          throw new  HadoopIllegalArgumentException(
+              "CreateChecksumType option is set multiple times");
+        }
+        checksumOpt = ((CreateOpts.ChecksumParam) iOpt).getValue();
       } else if (CreateOpts.Perms.class.isInstance(iOpt)) {
         if (permission != null) {
           throw new HadoopIllegalArgumentException(
@@ -530,9 +549,16 @@ public abstract class AbstractFileSystem {
     if (blockSize == -1) {
       blockSize = ssDef.getBlockSize();
     }
-    if (bytesPerChecksum == -1) {
-      bytesPerChecksum = ssDef.getBytesPerChecksum();
-    }
+
+    // Create a checksum option honoring user input as much as possible.
+    // If bytesPerChecksum is specified, it will override the one set in
+    // checksumOpt. Any missing value will be filled in using the default.
+    ChecksumOpt defaultOpt = new ChecksumOpt(
+        ssDef.getChecksumType(),
+        ssDef.getBytesPerChecksum());
+    checksumOpt = ChecksumOpt.processChecksumOpt(defaultOpt,
+        checksumOpt, bytesPerChecksum);
+
     if (bufferSize == -1) {
       bufferSize = ssDef.getFileBufferSize();
     }
@@ -549,7 +575,7 @@ public abstract class AbstractFileSystem {
     }
 
     return this.createInternal(f, createFlag, permission, bufferSize,
-      replication, blockSize, progress, bytesPerChecksum, createParent);
+      replication, blockSize, progress, checksumOpt, createParent);
   }
 
   /**
@@ -560,7 +586,7 @@ public abstract class AbstractFileSystem {
   public abstract FSDataOutputStream createInternal(Path f,
       EnumSet<CreateFlag> flag, FsPermission absolutePermission,
       int bufferSize, short replication, long blockSize, Progressable progress,
-      int bytesPerChecksum, boolean createParent)
+      ChecksumOpt checksumOpt, boolean createParent)
       throws AccessControlException, FileAlreadyExistsException,
       FileNotFoundException, ParentNotDirectoryException,
       UnsupportedFileSystemException, UnresolvedLinkException, IOException;
@@ -705,6 +731,7 @@ public abstract class AbstractFileSystem {
   
   /**
    * Returns true if the file system supports symlinks, false otherwise.
+   * @return true if filesystem supports symlinks
    */
   public boolean supportsSymlinks() {
     return false;
@@ -720,15 +747,15 @@ public abstract class AbstractFileSystem {
   }
 
   /**
-   * The specification of this method matches that of  
-   * {@link FileContext#getLinkTarget(Path)};
+   * Partially resolves the path. This is used during symlink resolution in
+   * {@link FSLinkResolver}, and differs from the similarly named method
+   * {@link FileContext#getLinkTarget(Path)}.
+   * @throws IOException subclass implementations may throw IOException 
    */
   public Path getLinkTarget(final Path f) throws IOException {
-    /* We should never get here. Any file system that threw an
-     * UnresolvedLinkException, causing this function to be called,
-     * needs to override this method.
-     */
-    throw new AssertionError();
+    throw new AssertionError("Implementation Error: " + getClass()
+        + " that threw an UnresolvedLinkException, causing this method to be"
+        + " called, needs to override this method.");
   }
     
   /**
@@ -776,6 +803,18 @@ public abstract class AbstractFileSystem {
   public abstract FileStatus getFileStatus(final Path f)
       throws AccessControlException, FileNotFoundException,
       UnresolvedLinkException, IOException;
+
+  /**
+   * The specification of this method matches that of
+   * {@link FileContext#access(Path, FsAction)}
+   * except that an UnresolvedLinkException may be thrown if a symlink is
+   * encountered in the path.
+   */
+  @InterfaceAudience.LimitedPrivate({"HDFS", "Hive"})
+  public void access(Path path, FsAction mode) throws AccessControlException,
+      FileNotFoundException, UnresolvedLinkException, IOException {
+    FileSystem.checkAccessPermissions(this.getFileStatus(path), mode);
+  }
 
   /**
    * The specification of this method matches that of
@@ -929,7 +968,210 @@ public abstract class AbstractFileSystem {
   public List<Token<?>> getDelegationTokens(String renewer) throws IOException {
     return new ArrayList<Token<?>>(0);
   }
-  
+
+  /**
+   * Modifies ACL entries of files and directories.  This method can add new ACL
+   * entries or modify the permissions on existing ACL entries.  All existing
+   * ACL entries that are not specified in this call are retained without
+   * changes.  (Modifications are merged into the current ACL.)
+   *
+   * @param path Path to modify
+   * @param aclSpec List<AclEntry> describing modifications
+   * @throws IOException if an ACL could not be modified
+   */
+  public void modifyAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support modifyAclEntries");
+  }
+
+  /**
+   * Removes ACL entries from files and directories.  Other ACL entries are
+   * retained.
+   *
+   * @param path Path to modify
+   * @param aclSpec List<AclEntry> describing entries to remove
+   * @throws IOException if an ACL could not be modified
+   */
+  public void removeAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support removeAclEntries");
+  }
+
+  /**
+   * Removes all default ACL entries from files and directories.
+   *
+   * @param path Path to modify
+   * @throws IOException if an ACL could not be modified
+   */
+  public void removeDefaultAcl(Path path)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support removeDefaultAcl");
+  }
+
+  /**
+   * Removes all but the base ACL entries of files and directories.  The entries
+   * for user, group, and others are retained for compatibility with permission
+   * bits.
+   *
+   * @param path Path to modify
+   * @throws IOException if an ACL could not be removed
+   */
+  public void removeAcl(Path path)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support removeAcl");
+  }
+
+  /**
+   * Fully replaces ACL of files and directories, discarding all existing
+   * entries.
+   *
+   * @param path Path to modify
+   * @param aclSpec List<AclEntry> describing modifications, must include entries
+   *   for user, group, and others for compatibility with permission bits.
+   * @throws IOException if an ACL could not be modified
+   */
+  public void setAcl(Path path, List<AclEntry> aclSpec) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support setAcl");
+  }
+
+  /**
+   * Gets the ACLs of files and directories.
+   *
+   * @param path Path to get
+   * @return RemoteIterator<AclStatus> which returns each AclStatus
+   * @throws IOException if an ACL could not be read
+   */
+  public AclStatus getAclStatus(Path path) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support getAclStatus");
+  }
+
+  /**
+   * Set an xattr of a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to modify
+   * @param name xattr name.
+   * @param value xattr value.
+   * @throws IOException
+   */
+  public void setXAttr(Path path, String name, byte[] value)
+      throws IOException {
+    setXAttr(path, name, value, EnumSet.of(XAttrSetFlag.CREATE,
+        XAttrSetFlag.REPLACE));
+  }
+
+  /**
+   * Set an xattr of a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to modify
+   * @param name xattr name.
+   * @param value xattr value.
+   * @param flag xattr set flag
+   * @throws IOException
+   */
+  public void setXAttr(Path path, String name, byte[] value,
+      EnumSet<XAttrSetFlag> flag) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support setXAttr");
+  }
+
+  /**
+   * Get an xattr for a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attribute
+   * @param name xattr name.
+   * @return byte[] xattr value.
+   * @throws IOException
+   */
+  public byte[] getXAttr(Path path, String name) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support getXAttr");
+  }
+
+  /**
+   * Get all of the xattrs for a file or directory.
+   * Only those xattrs for which the logged-in user has permissions to view
+   * are returned.
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attributes
+   * @return Map<String, byte[]> describing the XAttrs of the file or directory
+   * @throws IOException
+   */
+  public Map<String, byte[]> getXAttrs(Path path) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support getXAttrs");
+  }
+
+  /**
+   * Get all of the xattrs for a file or directory.
+   * Only those xattrs for which the logged-in user has permissions to view
+   * are returned.
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attributes
+   * @param names XAttr names.
+   * @return Map<String, byte[]> describing the XAttrs of the file or directory
+   * @throws IOException
+   */
+  public Map<String, byte[]> getXAttrs(Path path, List<String> names)
+      throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support getXAttrs");
+  }
+
+  /**
+   * Get all of the xattr names for a file or directory.
+   * Only the xattr names for which the logged-in user has permissions to view
+   * are returned.
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to get extended attributes
+   * @return Map<String, byte[]> describing the XAttrs of the file or directory
+   * @throws IOException
+   */
+  public List<String> listXAttrs(Path path)
+          throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+            + " doesn't support listXAttrs");
+  }
+
+  /**
+   * Remove an xattr of a file or directory.
+   * The name must be prefixed with the namespace followed by ".". For example,
+   * "user.attr".
+   * <p/>
+   * Refer to the HDFS extended attributes user documentation for details.
+   *
+   * @param path Path to remove extended attribute
+   * @param name xattr name
+   * @throws IOException
+   */
+  public void removeXAttr(Path path, String name) throws IOException {
+    throw new UnsupportedOperationException(getClass().getSimpleName()
+        + " doesn't support removeXAttr");
+  }
+
   @Override //Object
   public int hashCode() {
     return myUri.hashCode();

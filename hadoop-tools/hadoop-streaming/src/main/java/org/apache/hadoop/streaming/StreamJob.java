@@ -46,6 +46,7 @@ import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.filecache.DistributedCache;
 import org.apache.hadoop.mapreduce.server.jobtracker.JTConfig;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.mapred.FileInputFormat;
@@ -91,7 +92,7 @@ public class StreamJob implements Tool {
   @Deprecated
   public StreamJob(String[] argv, boolean mayExit) {
     this();
-    argv_ = argv;
+    argv_ = Arrays.copyOf(argv, argv.length);
     this.config_ = new Configuration();
   }
 
@@ -113,7 +114,7 @@ public class StreamJob implements Tool {
   @Override
   public int run(String[] args) throws Exception {
     try {
-      this.argv_ = args;
+      this.argv_ = Arrays.copyOf(args, args.length);
       init();
 
       preProcessArgs();
@@ -290,21 +291,28 @@ public class StreamJob implements Tool {
         LOG.warn("-file option is deprecated, please use generic option" +
         		" -files instead.");
 
-        String fileList = null;
+        StringBuffer fileList = new StringBuffer();
         for (String file : values) {
           packageFiles_.add(file);
           try {
-            URI pathURI = new URI(file);
-            Path path = new Path(pathURI);
+            Path path = new Path(file);
             FileSystem localFs = FileSystem.getLocal(config_);
             String finalPath = path.makeQualified(localFs).toString();
-            fileList = fileList == null ? finalPath : fileList + "," + finalPath;
+            if(fileList.length() > 0) {
+              fileList.append(',');
+            }
+            fileList.append(finalPath);
           } catch (Exception e) {
             throw new IllegalArgumentException(e);
           }
         }
-        config_.set("tmpfiles", config_.get("tmpfiles", "") +
-                                  (fileList == null ? "" : fileList));
+        String tmpFiles = config_.get("tmpfiles", "");
+        if (tmpFiles.isEmpty()) {
+          tmpFiles = fileList.toString();
+        } else {
+          tmpFiles = tmpFiles + "," + fileList;
+        }
+        config_.set("tmpfiles", tmpFiles);
         validate(packageFiles_);
       }
 
@@ -387,7 +395,7 @@ public class StreamJob implements Tool {
   throws IllegalArgumentException {
     for (String file : values) {
       File f = new File(file);
-      if (!f.canRead()) {
+      if (!FileUtil.canRead(f)) {
         fail("File: " + f.getAbsolutePath()
           + " does not exist, or is not readable.");
       }
@@ -867,7 +875,7 @@ public class StreamJob implements Tool {
         IdentifierResolver.TEXT_ID));
     jobConf_.setClass("stream.map.output.reader.class",
       idResolver.getOutputReaderClass(), OutputReader.class);
-    if (isMapperACommand) {
+    if (isMapperACommand || jobConf_.get("stream.map.output") != null) {
       // if mapper is a command, then map output key/value classes come from the
       // idResolver
       jobConf_.setMapOutputKeyClass(idResolver.getOutputKeyClass());
@@ -883,7 +891,7 @@ public class StreamJob implements Tool {
         IdentifierResolver.TEXT_ID));
     jobConf_.setClass("stream.reduce.output.reader.class",
       idResolver.getOutputReaderClass(), OutputReader.class);
-    if (isReducerACommand) {
+    if (isReducerACommand || jobConf_.get("stream.reduce.output") != null) {
       // if reducer is a command, then output key/value classes come from the
       // idResolver
       jobConf_.setOutputKeyClass(idResolver.getOutputKeyClass());
@@ -956,7 +964,6 @@ public class StreamJob implements Tool {
       if (!b)
         fail(LINK_URI);
     }
-    DistributedCache.createSymlink(jobConf_);
     // set the jobconf for the caching parameters
     if (cacheArchives != null)
       DistributedCache.setCacheArchives(archiveURIs, jobConf_);

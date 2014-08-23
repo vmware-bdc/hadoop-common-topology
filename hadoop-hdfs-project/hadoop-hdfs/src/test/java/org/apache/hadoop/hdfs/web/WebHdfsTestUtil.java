@@ -40,20 +40,42 @@ import org.junit.Assert;
 public class WebHdfsTestUtil {
   public static final Log LOG = LogFactory.getLog(WebHdfsTestUtil.class);
 
-  public static WebHdfsFileSystem getWebHdfsFileSystem(final Configuration conf
-      ) throws IOException, URISyntaxException {
-    final String uri = WebHdfsFileSystem.SCHEME  + "://"
-        + conf.get(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY);
+  public static Configuration createConf() {
+    final Configuration conf = new Configuration();
+    conf.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
+    return conf;
+  }
+
+  public static WebHdfsFileSystem getWebHdfsFileSystem(
+      final Configuration conf, String scheme) throws IOException,
+      URISyntaxException {
+    final String uri;
+
+    if (WebHdfsFileSystem.SCHEME.equals(scheme)) {
+      uri = WebHdfsFileSystem.SCHEME + "://"
+          + conf.get(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY);
+    } else if (SWebHdfsFileSystem.SCHEME.equals(scheme)) {
+      uri = SWebHdfsFileSystem.SCHEME + "://"
+          + conf.get(DFSConfigKeys.DFS_NAMENODE_HTTPS_ADDRESS_KEY);
+    } else {
+      throw new IllegalArgumentException("unknown scheme:" + scheme);
+    }
     return (WebHdfsFileSystem)FileSystem.get(new URI(uri), conf);
   }
 
   public static WebHdfsFileSystem getWebHdfsFileSystemAs(
-      final UserGroupInformation ugi, final Configuration conf
-      ) throws IOException, URISyntaxException, InterruptedException {
+  final UserGroupInformation ugi, final Configuration conf
+  ) throws IOException, InterruptedException {
+    return getWebHdfsFileSystemAs(ugi, conf, WebHdfsFileSystem.SCHEME);
+  }
+
+  public static WebHdfsFileSystem getWebHdfsFileSystemAs(
+      final UserGroupInformation ugi, final Configuration conf, String scheme
+      ) throws IOException, InterruptedException {
     return ugi.doAs(new PrivilegedExceptionAction<WebHdfsFileSystem>() {
       @Override
       public WebHdfsFileSystem run() throws Exception {
-        return getWebHdfsFileSystem(conf);
+        return getWebHdfsFileSystem(conf, WebHdfsFileSystem.SCHEME);
       }
     });
   }
@@ -70,21 +92,6 @@ public class WebHdfsTestUtil {
       final int expectedResponseCode) throws IOException {
     conn.connect();
     Assert.assertEquals(expectedResponseCode, conn.getResponseCode());
-    return WebHdfsFileSystem.jsonParse(conn.getInputStream());
-  }
-  
-  public static HttpURLConnection twoStepWrite(HttpURLConnection conn,
-      final HttpOpParam.Op op) throws IOException {
-    conn.setRequestMethod(op.getType().toString());
-    conn = WebHdfsFileSystem.twoStepWrite(conn, op);
-    conn.setDoOutput(true);
-    conn.connect();
-    return conn;
-  }
-
-  public static FSDataOutputStream write(final WebHdfsFileSystem webhdfs,
-      final HttpOpParam.Op op, final HttpURLConnection conn,
-      final int bufferSize) throws IOException {
-    return webhdfs.write(op, conn, bufferSize);
+    return WebHdfsFileSystem.jsonParse(conn, false);
   }
 }

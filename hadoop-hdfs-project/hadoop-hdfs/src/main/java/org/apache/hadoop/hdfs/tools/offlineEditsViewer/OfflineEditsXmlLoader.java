@@ -18,18 +18,20 @@
 package org.apache.hadoop.hdfs.tools.offlineEditsViewer;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
-import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.Stack;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.hdfs.util.XMLUtils;
 import org.apache.hadoop.hdfs.util.XMLUtils.InvalidXmlException;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.OpInstanceCache;
-
+import org.apache.hadoop.hdfs.tools.offlineEditsViewer.OfflineEditsViewer;
 import org.apache.hadoop.hdfs.util.XMLUtils.Stanza;
 import org.xml.sax.Attributes;
 import org.xml.sax.InputSource;
@@ -39,6 +41,8 @@ import org.xml.sax.XMLReader;
 import org.xml.sax.helpers.DefaultHandler;
 import org.xml.sax.helpers.XMLReaderFactory;
 
+import com.google.common.base.Charsets;
+
 /**
  * OfflineEditsXmlLoader walks an EditsVisitor over an OEV XML file
  */
@@ -46,9 +50,9 @@ import org.xml.sax.helpers.XMLReaderFactory;
 @InterfaceStability.Unstable
 class OfflineEditsXmlLoader 
     extends DefaultHandler implements OfflineEditsLoader {
-  private boolean fixTxIds;
-  private OfflineEditsVisitor visitor;
-  private FileReader fileReader;
+  private final boolean fixTxIds;
+  private final OfflineEditsVisitor visitor;
+  private final InputStreamReader fileReader;
   private ParseState state;
   private Stanza stanza;
   private Stack<Stanza> stanzaStack;
@@ -68,14 +72,17 @@ class OfflineEditsXmlLoader
   }
   
   public OfflineEditsXmlLoader(OfflineEditsVisitor visitor,
-        File inputFile) throws FileNotFoundException {
+        File inputFile, OfflineEditsViewer.Flags flags) throws FileNotFoundException {
     this.visitor = visitor;
-    this.fileReader = new FileReader(inputFile);
+    this.fileReader =
+        new InputStreamReader(new FileInputStream(inputFile), Charsets.UTF_8);
+    this.fixTxIds = flags.getFixTxIds();
   }
 
   /**
    * Loads edits file, uses visitor to process all elements
    */
+  @Override
   public void loadEdits() throws IOException {
     try {
       XMLReader xr = XMLReaderFactory.createXMLReader();
@@ -119,6 +126,7 @@ class OfflineEditsXmlLoader
     }
   }
   
+  @Override
   public void startElement (String uri, String name,
       String qName, Attributes atts) {
     switch (state) {
@@ -167,8 +175,9 @@ class OfflineEditsXmlLoader
     }
   }
   
+  @Override
   public void endElement (String uri, String name, String qName) {
-    String str = cbuf.toString().trim();
+    String str = XMLUtils.unmangleXmlString(cbuf.toString()).trim();
     cbuf = new StringBuffer();
     switch (state) {
     case EXPECT_EDITS_TAG:
@@ -247,12 +256,8 @@ class OfflineEditsXmlLoader
     }
   }
   
+  @Override
   public void characters (char ch[], int start, int length) {
     cbuf.append(ch, start, length);
-  }
-
-  @Override
-  public void setFixTxIds() {
-    fixTxIds = true;
   }
 }

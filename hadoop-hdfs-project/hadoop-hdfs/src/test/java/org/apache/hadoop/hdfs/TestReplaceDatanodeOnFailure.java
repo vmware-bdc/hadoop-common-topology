@@ -27,7 +27,7 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hdfs.protocol.DatanodeID;
+import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferProtocol;
 import org.apache.hadoop.hdfs.protocol.datatransfer.ReplaceDatanodeOnFailure;
@@ -37,8 +37,7 @@ import org.junit.Assert;
 import org.junit.Test;
 
 /**
- * This class tests that a file need not be closed before its
- * data can be read by another client.
+ * This class tests that data nodes are correctly replaced on failure.
  */
 public class TestReplaceDatanodeOnFailure {
   static final Log LOG = AppendTestUtil.LOG;
@@ -61,7 +60,7 @@ public class TestReplaceDatanodeOnFailure {
     final DatanodeInfo[][] datanodes = new DatanodeInfo[infos.length + 1][];
     datanodes[0] = new DatanodeInfo[0];
     for(int i = 0; i < infos.length; ) {
-      infos[i] = new DatanodeInfo(new DatanodeID("dn" + i, 100));
+      infos[i] = DFSTestUtil.getLocalDatanodeInfo(50020 + i);
       i++;
       datanodes[i] = new DatanodeInfo[i];
       System.arraycopy(infos, 0, datanodes[i], 0, datanodes[i].length);
@@ -122,7 +121,7 @@ public class TestReplaceDatanodeOnFailure {
         ).racks(racks).numDataNodes(REPLICATION).build();
 
     try {
-      final DistributedFileSystem fs = (DistributedFileSystem)cluster.getFileSystem();
+      final DistributedFileSystem fs = cluster.getFileSystem();
       final Path dir = new Path(DIR);
       
       final SlowWriter[] slowwriters = new SlowWriter[10];
@@ -187,7 +186,7 @@ public class TestReplaceDatanodeOnFailure {
 
   static class SlowWriter extends Thread {
     final Path filepath;
-    private FSDataOutputStream out = null;
+    final HdfsDataOutputStream out;
     final long sleepms;
     private volatile boolean running = true;
     
@@ -195,7 +194,7 @@ public class TestReplaceDatanodeOnFailure {
         ) throws IOException {
       super(SlowWriter.class.getSimpleName() + ":" + filepath);
       this.filepath = filepath;
-      this.out = fs.create(filepath, REPLICATION);
+      this.out = (HdfsDataOutputStream)fs.create(filepath, REPLICATION);
       this.sleepms = sleepms;
     }
 
@@ -231,8 +230,7 @@ public class TestReplaceDatanodeOnFailure {
     }
 
     void checkReplication() throws IOException {
-      final DFSOutputStream dfsout = (DFSOutputStream)out.getWrappedStream();
-      Assert.assertEquals(REPLICATION, dfsout.getNumCurrentReplicas());
+      Assert.assertEquals(REPLICATION, out.getCurrentBlockReplication());
     }        
   }
 
@@ -247,7 +245,7 @@ public class TestReplaceDatanodeOnFailure {
         ).numDataNodes(1).build();
 
     try {
-      final DistributedFileSystem fs = (DistributedFileSystem)cluster.getFileSystem();
+      final DistributedFileSystem fs = cluster.getFileSystem();
       final Path f = new Path(DIR, "testAppend");
       
       {

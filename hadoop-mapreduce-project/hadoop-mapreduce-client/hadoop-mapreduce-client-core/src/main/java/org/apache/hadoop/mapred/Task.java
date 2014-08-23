@@ -53,7 +53,6 @@ import org.apache.hadoop.io.WritableUtils;
 import org.apache.hadoop.io.serializer.Deserializer;
 import org.apache.hadoop.io.serializer.SerializationFactory;
 import org.apache.hadoop.mapred.IFile.Writer;
-import org.apache.hadoop.mapreduce.Counter;
 import org.apache.hadoop.mapreduce.FileSystemCounter;
 import org.apache.hadoop.mapreduce.OutputCommitter;
 import org.apache.hadoop.mapreduce.TaskCounter;
@@ -62,12 +61,13 @@ import org.apache.hadoop.mapreduce.MRConfig;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.lib.reduce.WrappedReducer;
 import org.apache.hadoop.mapreduce.task.ReduceContextImpl;
-import org.apache.hadoop.yarn.util.ResourceCalculatorPlugin;
-import org.apache.hadoop.yarn.util.ResourceCalculatorPlugin.*;
+import org.apache.hadoop.yarn.util.ResourceCalculatorProcessTree;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.util.Progress;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.ShutdownHookManager;
+import org.apache.hadoop.util.StringInterner;
 import org.apache.hadoop.util.StringUtils;
 
 /**
@@ -169,7 +169,7 @@ abstract public class Task implements Writable, Configurable {
   private Iterator<Long> currentRecIndexIterator = 
     skipRanges.skipRangeIterator();
 
-  private ResourceCalculatorPlugin resourceCalculator = null;
+  private ResourceCalculatorProcessTree pTree;
   private long initCpuCumulativeTime = 0;
 
   protected JobConf conf;
@@ -186,7 +186,9 @@ abstract public class Task implements Writable, Configurable {
   private int numSlotsRequired;
   protected TaskUmbilicalProtocol umbilical;
   protected SecretKey tokenSecret;
+  protected SecretKey shuffleSecret;
   protected GcTimeUpdater gcUpdater;
+  final AtomicBoolean mustPreempt = new AtomicBoolean(false);
 
   ////////////////////////////////////////////
   // Constructors
@@ -262,7 +264,22 @@ abstract public class Task implements Writable, Configurable {
     return this.tokenSecret;
   }
 
-  
+  /**
+   * Set the secret key used to authenticate the shuffle
+   * @param shuffleSecret the secret
+   */
+  public void setShuffleSecret(SecretKey shuffleSecret) {
+    this.shuffleSecret = shuffleSecret;
+  }
+
+  /**
+   * Get the secret key used to authenticate the shuffle
+   * @return the shuffle secret
+   */
+  public SecretKey getShuffleSecret() {
+    return this.shuffleSecret;
+  }
+
   /**
    * Get the index of this task within the job.
    * @return the integer part of the task id
@@ -306,6 +323,11 @@ abstract public class Task implements Writable, Configurable {
   protected void reportFatalError(TaskAttemptID id, Throwable throwable, 
                                   String logMsg) {
     LOG.fatal(logMsg);
+    
+    if (ShutdownHookManager.get().isShutdownInProgress()) {
+      return;
+    }
+    
     Throwable tCause = throwable.getCause();
     String cause = tCause == null 
                    ? StringUtils.stringifyException(throwable)
@@ -372,7 +394,7 @@ abstract public class Task implements Writable, Configurable {
    * Return current state of the task. 
    * needs to be synchronized as communication thread 
    * sends the state every second
-   * @return
+   * @return task state
    */
   synchronized TaskStatus.State getState(){
     return this.taskStatus.getRunState(); 
@@ -468,7 +490,7 @@ abstract public class Task implements Writable, Configurable {
   }
   
   public void readFields(DataInput in) throws IOException {
-    jobFile = Text.readString(in);
+    jobFile = StringInterner.weakIntern(Text.readString(in));
     taskId = TaskAttemptID.read(in);
     partition = in.readInt();
     numSlotsRequired = in.readInt();
@@ -488,7 +510,7 @@ abstract public class Task implements Writable, Configurable {
     if (taskCleanup) {
       setPhase(TaskStatus.Phase.CLEANUP);
     }
-    user = Text.readString(in);
+    user = StringInterner.weakIntern(Text.readString(in));
     extraData.readFields(in);
   }
 
@@ -558,21 +580,35 @@ abstract public class Task implements Writable, Configurable {
       }
     }
     committer.setupTask(taskContext);
-    Class<? extends ResourceCalculatorPlugin> clazz =
-        conf.getClass(MRConfig.RESOURCE_CALCULATOR_PLUGIN,
-            null, ResourceCalculatorPlugin.class);
-    resourceCalculator = ResourceCalculatorPlugin
-            .getResourceCalculatorPlugin(clazz, conf);
-    LOG.info(" Using ResourceCalculatorPlugin : " + resourceCalculator);
-    if (resourceCalculator != null) {
-      initCpuCumulativeTime =
-        resourceCalculator.getProcResourceValues().getCumulativeCpuTime();
+    Class<? extends ResourceCalculatorProcessTree> clazz =
+        conf.getClass(MRConfig.RESOURCE_CALCULATOR_PROCESS_TREE,
+            null, ResourceCalculatorProcessTree.class);
+    pTree = ResourceCalculatorProcessTree
+            .getResourceCalculatorProcessTree(System.getenv().get("JVM_PID"), clazz, conf);
+    LOG.info(" Using ResourceCalculatorProcessTree : " + pTree);
+    if (pTree != null) {
+      pTree.updateProcessTree();
+      initCpuCumulativeTime = pTree.getCumulativeCpuTime();
     }
   }
-  
-  @InterfaceAudience.Private
+
+  public static String normalizeStatus(String status, Configuration conf) {
+    // Check to see if the status string is too long
+    // and truncate it if needed.
+    int progressStatusLength = conf.getInt(
+        MRConfig.PROGRESS_STATUS_LEN_LIMIT_KEY,
+        MRConfig.PROGRESS_STATUS_LEN_LIMIT_DEFAULT);
+    if (status.length() > progressStatusLength) {
+      LOG.warn("Task status: \"" + status + "\" truncated to max limit ("
+          + progressStatusLength + " characters)");
+      status = status.substring(0, progressStatusLength);
+    }
+    return status;
+  }
+
+  @InterfaceAudience.LimitedPrivate({"MapReduce"})
   @InterfaceStability.Unstable
-  protected class TaskReporter 
+  public class TaskReporter 
       extends org.apache.hadoop.mapreduce.StatusReporter
       implements Runnable, Reporter {
     private TaskUmbilicalProtocol umbilical;
@@ -603,7 +639,7 @@ abstract public class Task implements Writable, Configurable {
       return progressFlag.getAndSet(false);
     }
     public void setStatus(String status) {
-      taskProgress.setStatus(status);
+      taskProgress.setStatus(normalizeStatus(status, conf));
       // indicate that progress update needs to be sent
       setProgressFlag();
     }
@@ -682,6 +718,7 @@ abstract public class Task implements Writable, Configurable {
         }
         try {
           boolean taskFound = true; // whether TT knows about this task
+          AMFeedback amFeedback = null;
           // sleep for a bit
           synchronized(lock) {
             if (taskDone.get()) {
@@ -699,12 +736,14 @@ abstract public class Task implements Writable, Configurable {
             taskStatus.statusUpdate(taskProgress.get(),
                                     taskProgress.toString(), 
                                     counters);
-            taskFound = umbilical.statusUpdate(taskId, taskStatus);
+            amFeedback = umbilical.statusUpdate(taskId, taskStatus);
+            taskFound = amFeedback.getTaskFound();
             taskStatus.clearStatus();
           }
           else {
             // send ping 
-            taskFound = umbilical.ping(taskId);
+            amFeedback = umbilical.statusUpdate(taskId, null);
+            taskFound = amFeedback.getTaskFound();
           }
 
           // if Task Tracker is not aware of our task ID (probably because it died and 
@@ -715,6 +754,17 @@ abstract public class Task implements Writable, Configurable {
             System.exit(66);
           }
 
+          // Set a flag that says we should preempt this is read by
+          // ReduceTasks in places of the execution where it is
+          // safe/easy to preempt
+          boolean lastPreempt = mustPreempt.get();
+          mustPreempt.set(mustPreempt.get() || amFeedback.getPreemption());
+
+          if (lastPreempt ^ mustPreempt.get()) {
+            LOG.info("PREEMPTION TASK: setting mustPreempt to " +
+                mustPreempt.get() + " given " + amFeedback.getPreemption() +
+                " for "+ taskId + " task status: " +taskStatus.getPhase());
+          }
           sendProgress = resetProgressFlag(); 
           remainingRetries = MAX_RETRIES;
         } 
@@ -803,14 +853,14 @@ abstract public class Task implements Writable, Configurable {
     // Update generic resource counters
     updateHeapUsageCounter();
 
-    // Updating resources specified in ResourceCalculatorPlugin
-    if (resourceCalculator == null) {
+    // Updating resources specified in ResourceCalculatorProcessTree
+    if (pTree == null) {
       return;
     }
-    ProcResourceValues res = resourceCalculator.getProcResourceValues();
-    long cpuTime = res.getCumulativeCpuTime();
-    long pMem = res.getPhysicalMemorySize();
-    long vMem = res.getVirtualMemorySize();
+    pTree.updateProcessTree();
+    long cpuTime = pTree.getCumulativeCpuTime();
+    long pMem = pTree.getCumulativeRssmem();
+    long vMem = pTree.getCumulativeVmem();
     // Remove the CPU time consumed previously by JVM reuse
     cpuTime -= initCpuCumulativeTime;
     counters.findCounter(TaskCounter.CPU_MILLISECONDS).setValue(cpuTime);
@@ -963,10 +1013,17 @@ abstract public class Task implements Writable, Configurable {
   public void done(TaskUmbilicalProtocol umbilical,
                    TaskReporter reporter
                    ) throws IOException, InterruptedException {
-    LOG.info("Task:" + taskId + " is done."
-             + " And is in the process of commiting");
     updateCounters();
-
+    if (taskStatus.getRunState() == TaskStatus.State.PREEMPTED ) {
+      // If we are preempted, do no output promotion; signal done and exit
+      committer.commitTask(taskContext);
+      umbilical.preempted(taskId, taskStatus);
+      taskDone.set(true);
+      reporter.stopCommunicationThread();
+      return;
+    }
+    LOG.info("Task:" + taskId + " is done."
+        + " And is in the process of committing");
     boolean commitRequired = isCommitRequired();
     if (commitRequired) {
       int retries = MAX_RETRIES;
@@ -1025,7 +1082,7 @@ abstract public class Task implements Writable, Configurable {
     int retries = MAX_RETRIES;
     while (true) {
       try {
-        if (!umbilical.statusUpdate(getTaskID(), taskStatus)) {
+        if (!umbilical.statusUpdate(getTaskID(), taskStatus).getTaskFound()) {
           LOG.warn("Parent died.  Exiting "+taskId);
           System.exit(66);
         }
@@ -1452,9 +1509,9 @@ abstract public class Task implements Writable, Configurable {
     return reducerContext;
   }
 
-  @InterfaceAudience.Private
+  @InterfaceAudience.LimitedPrivate({"MapReduce"})
   @InterfaceStability.Unstable
-  protected static abstract class CombinerRunner<K,V> {
+  public static abstract class CombinerRunner<K,V> {
     protected final Counters.Counter inputCounter;
     protected final JobConf job;
     protected final TaskReporter reporter;
@@ -1472,13 +1529,13 @@ abstract public class Task implements Writable, Configurable {
      * @param iterator the key/value pairs to use as input
      * @param collector the output collector
      */
-    abstract void combine(RawKeyValueIterator iterator, 
+    public abstract void combine(RawKeyValueIterator iterator, 
                           OutputCollector<K,V> collector
                          ) throws IOException, InterruptedException, 
                                   ClassNotFoundException;
 
     @SuppressWarnings("unchecked")
-    static <K,V> 
+    public static <K,V> 
     CombinerRunner<K,V> create(JobConf job,
                                TaskAttemptID taskId,
                                Counters.Counter inputCounter,
@@ -1524,11 +1581,12 @@ abstract public class Task implements Writable, Configurable {
       combinerClass = cls;
       keyClass = (Class<K>) job.getMapOutputKeyClass();
       valueClass = (Class<V>) job.getMapOutputValueClass();
-      comparator = (RawComparator<K>) job.getOutputKeyComparator();
+      comparator = (RawComparator<K>)
+          job.getCombinerKeyGroupingComparator();
     }
 
     @SuppressWarnings("unchecked")
-    protected void combine(RawKeyValueIterator kvIter,
+    public void combine(RawKeyValueIterator kvIter,
                            OutputCollector<K,V> combineCollector
                            ) throws IOException {
       Reducer<K,V,K,V> combiner = 
@@ -1573,7 +1631,7 @@ abstract public class Task implements Writable, Configurable {
       this.taskId = taskId;
       keyClass = (Class<K>) context.getMapOutputKeyClass();
       valueClass = (Class<V>) context.getMapOutputValueClass();
-      comparator = (RawComparator<K>) context.getSortComparator();
+      comparator = (RawComparator<K>) context.getCombinerKeyGroupingComparator();
       this.committer = committer;
     }
 
@@ -1597,7 +1655,7 @@ abstract public class Task implements Writable, Configurable {
 
     @SuppressWarnings("unchecked")
     @Override
-    void combine(RawKeyValueIterator iterator, 
+    public void combine(RawKeyValueIterator iterator, 
                  OutputCollector<K,V> collector
                  ) throws IOException, InterruptedException,
                           ClassNotFoundException {

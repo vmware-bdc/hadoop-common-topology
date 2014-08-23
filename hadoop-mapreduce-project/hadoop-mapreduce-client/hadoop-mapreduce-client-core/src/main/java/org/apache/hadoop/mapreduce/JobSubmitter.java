@@ -23,10 +23,15 @@ import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.UnknownHostException;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -34,11 +39,11 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.QueueACL;
@@ -50,17 +55,23 @@ import org.apache.hadoop.mapreduce.protocol.ClientProtocol;
 import org.apache.hadoop.mapreduce.security.TokenCache;
 import org.apache.hadoop.mapreduce.split.JobSplitWriter;
 import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.codehaus.jackson.JsonParseException;
 import org.codehaus.jackson.map.JsonMappingException;
 import org.codehaus.jackson.map.ObjectMapper;
 
+import com.google.common.base.Charsets;
+
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 class JobSubmitter {
   protected static final Log LOG = LogFactory.getLog(JobSubmitter.class);
+  private static final String SHUFFLE_KEYGEN_ALGORITHM = "HmacSHA1";
+  private static final int SHUFFLE_KEY_LENGTH = 64;
   private FileSystem jtFs;
   private ClientProtocol submitClient;
   private String submitHostName;
@@ -136,8 +147,9 @@ class JobSubmitter {
       short replication) throws IOException {
     Configuration conf = job.getConfiguration();
     if (!(conf.getBoolean(Job.USED_GENERIC_PARSER, false))) {
-      LOG.warn("Use GenericOptionsParser for parsing the arguments. " +
-               "Applications should implement Tool for the same.");
+      LOG.warn("Hadoop command-line option parsing not performed. " +
+               "Implement the Tool interface and execute your application " +
+               "with ToolRunner to remedy this.");
     }
 
     // get all the command line arguments passed in by the user conf
@@ -190,7 +202,6 @@ class JobSubmitter {
           //should not throw a uri exception 
           throw new IOException("Failed to create uri for " + tmpFile, ue);
         }
-        DistributedCache.createSymlink(conf);
       }
     }
       
@@ -225,7 +236,6 @@ class JobSubmitter {
           //should not throw an uri excpetion
           throw new IOException("Failed to create uri for " + tmpArchives, ue);
         }
-        DistributedCache.createSymlink(conf);
       }
     }
 
@@ -234,18 +244,25 @@ class JobSubmitter {
       if ("".equals(job.getJobName())){
         job.setJobName(new Path(jobJar).getName());
       }
-      copyJar(new Path(jobJar), JobSubmissionFiles.getJobJar(submitJobDir), 
-          replication);
-      job.setJar(JobSubmissionFiles.getJobJar(submitJobDir).toString());
+      Path jobJarPath = new Path(jobJar);
+      URI jobJarURI = jobJarPath.toUri();
+      // If the job jar is already in fs, we don't need to copy it from local fs
+      if (jobJarURI.getScheme() == null || jobJarURI.getAuthority() == null
+              || !(jobJarURI.getScheme().equals(jtFs.getUri().getScheme()) 
+                  && jobJarURI.getAuthority().equals(
+                                            jtFs.getUri().getAuthority()))) {
+        copyJar(jobJarPath, JobSubmissionFiles.getJobJar(submitJobDir), 
+            replication);
+        job.setJar(JobSubmissionFiles.getJobJar(submitJobDir).toString());
+      }
     } else {
       LOG.warn("No job jar file set.  User classes may not be found. "+
       "See Job or Job#setJar(String).");
     }
 
     //  set the timestamps of the archives and files
-    ClientDistributedCacheManager.determineTimestamps(conf);
     //  set the public/private visibility of the archives and files
-    ClientDistributedCacheManager.determineCacheVisibilities(conf);
+    ClientDistributedCacheManager.determineTimestampsAndCacheVisibilities(conf);
     // get DelegationToken for each cached file
     ClientDistributedCacheManager.getDelegationTokens(conf, job
         .getCredentials());
@@ -274,7 +291,7 @@ class JobSubmitter {
   /**
    * configure the jobconf of the user with the command line options of 
    * -libjars, -files, -archives.
-   * @param conf
+   * @param job
    * @throws IOException
    */
   private void copyAndConfigureFiles(Job job, Path jobSubmitDir) 
@@ -324,11 +341,12 @@ class JobSubmitter {
 
     //validate the jobs output specs 
     checkSpecs(job);
-    
-    Path jobStagingArea = JobSubmissionFiles.getStagingDir(cluster, 
-                                                     job.getConfiguration());
-    //configure the command line options correctly on the submitting dfs
+
     Configuration conf = job.getConfiguration();
+    addMRFrameworkToDistributedCache(conf);
+
+    Path jobStagingArea = JobSubmissionFiles.getStagingDir(cluster, conf);
+    //configure the command line options correctly on the submitting dfs
     InetAddress ip = InetAddress.getLocalHost();
     if (ip != null) {
       submitHostAddress = ip.getHostAddress();
@@ -341,6 +359,8 @@ class JobSubmitter {
     Path submitJobDir = new Path(jobStagingArea, jobId.toString());
     JobStatus status = null;
     try {
+      conf.set(MRJobConfig.USER_NAME,
+          UserGroupInformation.getCurrentUser().getShortUserName());
       conf.set("hadoop.http.filter.initializers", 
           "org.apache.hadoop.yarn.server.webproxy.amfilter.AmFilterInitializer");
       conf.set(MRJobConfig.MAPREDUCE_JOB_DIR, submitJobDir.toString());
@@ -351,6 +371,25 @@ class JobSubmitter {
           new Path[] { submitJobDir }, conf);
       
       populateTokenCache(conf, job.getCredentials());
+
+      // generate a secret to authenticate shuffle transfers
+      if (TokenCache.getShuffleSecretKey(job.getCredentials()) == null) {
+        KeyGenerator keyGen;
+        try {
+         
+          int keyLen = CryptoUtils.isShuffleEncrypted(conf) 
+              ? conf.getInt(MRJobConfig.MR_ENCRYPTED_INTERMEDIATE_DATA_KEY_SIZE_BITS, 
+                  MRJobConfig.DEFAULT_MR_ENCRYPTED_INTERMEDIATE_DATA_KEY_SIZE_BITS)
+              : SHUFFLE_KEY_LENGTH;
+          keyGen = KeyGenerator.getInstance(SHUFFLE_KEYGEN_ALGORITHM);
+          keyGen.init(keyLen);
+        } catch (NoSuchAlgorithmException e) {
+          throw new IOException("Error generating shuffle secret key", e);
+        }
+        SecretKey shuffleKey = keyGen.generateKey();
+        TokenCache.setShuffleSecretKey(shuffleKey.getEncoded(),
+            job.getCredentials());
+      }
 
       copyAndConfigureFiles(job, submitJobDir);
       Path submitJobFile = JobSubmissionFiles.getJobConfPath(submitJobDir);
@@ -374,6 +413,19 @@ class JobSubmitter {
       // because of it if present as the referral will point to a
       // different job.
       TokenCache.cleanUpTokenReferral(conf);
+
+      if (conf.getBoolean(
+          MRJobConfig.JOB_TOKEN_TRACKING_IDS_ENABLED,
+          MRJobConfig.DEFAULT_JOB_TOKEN_TRACKING_IDS_ENABLED)) {
+        // Add HDFS tracking ids
+        ArrayList<String> trackingIds = new ArrayList<String>();
+        for (Token<? extends TokenIdentifier> t :
+            job.getCredentials().getAllTokens()) {
+          trackingIds.add(t.decodeIdentifier().getTrackingId());
+        }
+        conf.setStrings(MRJobConfig.JOB_TOKEN_TRACKING_IDS,
+            trackingIds.toArray(new String[trackingIds.size()]));
+      }
 
       // Write job file to submit dir
       writeConf(conf, submitJobFile);
@@ -429,14 +481,9 @@ class JobSubmitter {
   
   private void printTokens(JobID jobId,
       Credentials credentials) throws IOException {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Printing tokens for job: " + jobId);
-      for(Token<?> token: credentials.getAllTokens()) {
-        if (token.getKind().toString().equals("HDFS_DELEGATION_TOKEN")) {
-          LOG.debug("Submitting with " +
-              org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier.stringifyToken(token));
-        }
-      }
+    LOG.info("Submitting tokens for job: " + jobId);
+    for (Token<?> token: credentials.getAllTokens()) {
+      LOG.info(token);
     }
   }
 
@@ -549,7 +596,7 @@ class JobSubmitter {
 
         for(Map.Entry<String, String> ent: nm.entrySet()) {
           credentials.addSecretKey(new Text(ent.getKey()), ent.getValue()
-              .getBytes());
+              .getBytes(Charsets.UTF_8));
         }
       } catch (JsonMappingException e) {
         json_error = true;
@@ -562,7 +609,6 @@ class JobSubmitter {
   }
 
   //get secret keys and tokens and store them into TokenCache
-  @SuppressWarnings("unchecked")
   private void populateTokenCache(Configuration conf, Credentials credentials) 
   throws IOException{
     readTokensFromFiles(conf, credentials);
@@ -576,6 +622,43 @@ class JobSubmitter {
         ps[i] = new Path(nameNodes[i]);
       }
       TokenCache.obtainTokensForNamenodes(credentials, ps, conf);
+    }
+  }
+
+  @SuppressWarnings("deprecation")
+  private static void addMRFrameworkToDistributedCache(Configuration conf)
+      throws IOException {
+    String framework =
+        conf.get(MRJobConfig.MAPREDUCE_APPLICATION_FRAMEWORK_PATH, "");
+    if (!framework.isEmpty()) {
+      URI uri;
+      try {
+        uri = new URI(framework);
+      } catch (URISyntaxException e) {
+        throw new IllegalArgumentException("Unable to parse '" + framework
+            + "' as a URI, check the setting for "
+            + MRJobConfig.MAPREDUCE_APPLICATION_FRAMEWORK_PATH, e);
+      }
+
+      String linkedName = uri.getFragment();
+
+      // resolve any symlinks in the URI path so using a "current" symlink
+      // to point to a specific version shows the specific version
+      // in the distributed cache configuration
+      FileSystem fs = FileSystem.get(conf);
+      Path frameworkPath = fs.makeQualified(
+          new Path(uri.getScheme(), uri.getAuthority(), uri.getPath()));
+      FileContext fc = FileContext.getFileContext(frameworkPath.toUri(), conf);
+      frameworkPath = fc.resolvePath(frameworkPath);
+      uri = frameworkPath.toUri();
+      try {
+        uri = new URI(uri.getScheme(), uri.getAuthority(), uri.getPath(),
+            null, linkedName);
+      } catch (URISyntaxException e) {
+        throw new IllegalArgumentException(e);
+      }
+
+      DistributedCache.addCacheArchive(uri, conf);
     }
   }
 }

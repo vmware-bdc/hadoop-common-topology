@@ -25,6 +25,8 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
 import org.apache.hadoop.hdfs.server.namenode.CheckpointSignature;
+import org.apache.hadoop.io.retry.AtMostOnce;
+import org.apache.hadoop.io.retry.Idempotent;
 import org.apache.hadoop.security.KerberosInfo;
 
 /*****************************************************************************
@@ -32,8 +34,7 @@ import org.apache.hadoop.security.KerberosInfo;
  * It's used to get part of the name node state
  *****************************************************************************/
 @KerberosInfo(
-    serverPrincipal = DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY,
-    clientPrincipal = DFSConfigKeys.DFS_NAMENODE_USER_NAME_KEY)
+    serverPrincipal = DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY)
 @InterfaceAudience.Private
 public interface NamenodeProtocol {
   /**
@@ -74,6 +75,7 @@ public interface NamenodeProtocol {
    * @throws IOException if size is less than or equal to 0 or
                                    datanode does not exist
    */
+  @Idempotent
   public BlocksWithLocations getBlocks(DatanodeInfo datanode, long size)
   throws IOException;
 
@@ -83,14 +85,23 @@ public interface NamenodeProtocol {
    * @return ExportedBlockKeys containing current block keys
    * @throws IOException 
    */
+  @Idempotent
   public ExportedBlockKeys getBlockKeys() throws IOException;
 
   /**
    * @return The most recent transaction ID that has been synced to
-   * persistent storage.
+   * persistent storage, or applied from persistent storage in the
+   * case of a non-active node.
    * @throws IOException
    */
+  @Idempotent
   public long getTransactionID() throws IOException;
+
+  /**
+   * Get the transaction ID of the most recent checkpoint.
+   */
+  @Idempotent
+  public long getMostRecentCheckpointTxId() throws IOException;
 
   /**
    * Closes the current edit log and opens a new one. The 
@@ -98,6 +109,7 @@ public interface NamenodeProtocol {
    * @throws IOException
    * @return a unique token to identify this transaction.
    */
+  @Idempotent
   public CheckpointSignature rollEditLog() throws IOException;
 
   /**
@@ -107,6 +119,7 @@ public interface NamenodeProtocol {
    *          of the name-node
    * @throws IOException
    */
+  @Idempotent
   public NamespaceInfo versionRequest() throws IOException;
 
   /**
@@ -119,6 +132,7 @@ public interface NamenodeProtocol {
    * @param msg free text description of the error
    * @throws IOException
    */
+  @Idempotent
   public void errorReport(NamenodeRegistration registration,
                           int errorCode, 
                           String msg) throws IOException;
@@ -129,8 +143,9 @@ public interface NamenodeProtocol {
    * @return  {@link NamenodeRegistration} of the node,
    *          which this node has just registered with.
    */
-  public NamenodeRegistration register(NamenodeRegistration registration)
-  throws IOException;
+  @Idempotent
+  public NamenodeRegistration registerSubordinateNamenode(
+      NamenodeRegistration registration) throws IOException;
 
   /**
    * A request to the active name-node to start a checkpoint.
@@ -146,6 +161,7 @@ public interface NamenodeProtocol {
    * @return {@link CheckpointCommand} if checkpoint is allowed.
    * @throws IOException
    */
+  @AtMostOnce
   public NamenodeCommand startCheckpoint(NamenodeRegistration registration)
   throws IOException;
 
@@ -157,6 +173,7 @@ public interface NamenodeProtocol {
    * @param sig {@code CheckpointSignature} which identifies the checkpoint.
    * @throws IOException
    */
+  @AtMostOnce
   public void endCheckpoint(NamenodeRegistration registration,
                             CheckpointSignature sig) throws IOException;
   
@@ -166,6 +183,7 @@ public interface NamenodeProtocol {
    * available to be fetched from the NameNode.
    * @param sinceTxId return only logs that contain transactions >= sinceTxId
    */
+  @Idempotent
   public RemoteEditLogManifest getEditLogManifest(long sinceTxId)
     throws IOException;
 }

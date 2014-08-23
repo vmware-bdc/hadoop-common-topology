@@ -17,12 +17,16 @@
  */
 package org.apache.hadoop.hdfs;
 
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 
-import junit.framework.TestCase;
-
+import org.apache.commons.logging.LogFactory;
+import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -36,19 +40,18 @@ import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
-
-import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.log4j.Level;
+import org.junit.Test;
 
 /**
  * This class tests the building blocks that are needed to
  * support HDFS appends.
  */
-public class TestFileAppend2 extends TestCase {
+public class TestFileAppend2 {
 
   {
     ((Log4JLogger)NameNode.stateChangeLog).getLogger().setLevel(Level.ALL);
+    ((Log4JLogger)NameNode.blockStateChangeLog).getLogger().setLevel(Level.ALL);
     ((Log4JLogger)LeaseManager.LOG).getLogger().setLevel(Level.ALL);
     ((Log4JLogger)LogFactory.getLog(FSNamesystem.class)).getLogger().setLevel(Level.ALL);
     ((Log4JLogger)DataNode.LOG).getLogger().setLevel(Level.ALL);
@@ -56,14 +59,14 @@ public class TestFileAppend2 extends TestCase {
   }
 
   static final int numBlocks = 5;
-  boolean simulatedStorage = false;
+  final boolean simulatedStorage = false;
 
   private byte[] fileContents = null;
 
-  int numDatanodes = 6;
-  int numberOfFiles = 50;
-  int numThreads = 10;
-  int numAppendsPerThread = 20;
+  final int numDatanodes = 6;
+  final int numberOfFiles = 50;
+  final int numThreads = 10;
+  final int numAppendsPerThread = 20;
 /***
   int numberOfFiles = 1;
   int numThreads = 1;
@@ -79,6 +82,7 @@ public class TestFileAppend2 extends TestCase {
    * Verify that all data exists in file.
    * @throws IOException an exception might be thrown
    */ 
+  @Test
   public void testSimpleAppend() throws IOException {
     final Configuration conf = new HdfsConfiguration();
     if (simulatedStorage) {
@@ -229,8 +233,8 @@ public class TestFileAppend2 extends TestCase {
   // an object that does a bunch of appends to files
   //
   class Workload extends Thread {
-    private int id;
-    private MiniDFSCluster cluster;
+    private final int id;
+    private final MiniDFSCluster cluster;
 
     Workload(MiniDFSCluster cluster, int threadIndex) {
       id = threadIndex;
@@ -238,6 +242,7 @@ public class TestFileAppend2 extends TestCase {
     }
 
     // create a bunch of files. Write to them and then verify.
+    @Override
     public void run() {
       System.out.println("Workload " + id + " starting... ");
       for (int i = 0; i < numAppendsPerThread; i++) {
@@ -328,6 +333,7 @@ public class TestFileAppend2 extends TestCase {
    * Test that appends to files at random offsets.
    * @throws IOException an exception might be thrown
    */
+  @Test
   public void testComplexAppend() throws IOException {
     fileContents = AppendTestUtil.initBuffer(AppendTestUtil.FILE_SIZE);
     Configuration conf = new HdfsConfiguration();

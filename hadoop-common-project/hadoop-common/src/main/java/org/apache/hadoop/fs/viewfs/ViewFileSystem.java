@@ -17,17 +17,18 @@
  */
 package org.apache.hadoop.fs.viewfs;
 
-import static org.apache.hadoop.fs.viewfs.Constants.PERMISSION_RRR;
+import static org.apache.hadoop.fs.viewfs.Constants.PERMISSION_555;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
-import java.util.StringTokenizer;
 import java.util.Map.Entry;
 
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -35,6 +36,7 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.ContentSummary;
+import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
@@ -43,18 +45,20 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FsConstants;
 import org.apache.hadoop.fs.FsServerDefaults;
-import org.apache.hadoop.fs.InvalidPathException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.UnsupportedFileSystemException;
+import org.apache.hadoop.fs.XAttrSetFlag;
+import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.AclUtil;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.viewfs.InodeTree.INode;
 import org.apache.hadoop.fs.viewfs.InodeTree.INodeLink;
-import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.AccessControlException;
-import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.Progressable;
+import org.apache.hadoop.util.Time;
 
 /**
  * ViewFileSystem (extends the FileSystem interface) implements a client-side
@@ -64,6 +68,9 @@ import org.apache.hadoop.util.Progressable;
 @InterfaceAudience.Public
 @InterfaceStability.Evolving /*Evolving for a release,to be changed to Stable */
 public class ViewFileSystem extends FileSystem {
+
+  private static final Path ROOT_PATH = new Path(Path.SEPARATOR);
+
   static AccessControlException readOnlyMountTable(final String operation,
       final String p) {
     return new AccessControlException( 
@@ -99,23 +106,6 @@ public class ViewFileSystem extends FileSystem {
   Path homeDir = null;
   
   /**
-   * Prohibits names which contain a ".", "..", ":" or "/" 
-   */
-  private static boolean isValidName(final String src) {
-    // Check for ".." "." ":" "/"
-    final StringTokenizer tokens = new StringTokenizer(src, Path.SEPARATOR);
-    while(tokens.hasMoreTokens()) {
-      String element = tokens.nextToken();
-      if (element.equals("..") ||
-          element.equals(".")  ||
-          (element.indexOf(":") >= 0)) {
-        return false;
-      }
-    }
-    return true;
-  }
-  
-  /**
    * Make the path Absolute and get the path-part of a pathname.
    * Checks that URI matches this file system 
    * and that the path-part is a valid name.
@@ -126,10 +116,6 @@ public class ViewFileSystem extends FileSystem {
   private String getUriPath(final Path p) {
     checkPath(p);
     String s = makeAbsolute(p).toUri().getPath();
-    if (!isValidName(s)) {
-      throw new InvalidPathException("Path part " + s + " from URI" + p
-          + " is not a valid filename.");
-    }
     return s;
   }
   
@@ -146,7 +132,18 @@ public class ViewFileSystem extends FileSystem {
    */
   public ViewFileSystem() throws IOException {
     ugi = UserGroupInformation.getCurrentUser();
-    creationTime = System.currentTimeMillis();
+    creationTime = Time.now();
+  }
+
+  /**
+   * Return the protocol scheme for the FileSystem.
+   * <p/>
+   *
+   * @return <code>viewfs</code>
+   */
+  @Override
+  public String getScheme() {
+    return "viewfs";
   }
 
   /**
@@ -155,6 +152,7 @@ public class ViewFileSystem extends FileSystem {
    *          this FileSystem
    * @param conf the configuration
    */
+  @Override
   public void initialize(final URI theUri, final Configuration conf)
       throws IOException {
     super.initialize(theUri, conf);
@@ -222,7 +220,7 @@ public class ViewFileSystem extends FileSystem {
       fsState.resolve(getUriPath(f), true);
     return res.isInternalDir() ? null : res.targetFileSystem.getHomeDirectory();
   }
-
+  
   @Override
   public URI getUri() {
     return myUri;
@@ -246,8 +244,9 @@ public class ViewFileSystem extends FileSystem {
       if (base == null) {
         base = "/user";
       }
-      homeDir = 
-        this.makeQualified(new Path(base + "/" + ugi.getShortUserName()));
+      homeDir = (base.equals("/") ? 
+          this.makeQualified(new Path(base + ugi.getShortUserName())):
+          this.makeQualified(new Path(base + "/" + ugi.getShortUserName())));
     }
     return homeDir;
   }
@@ -269,6 +268,21 @@ public class ViewFileSystem extends FileSystem {
     InodeTree.ResolveResult<FileSystem> res = 
       fsState.resolve(getUriPath(f), true);
     return res.targetFileSystem.append(res.remainingPath, bufferSize, progress);
+  }
+  
+  @Override
+  public FSDataOutputStream createNonRecursive(Path f, FsPermission permission,
+      EnumSet<CreateFlag> flags, int bufferSize, short replication, long blockSize,
+      Progressable progress) throws IOException {
+    InodeTree.ResolveResult<FileSystem> res;
+    try {
+      res = fsState.resolve(getUriPath(f), false);
+    } catch (FileNotFoundException e) {
+        throw readOnlyMountTable("create", f);
+    }
+    assert(res.remainingPath != null);
+    return res.targetFileSystem.createNonRecursive(res.remainingPath, permission,
+         flags, bufferSize, replication, blockSize, progress);
   }
   
   @Override
@@ -346,7 +360,14 @@ public class ViewFileSystem extends FileSystem {
     return new ViewFsFileStatus(status, this.makeQualified(f));
   }
   
-  
+  @Override
+  public void access(Path path, FsAction mode) throws AccessControlException,
+      FileNotFoundException, IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+      fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.access(res.remainingPath, mode);
+  }
+
   @Override
   public FileStatus[] listStatus(final Path f) throws AccessControlException,
       FileNotFoundException, IOException {
@@ -464,6 +485,96 @@ public class ViewFileSystem extends FileSystem {
   }
 
   @Override
+  public void modifyAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    InodeTree.ResolveResult<FileSystem> res = fsState.resolve(getUriPath(path),
+        true);
+    res.targetFileSystem.modifyAclEntries(res.remainingPath, aclSpec);
+  }
+
+  @Override
+  public void removeAclEntries(Path path, List<AclEntry> aclSpec)
+      throws IOException {
+    InodeTree.ResolveResult<FileSystem> res = fsState.resolve(getUriPath(path),
+        true);
+    res.targetFileSystem.removeAclEntries(res.remainingPath, aclSpec);
+  }
+
+  @Override
+  public void removeDefaultAcl(Path path)
+      throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+      fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.removeDefaultAcl(res.remainingPath);
+  }
+
+  @Override
+  public void removeAcl(Path path)
+      throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+      fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.removeAcl(res.remainingPath);
+  }
+
+  @Override
+  public void setAcl(Path path, List<AclEntry> aclSpec) throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+      fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.setAcl(res.remainingPath, aclSpec);
+  }
+
+  @Override
+  public AclStatus getAclStatus(Path path) throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+      fsState.resolve(getUriPath(path), true);
+    return res.targetFileSystem.getAclStatus(res.remainingPath);
+  }
+
+  @Override
+  public void setXAttr(Path path, String name, byte[] value,
+      EnumSet<XAttrSetFlag> flag) throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.setXAttr(res.remainingPath, name, value, flag);
+  }
+
+  @Override
+  public byte[] getXAttr(Path path, String name) throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    return res.targetFileSystem.getXAttr(res.remainingPath, name);
+  }
+
+  @Override
+  public Map<String, byte[]> getXAttrs(Path path) throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    return res.targetFileSystem.getXAttrs(res.remainingPath);
+  }
+
+  @Override
+  public Map<String, byte[]> getXAttrs(Path path, List<String> names)
+      throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    return res.targetFileSystem.getXAttrs(res.remainingPath, names);
+  }
+
+  @Override
+  public List<String> listXAttrs(Path path) throws IOException {
+    InodeTree.ResolveResult<FileSystem> res =
+      fsState.resolve(getUriPath(path), true);
+    return res.targetFileSystem.listXAttrs(res.remainingPath);
+  }
+
+  @Override
+  public void removeXAttr(Path path, String name) throws IOException {
+    InodeTree.ResolveResult<FileSystem> res = fsState.resolve(getUriPath(path),
+        true);
+    res.targetFileSystem.removeXAttr(res.remainingPath, name);
+  }
+
+  @Override
   public void setVerifyChecksum(final boolean verifyChecksum) { 
     List<InodeTree.MountPoint<FileSystem>> mountPoints = 
         fsState.getMountPoints();
@@ -532,6 +643,18 @@ public class ViewFileSystem extends FileSystem {
     }
   }
 
+  @Override
+  public FileSystem[] getChildFileSystems() {
+    List<InodeTree.MountPoint<FileSystem>> mountPoints =
+        fsState.getMountPoints();
+    Set<FileSystem> children = new HashSet<FileSystem>();
+    for (InodeTree.MountPoint<FileSystem> mountPoint : mountPoints) {
+      FileSystem targetFs = mountPoint.target.targetFileSystem;
+      children.addAll(Arrays.asList(targetFs.getChildFileSystems()));
+    }
+    return children.toArray(new FileSystem[]{});
+  }
+  
   public MountPoint[] getMountPoints() {
     List<InodeTree.MountPoint<FileSystem>> mountPoints = 
                   fsState.getMountPoints();
@@ -544,59 +667,6 @@ public class ViewFileSystem extends FileSystem {
     return result;
   }
   
- 
-  @Override
-  public List<Token<?>> getDelegationTokens(String renewer) throws IOException {
-    List<InodeTree.MountPoint<FileSystem>> mountPoints = 
-                fsState.getMountPoints();
-    int initialListSize  = 0;
-    for (InodeTree.MountPoint<FileSystem> im : mountPoints) {
-      initialListSize += im.target.targetDirLinkList.length; 
-    }
-    List<Token<?>> result = new ArrayList<Token<?>>(initialListSize);
-    for ( int i = 0; i < mountPoints.size(); ++i ) {
-      List<Token<?>> tokens = 
-        mountPoints.get(i).target.targetFileSystem.getDelegationTokens(renewer);
-      if (tokens != null) {
-        result.addAll(tokens);
-      }
-    }
-    return result;
-  }
-
-  @Override
-  public List<Token<?>> getDelegationTokens(String renewer,
-      Credentials credentials) throws IOException {
-    List<InodeTree.MountPoint<FileSystem>> mountPoints =
-        fsState.getMountPoints();
-    int initialListSize = 0;
-    for (InodeTree.MountPoint<FileSystem> im : mountPoints) {
-      initialListSize += im.target.targetDirLinkList.length;
-    }
-    Set<String> seenServiceNames = new HashSet<String>();
-    List<Token<?>> result = new ArrayList<Token<?>>(initialListSize);
-    for (int i = 0; i < mountPoints.size(); ++i) {
-      String serviceName =
-          mountPoints.get(i).target.targetFileSystem.getCanonicalServiceName();
-      if (serviceName == null || seenServiceNames.contains(serviceName)) {
-        continue;
-      }
-      seenServiceNames.add(serviceName);
-      Token<?> knownToken = credentials.getToken(new Text(serviceName));
-      if (knownToken != null) {
-        result.add(knownToken);
-      } else {
-        List<Token<?>> tokens =
-            mountPoints.get(i).target.targetFileSystem
-                .getDelegationTokens(renewer);
-        if (tokens != null) {
-          result.addAll(tokens);
-        }
-      }
-    }
-    return result;
-  }
-
   /*
    * An instance of this class represents an internal dir of the viewFs 
    * that is internal dir of the mount table.
@@ -699,10 +769,10 @@ public class ViewFileSystem extends FileSystem {
     public FileStatus getFileStatus(Path f) throws IOException {
       checkPathIsSlash(f);
       return new FileStatus(0, true, 0, 0, creationTime, creationTime,
-          PERMISSION_RRR, ugi.getUserName(), ugi.getGroupNames()[0],
+          PERMISSION_555, ugi.getUserName(), ugi.getGroupNames()[0],
 
           new Path(theInternalDir.fullPath).makeQualified(
-              myUri, null));
+              myUri, ROOT_PATH));
     }
     
 
@@ -719,14 +789,14 @@ public class ViewFileSystem extends FileSystem {
           INodeLink<FileSystem> link = (INodeLink<FileSystem>) inode;
 
           result[i++] = new FileStatus(0, false, 0, 0,
-            creationTime, creationTime, PERMISSION_RRR,
+            creationTime, creationTime, PERMISSION_555,
             ugi.getUserName(), ugi.getGroupNames()[0],
             link.getTargetLink(),
             new Path(inode.fullPath).makeQualified(
                 myUri, null));
         } else {
           result[i++] = new FileStatus(0, true, 0, 0,
-            creationTime, creationTime, PERMISSION_RRR,
+            creationTime, creationTime, PERMISSION_555,
             ugi.getUserName(), ugi.getGroupNames()[0],
             new Path(inode.fullPath).makeQualified(
                 myUri, null));
@@ -738,7 +808,7 @@ public class ViewFileSystem extends FileSystem {
     @Override
     public boolean mkdirs(Path dir, FsPermission permission)
         throws AccessControlException, FileAlreadyExistsException {
-      if (theInternalDir.isRoot & dir == null) {
+      if (theInternalDir.isRoot && dir == null) {
         throw new FileAlreadyExistsException("/ already exits");
       }
       // Note dir starts with /
@@ -809,6 +879,81 @@ public class ViewFileSystem extends FileSystem {
     @Override
     public short getDefaultReplication(Path f) {
       throw new NotInMountpointException(f, "getDefaultReplication");
+    }
+
+    @Override
+    public void modifyAclEntries(Path path, List<AclEntry> aclSpec)
+        throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("modifyAclEntries", path);
+    }
+
+    @Override
+    public void removeAclEntries(Path path, List<AclEntry> aclSpec)
+        throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("removeAclEntries", path);
+    }
+
+    @Override
+    public void removeDefaultAcl(Path path) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("removeDefaultAcl", path);
+    }
+
+    @Override
+    public void removeAcl(Path path) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("removeAcl", path);
+    }
+
+    @Override
+    public void setAcl(Path path, List<AclEntry> aclSpec) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("setAcl", path);
+    }
+
+    @Override
+    public AclStatus getAclStatus(Path path) throws IOException {
+      checkPathIsSlash(path);
+      return new AclStatus.Builder().owner(ugi.getUserName())
+          .group(ugi.getGroupNames()[0])
+          .addEntries(AclUtil.getMinimalAcl(PERMISSION_555))
+          .stickyBit(false).build();
+    }
+
+    @Override
+    public void setXAttr(Path path, String name, byte[] value,
+                         EnumSet<XAttrSetFlag> flag) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("setXAttr", path);
+    }
+
+    @Override
+    public byte[] getXAttr(Path path, String name) throws IOException {
+      throw new NotInMountpointException(path, "getXAttr");
+    }
+
+    @Override
+    public Map<String, byte[]> getXAttrs(Path path) throws IOException {
+      throw new NotInMountpointException(path, "getXAttrs");
+    }
+
+    @Override
+    public Map<String, byte[]> getXAttrs(Path path, List<String> names)
+        throws IOException {
+      throw new NotInMountpointException(path, "getXAttrs");
+    }
+
+    @Override
+    public List<String> listXAttrs(Path path) throws IOException {
+      throw new NotInMountpointException(path, "listXAttrs");
+    }
+
+    @Override
+    public void removeXAttr(Path path, String name) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("removeXAttr", path);
     }
   }
 }

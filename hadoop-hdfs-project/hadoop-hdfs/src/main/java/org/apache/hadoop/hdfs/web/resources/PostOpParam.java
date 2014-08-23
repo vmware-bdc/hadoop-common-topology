@@ -23,13 +23,17 @@ import java.net.HttpURLConnection;
 public class PostOpParam extends HttpOpParam<PostOpParam.Op> {
   /** Post operations. */
   public static enum Op implements HttpOpParam.Op {
-    APPEND(HttpURLConnection.HTTP_OK),
+    APPEND(true, HttpURLConnection.HTTP_OK),
 
-    NULL(HttpURLConnection.HTTP_NOT_IMPLEMENTED);
+    CONCAT(false, HttpURLConnection.HTTP_OK),
 
+    NULL(false, HttpURLConnection.HTTP_NOT_IMPLEMENTED);
+
+    final boolean doOutputAndRedirect;
     final int expectedHttpResponseCode;
 
-    Op(final int expectedHttpResponseCode) {
+    Op(final boolean doOutputAndRedirect, final int expectedHttpResponseCode) {
+      this.doOutputAndRedirect = doOutputAndRedirect;
       this.expectedHttpResponseCode = expectedHttpResponseCode;
     }
 
@@ -37,10 +41,20 @@ public class PostOpParam extends HttpOpParam<PostOpParam.Op> {
     public Type getType() {
       return Type.POST;
     }
+    
+    @Override
+    public boolean getRequireAuth() {
+      return false;
+    }
 
     @Override
     public boolean getDoOutput() {
-      return true;
+      return doOutputAndRedirect;
+    }
+
+    @Override
+    public boolean getRedirect() {
+      return doOutputAndRedirect;
     }
 
     @Override
@@ -49,6 +63,7 @@ public class PostOpParam extends HttpOpParam<PostOpParam.Op> {
     }
 
     /** @return a URI query string. */
+    @Override
     public String toQueryString() {
       return NAME + "=" + this;
     }

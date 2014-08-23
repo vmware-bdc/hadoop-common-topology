@@ -39,6 +39,11 @@ public class CheckpointConf {
   /** checkpoint once every this many transactions, regardless of time */
   private final long checkpointTxnCount;
 
+  /** maxium number of retries when merge errors occur */
+  private final int maxRetriesOnMergeError;
+
+  /** The output dir for legacy OIV image */
+  private final String legacyOivImageDir;
   
   public CheckpointConf(Configuration conf) {
     checkpointCheckPeriod = conf.getLong(
@@ -49,6 +54,9 @@ public class CheckpointConf {
                                     DFS_NAMENODE_CHECKPOINT_PERIOD_DEFAULT);
     checkpointTxnCount = conf.getLong(DFS_NAMENODE_CHECKPOINT_TXNS_KEY, 
                                   DFS_NAMENODE_CHECKPOINT_TXNS_DEFAULT);
+    maxRetriesOnMergeError = conf.getInt(DFS_NAMENODE_CHECKPOINT_MAX_RETRIES_KEY,
+                                  DFS_NAMENODE_CHECKPOINT_MAX_RETRIES_DEFAULT);
+    legacyOivImageDir = conf.get(DFS_NAMENODE_LEGACY_OIV_IMAGE_DIR_KEY);
     warnForDeprecatedConfigs(conf);
   }
   
@@ -74,5 +82,13 @@ public class CheckpointConf {
 
   public long getTxnCount() {
     return checkpointTxnCount;
+  }
+
+  public int getMaxRetriesOnMergeError() {
+    return maxRetriesOnMergeError;
+  }
+
+  public String getLegacyOivImageDir() {
+    return legacyOivImageDir;
   }
 }

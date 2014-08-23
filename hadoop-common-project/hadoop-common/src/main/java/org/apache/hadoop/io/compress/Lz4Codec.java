@@ -69,6 +69,10 @@ public class Lz4Codec implements Configurable, CompressionCodec {
     return NativeCodeLoader.isNativeCodeLoaded();
   }
 
+  public static String getLibraryName() {
+    return Lz4Compressor.getLibraryName();
+  }
+
   /**
    * Create a {@link CompressionOutputStream} that will write to the given
    * {@link OutputStream}.
@@ -80,7 +84,8 @@ public class Lz4Codec implements Configurable, CompressionCodec {
   @Override
   public CompressionOutputStream createOutputStream(OutputStream out)
       throws IOException {
-    return createOutputStream(out, createCompressor());
+    return CompressionCodec.Util.
+        createOutputStreamWithCodecPool(this, conf, out);
   }
 
   /**
@@ -103,7 +108,7 @@ public class Lz4Codec implements Configurable, CompressionCodec {
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_LZ4_BUFFERSIZE_KEY,
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_LZ4_BUFFERSIZE_DEFAULT);
 
-    int compressionOverhead = Math.max((int)(bufferSize * 0.01), 10);
+    int compressionOverhead = bufferSize/255 + 16;
 
     return new BlockCompressorStream(out, compressor, bufferSize,
         compressionOverhead);
@@ -136,7 +141,10 @@ public class Lz4Codec implements Configurable, CompressionCodec {
     int bufferSize = conf.getInt(
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_LZ4_BUFFERSIZE_KEY,
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_LZ4_BUFFERSIZE_DEFAULT);
-    return new Lz4Compressor(bufferSize);
+    boolean useLz4HC = conf.getBoolean(
+        CommonConfigurationKeys.IO_COMPRESSION_CODEC_LZ4_USELZ4HC_KEY,
+        CommonConfigurationKeys.IO_COMPRESSION_CODEC_LZ4_USELZ4HC_DEFAULT);
+    return new Lz4Compressor(bufferSize, useLz4HC);
   }
 
   /**
@@ -150,7 +158,8 @@ public class Lz4Codec implements Configurable, CompressionCodec {
   @Override
   public CompressionInputStream createInputStream(InputStream in)
       throws IOException {
-    return createInputStream(in, createDecompressor());
+    return CompressionCodec.Util.
+        createInputStreamWithCodecPool(this, conf, in);
   }
 
   /**

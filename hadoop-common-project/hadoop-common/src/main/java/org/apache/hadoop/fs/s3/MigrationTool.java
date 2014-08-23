@@ -34,6 +34,7 @@ import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.jets3t.service.S3Service;
 import org.jets3t.service.S3ServiceException;
+import org.jets3t.service.ServiceException;
 import org.jets3t.service.impl.rest.httpclient.RestS3Service;
 import org.jets3t.service.model.S3Bucket;
 import org.jets3t.service.model.S3Object;
@@ -61,6 +62,7 @@ public class MigrationTool extends Configured implements Tool {
     System.exit(res);
   }
   
+  @Override
   public int run(String[] args) throws Exception {
     
     if (args.length == 0) {
@@ -176,7 +178,7 @@ public class MigrationTool extends Configured implements Tool {
   
   private S3Object get(String key) {
     try {
-      return s3Service.getObject(bucket, key);
+      return s3Service.getObject(bucket.getName(), key);
     } catch (S3ServiceException e) {
       if ("NoSuchKey".equals(e.getS3ErrorCode())) {
         return null;
@@ -195,10 +197,11 @@ public class MigrationTool extends Configured implements Tool {
   
   class UnversionedStore implements Store {
 
+    @Override
     public Set<Path> listAllPaths() throws IOException {
       try {
         String prefix = urlEncode(Path.SEPARATOR);
-        S3Object[] objects = s3Service.listObjects(bucket, prefix, null);
+        S3Object[] objects = s3Service.listObjects(bucket.getName(), prefix, null);
         Set<Path> prefixes = new TreeSet<Path>();
         for (int i = 0; i < objects.length; i++) {
           prefixes.add(keyToPath(objects[i].getKey()));
@@ -212,6 +215,7 @@ public class MigrationTool extends Configured implements Tool {
       }   
     }
 
+    @Override
     public void deleteINode(Path path) throws IOException {
       delete(pathToKey(path));
     }
@@ -227,13 +231,14 @@ public class MigrationTool extends Configured implements Tool {
       }
     }
     
+    @Override
     public INode retrieveINode(Path path) throws IOException {
       return INode.deserialize(get(pathToKey(path)));
     }
 
     private InputStream get(String key) throws IOException {
       try {
-        S3Object object = s3Service.getObject(bucket, key);
+        S3Object object = s3Service.getObject(bucket.getName(), key);
         return object.getDataInputStream();
       } catch (S3ServiceException e) {
         if ("NoSuchKey".equals(e.getS3ErrorCode())) {
@@ -243,6 +248,8 @@ public class MigrationTool extends Configured implements Tool {
           throw (IOException) e.getCause();
         }
         throw new S3Exception(e);
+      } catch (ServiceException e) {
+        return null;
       }
     }
     

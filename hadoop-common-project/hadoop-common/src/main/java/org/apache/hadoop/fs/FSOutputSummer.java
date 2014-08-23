@@ -53,8 +53,18 @@ abstract public class FSOutputSummer extends OutputStream {
    */
   protected abstract void writeChunk(byte[] b, int offset, int len, byte[] checksum)
   throws IOException;
+  
+  /**
+   * Check if the implementing OutputStream is closed and should no longer
+   * accept writes. Implementations should do nothing if this stream is not
+   * closed, and should throw an {@link IOException} if it is closed.
+   * 
+   * @throws IOException if this stream is already closed.
+   */
+  protected abstract void checkClosed() throws IOException;
 
   /** Write one byte */
+  @Override
   public synchronized void write(int b) throws IOException {
     sum.update(b);
     buf[count++] = (byte)b;
@@ -81,8 +91,12 @@ abstract public class FSOutputSummer extends OutputStream {
    * @param      len   the number of bytes to write.
    * @exception  IOException  if an I/O error occurs.
    */
+  @Override
   public synchronized void write(byte b[], int off, int len)
-  throws IOException {
+      throws IOException {
+    
+    checkClosed();
+    
     if (off < 0 || len < 0 || off > b.length - len) {
       throw new ArrayIndexOutOfBoundsException();
     }
@@ -169,10 +183,13 @@ abstract public class FSOutputSummer extends OutputStream {
   }
 
   static byte[] int2byte(int integer, byte[] bytes) {
-    bytes[0] = (byte)((integer >>> 24) & 0xFF);
-    bytes[1] = (byte)((integer >>> 16) & 0xFF);
-    bytes[2] = (byte)((integer >>>  8) & 0xFF);
-    bytes[3] = (byte)((integer >>>  0) & 0xFF);
+    if (bytes.length != 0) {
+      bytes[0] = (byte) ((integer >>> 24) & 0xFF);
+      bytes[1] = (byte) ((integer >>> 16) & 0xFF);
+      bytes[2] = (byte) ((integer >>> 8) & 0xFF);
+      bytes[3] = (byte) ((integer >>> 0) & 0xFF);
+      return bytes;
+    }
     return bytes;
   }
 

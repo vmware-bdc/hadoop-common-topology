@@ -18,16 +18,20 @@
 
 package org.apache.hadoop.fs;
 
+import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.EnumSet;
+import java.util.NoSuchElementException;
 
+import org.apache.commons.lang.RandomStringUtils;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.fs.Options.CreateOpts;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.junit.After;
 import org.junit.Assert;
+import static org.junit.Assert.*;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -60,40 +64,54 @@ public abstract class FileContextMainOperationsBaseTest  {
   private static String TEST_DIR_AXA = "test/hadoop/axa";
   private static String TEST_DIR_AXX = "test/hadoop/axx";
   private static int numBlocks = 2;
-  
-  static  final String LOCAL_FS_ROOT_URI = "file:///tmp/test";
-  
-  
+
+  public Path localFsRootPath;
+
+  protected final FileContextTestHelper fileContextTestHelper =
+    createFileContextHelper();
+
+  protected FileContextTestHelper createFileContextHelper() {
+    return new FileContextTestHelper();
+  }
+
   protected static FileContext fc;
   
   final private static PathFilter DEFAULT_FILTER = new PathFilter() {
+    @Override
     public boolean accept(final Path file) {
       return true;
     }
   };
 
-  //A test filter with returns any path containing a "b" 
+  //A test filter with returns any path containing an "x" or "X" 
   final private static PathFilter TEST_X_FILTER = new PathFilter() {
+    @Override
     public boolean accept(Path file) {
-      if(file.getName().contains("x") || file.toString().contains("X"))
+      if(file.getName().contains("x") || file.getName().contains("X"))
         return true;
       else
         return false;
     }     
   };
   
-  private static byte[] data = getFileData(numBlocks,
+  private static final byte[] data = getFileData(numBlocks,
       getDefaultBlockSize());
   
   @Before
   public void setUp() throws Exception {
+    File testBuildData = new File(System.getProperty("test.build.data",
+            "build/test/data"), RandomStringUtils.randomAlphanumeric(10));
+    Path rootPath = new Path(testBuildData.getAbsolutePath(), 
+            "root-uri");
+    localFsRootPath = rootPath.makeQualified(LocalFileSystem.NAME, null);
     fc.mkdir(getTestRootPath(fc, "test"), FileContext.DEFAULT_PERM, true);
   }
   
   @After
   public void tearDown() throws Exception {
-    fc.delete(new Path(getAbsoluteTestRootPath(fc), new Path("test")), true);
-    fc.delete(new Path(LOCAL_FS_ROOT_URI), true);
+    boolean del = fc.delete(new Path(fileContextTestHelper.getAbsoluteTestRootPath(fc), new Path("test")), true);
+    assertTrue(del);
+    fc.delete(localFsRootPath, true);
   }
   
   
@@ -126,7 +144,7 @@ public abstract class FileContextMainOperationsBaseTest  {
   public void testWorkingDirectory() throws Exception {
 
     // First we cd to our test root
-    Path workDir = new Path(getAbsoluteTestRootPath(fc), new Path("test"));
+    Path workDir = new Path(fileContextTestHelper.getAbsoluteTestRootPath(fc), new Path("test"));
     fc.setWorkingDirectory(workDir);
     Assert.assertEquals(workDir, fc.getWorkingDirectory());
 
@@ -139,7 +157,7 @@ public abstract class FileContextMainOperationsBaseTest  {
     // cd using a relative path
 
     // Go back to our test root
-    workDir = new Path(getAbsoluteTestRootPath(fc), new Path("test"));
+    workDir = new Path(fileContextTestHelper.getAbsoluteTestRootPath(fc), new Path("test"));
     fc.setWorkingDirectory(workDir);
     Assert.assertEquals(workDir, fc.getWorkingDirectory());
     
@@ -174,11 +192,19 @@ public abstract class FileContextMainOperationsBaseTest  {
     
     // Try a URI
 
-    absoluteDir = new Path(LOCAL_FS_ROOT_URI + "/existingDir");
+    absoluteDir = new Path(localFsRootPath, "existingDir");
     fc.mkdir(absoluteDir, FileContext.DEFAULT_PERM, true);
     fc.setWorkingDirectory(absoluteDir);
     Assert.assertEquals(absoluteDir, fc.getWorkingDirectory());
 
+    Path aRegularFile = new Path("aRegularFile");
+    createFile(aRegularFile);
+    try {
+      fc.setWorkingDirectory(aRegularFile);
+      fail("An IOException expected.");
+    } catch (IOException ioe) {
+      // okay
+    }
   }
   
   @Test
@@ -360,15 +386,17 @@ public abstract class FileContextMainOperationsBaseTest  {
   }
   
   @Test
-  public void testGlobStatusThrowsExceptionForNonExistentFile() throws Exception {
-    try {
-      // This should throw a FileNotFoundException
-      fc.util().globStatus(
-          getTestRootPath(fc, "test/hadoopfsdf/?"));
-      Assert.fail("Should throw FileNotFoundException");
-    } catch (FileNotFoundException fnfe) {
-      // expected
-    }
+  public void testGlobStatusNonExistentFile() throws Exception {
+    FileStatus[] paths = fc.util().globStatus(
+          getTestRootPath(fc, "test/hadoopfsdf"));
+    Assert.assertNull(paths);
+
+    paths = fc.util().globStatus(
+        getTestRootPath(fc, "test/hadoopfsdf/?"));
+    Assert.assertEquals(0, paths.length);
+    paths = fc.util().globStatus(
+        getTestRootPath(fc, "test/hadoopfsdf/xyz*/?"));
+    Assert.assertEquals(0, paths.length);
   }
   
   @Test
@@ -1169,6 +1197,7 @@ public abstract class FileContextMainOperationsBaseTest  {
     Assert.assertEquals("Source exists", srcExists, exists(fc, src));
     Assert.assertEquals("Destination exists", dstExists, exists(fc, dst));
   }
+  
   private boolean containsPath(Path path, FileStatus[] filteredPaths)
     throws IOException {
     for(int i = 0; i < filteredPaths.length; i ++) { 
@@ -1178,4 +1207,138 @@ public abstract class FileContextMainOperationsBaseTest  {
       }
     return false;
  }
+
+  @Test
+  public void testOpen2() throws IOException {
+    final Path rootPath = getTestRootPath(fc, "test");
+    //final Path rootPath = getAbsoluteTestRootPath(fc);
+    final Path path = new Path(rootPath, "zoo");
+    createFile(path);
+    final long length = fc.getFileStatus(path).getLen();
+    FSDataInputStream fsdis = fc.open(path, 2048);
+    try {
+      byte[] bb = new byte[(int)length];
+      fsdis.readFully(bb);
+      assertArrayEquals(data, bb);
+    } finally {
+      fsdis.close();
+    }
+  }
+
+  @Test
+  public void testSetVerifyChecksum() throws IOException {
+    final Path rootPath = getTestRootPath(fc, "test");
+    final Path path = new Path(rootPath, "zoo");
+
+    FSDataOutputStream out = fc.create(path, EnumSet.of(CREATE),
+        Options.CreateOpts.createParent());
+    try {
+      // instruct FS to verify checksum through the FileContext:
+      fc.setVerifyChecksum(true, path);
+      out.write(data, 0, data.length);
+    } finally {
+      out.close();
+    }
+
+    // NB: underlying FS may be different (this is an abstract test),
+    // so we cannot assert .zoo.crc existence.
+    // Instead, we check that the file is read correctly:
+    FileStatus fileStatus = fc.getFileStatus(path);
+    final long len = fileStatus.getLen();
+    assertTrue(len == data.length);
+    byte[] bb = new byte[(int)len];
+    FSDataInputStream fsdis = fc.open(path);
+    try {
+      fsdis.read(bb);
+    } finally {
+      fsdis.close();
+    }
+    assertArrayEquals(data, bb);
+  }
+
+  @Test
+  public void testListCorruptFileBlocks() throws IOException {
+    final Path rootPath = getTestRootPath(fc, "test");
+    final Path path = new Path(rootPath, "zoo");
+    createFile(path);
+    try {
+      final RemoteIterator<Path> remoteIterator = fc
+          .listCorruptFileBlocks(path);
+      if (listCorruptedBlocksSupported()) {
+        assertTrue(remoteIterator != null);
+        Path p;
+        while (remoteIterator.hasNext()) {
+          p = remoteIterator.next();
+          System.out.println("corrupted block: " + p);
+        }
+        try {
+          remoteIterator.next();
+          fail();
+        } catch (NoSuchElementException nsee) {
+          // okay
+        }
+      } else {
+        fail();
+      }
+    } catch (UnsupportedOperationException uoe) {
+      if (listCorruptedBlocksSupported()) {
+        fail(uoe.toString());
+      } else {
+        // okay
+      }
+    }
+  }
+
+  protected abstract boolean listCorruptedBlocksSupported();
+
+  @Test
+  public void testDeleteOnExitUnexisting() throws IOException {
+    final Path rootPath = getTestRootPath(fc, "test");
+    final Path path = new Path(rootPath, "zoo");
+    boolean registered = fc.deleteOnExit(path);
+    // because "zoo" does not exist:
+    assertTrue(!registered);
+  }
+
+  @Test
+  public void testFileContextStatistics() throws IOException {
+    FileContext.clearStatistics();
+
+    final Path rootPath = getTestRootPath(fc, "test");
+    final Path path = new Path(rootPath, "zoo");
+    createFile(path);
+    byte[] bb = new byte[data.length];
+    FSDataInputStream fsdis = fc.open(path);
+    try {
+      fsdis.read(bb);
+    } finally {
+      fsdis.close();
+    }
+    assertArrayEquals(data, bb);
+
+    FileContext.printStatistics();
+  }
+
+  @Test
+  /*
+   * Test method
+   *  org.apache.hadoop.fs.FileContext.getFileContext(AbstractFileSystem)
+   */
+  public void testGetFileContext1() throws IOException {
+    final Path rootPath = getTestRootPath(fc, "test");
+    AbstractFileSystem asf = fc.getDefaultFileSystem();
+    // create FileContext using the protected #getFileContext(1) method:
+    FileContext fc2 = FileContext.getFileContext(asf);
+    // Now just check that this context can do something reasonable:
+    final Path path = new Path(rootPath, "zoo");
+    FSDataOutputStream out = fc2.create(path, EnumSet.of(CREATE),
+        Options.CreateOpts.createParent());
+    out.close();
+    Path pathResolved = fc2.resolvePath(path);
+    assertEquals(pathResolved.toUri().getPath(), path.toUri().getPath());
+  }
+  
+  private Path getTestRootPath(FileContext fc, String pathString) {
+    return fileContextTestHelper.getTestRootPath(fc, pathString);
+  }
 }

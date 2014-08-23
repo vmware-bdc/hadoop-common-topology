@@ -22,21 +22,31 @@ import org.apache.commons.logging.LogFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Collection;
 import java.util.List;
 import java.util.Comparator;
 import java.util.Collections;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
+import org.apache.hadoop.hdfs.server.common.StorageErrorReporter;
+import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.namenode.NNStorageRetentionManager.StoragePurger;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogLoader.EditLogValidation;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
+import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLog;
+import org.apache.hadoop.io.nativeio.NativeIO;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.ComparisonChain;
@@ -48,17 +58,21 @@ import com.google.common.collect.ComparisonChain;
  * Note: this class is not thread-safe and should be externally
  * synchronized.
  */
-class FileJournalManager implements JournalManager {
+@InterfaceAudience.Private
+public class FileJournalManager implements JournalManager {
   private static final Log LOG = LogFactory.getLog(FileJournalManager.class);
 
+  private final Configuration conf;
   private final StorageDirectory sd;
-  private final NNStorage storage;
+  private final StorageErrorReporter errorReporter;
   private int outputBufferCapacity = 512*1024;
 
   private static final Pattern EDITS_REGEX = Pattern.compile(
     NameNodeFile.EDITS.getName() + "_(\\d+)-(\\d+)");
   private static final Pattern EDITS_INPROGRESS_REGEX = Pattern.compile(
     NameNodeFile.EDITS_INPROGRESS.getName() + "_(\\d+)");
+  private static final Pattern EDITS_INPROGRESS_STALE_REGEX = Pattern.compile(
+      NameNodeFile.EDITS_INPROGRESS.getName() + "_(\\d+).*(\\S+)");
 
   private File currentInProgress = null;
 
@@ -66,25 +80,46 @@ class FileJournalManager implements JournalManager {
   StoragePurger purger
     = new NNStorageRetentionManager.DeletionStoragePurger();
 
-  public FileJournalManager(StorageDirectory sd, NNStorage storage) {
+  public FileJournalManager(Configuration conf, StorageDirectory sd,
+      StorageErrorReporter errorReporter) {
+    this.conf = conf;
     this.sd = sd;
-    this.storage = storage;
+    this.errorReporter = errorReporter;
   }
 
   @Override 
   public void close() throws IOException {}
+  
+  @Override
+  public void format(NamespaceInfo ns) throws IOException {
+    // Formatting file journals is done by the StorageDirectory
+    // format code, since they may share their directory with
+    // checkpoints, etc.
+    throw new UnsupportedOperationException();
+  }
+  
+  @Override
+  public boolean hasSomeData() {
+    // Formatting file journals is done by the StorageDirectory
+    // format code, since they may share their directory with
+    // checkpoints, etc.
+    throw new UnsupportedOperationException();
+  }
 
   @Override
-  synchronized public EditLogOutputStream startLogSegment(long txid) 
-      throws IOException {
+  synchronized public EditLogOutputStream startLogSegment(long txid,
+      int layoutVersion) throws IOException {
     try {
       currentInProgress = NNStorage.getInProgressEditsFile(sd, txid);
-      EditLogOutputStream stm = new EditLogFileOutputStream(currentInProgress,
-          outputBufferCapacity);
-      stm.create();
+      EditLogOutputStream stm = new EditLogFileOutputStream(conf,
+          currentInProgress, outputBufferCapacity);
+      stm.create(layoutVersion);
       return stm;
     } catch (IOException e) {
-      storage.reportErrorsOnDirectory(sd);
+      LOG.warn("Unable to start log segment " + txid +
+          " at " + currentInProgress + ": " +
+          e.getLocalizedMessage());
+      errorReporter.reportErrorOnFile(currentInProgress);
       throw e;
     }
   }
@@ -101,10 +136,14 @@ class FileJournalManager implements JournalManager {
     Preconditions.checkState(!dstFile.exists(),
         "Can't finalize edits file " + inprogressFile + " since finalized file " +
         "already exists");
-    if (!inprogressFile.renameTo(dstFile)) {
-      storage.reportErrorsOnDirectory(sd);
-      throw new IllegalStateException("Unable to finalize edits file " + inprogressFile);
+
+    try {
+      NativeIO.renameTo(inprogressFile, dstFile);
+    } catch (IOException e) {
+      errorReporter.reportErrorOnFile(dstFile);
+      throw new IllegalStateException("Unable to finalize edits file " + inprogressFile, e);
     }
+
     if (inprogressFile.equals(currentInProgress)) {
       currentInProgress = null;
     }
@@ -125,8 +164,7 @@ class FileJournalManager implements JournalManager {
       throws IOException {
     LOG.info("Purging logs older than " + minTxIdToKeep);
     File[] files = FileUtil.listFiles(sd.getCurrentDir());
-    List<EditLogFile> editLogs = 
-      FileJournalManager.matchEditLogs(files);
+    List<EditLogFile> editLogs = matchEditLogs(files, true);
     for (EditLogFile log : editLogs) {
       if (log.getFirstTxId() < minTxIdToKeep &&
           log.getLastTxId() < minTxIdToKeep) {
@@ -137,29 +175,61 @@ class FileJournalManager implements JournalManager {
 
   /**
    * Find all editlog segments starting at or above the given txid.
-   * @param fromTxId the txnid which to start looking
+   * @param firstTxId the txnid which to start looking
+   * @param inProgressOk whether or not to include the in-progress edit log 
+   *        segment       
    * @return a list of remote edit logs
    * @throws IOException if edit logs cannot be listed.
    */
-  List<RemoteEditLog> getRemoteEditLogs(long firstTxId) throws IOException {
+  public List<RemoteEditLog> getRemoteEditLogs(long firstTxId,
+      boolean inProgressOk) throws IOException {
     File currentDir = sd.getCurrentDir();
     List<EditLogFile> allLogFiles = matchEditLogs(currentDir);
     List<RemoteEditLog> ret = Lists.newArrayListWithCapacity(
         allLogFiles.size());
 
     for (EditLogFile elf : allLogFiles) {
-      if (elf.hasCorruptHeader() || elf.isInProgress()) continue;
+      if (elf.hasCorruptHeader() || (!inProgressOk && elf.isInProgress())) {
+        continue;
+      }
       if (elf.getFirstTxId() >= firstTxId) {
         ret.add(new RemoteEditLog(elf.firstTxId, elf.lastTxId));
-      } else if ((firstTxId > elf.getFirstTxId()) &&
-                 (firstTxId <= elf.getLastTxId())) {
-        // Note that this behavior is different from getLogFiles below.
-        throw new IllegalStateException("Asked for firstTxId " + firstTxId
-            + " which is in the middle of file " + elf.file);
+      } else if (elf.getFirstTxId() < firstTxId && firstTxId <= elf.getLastTxId()) {
+        // If the firstTxId is in the middle of an edit log segment. Return this
+        // anyway and let the caller figure out whether it wants to use it.
+        ret.add(new RemoteEditLog(elf.firstTxId, elf.lastTxId));
       }
     }
     
+    Collections.sort(ret);
+    
     return ret;
+  }
+  
+  /**
+   * Discard all editlog segments whose first txid is greater than or equal to
+   * the given txid, by renaming them with suffix ".trash".
+   */
+  private void discardEditLogSegments(long startTxId) throws IOException {
+    File currentDir = sd.getCurrentDir();
+    List<EditLogFile> allLogFiles = matchEditLogs(currentDir);
+    List<EditLogFile> toTrash = Lists.newArrayList();
+    LOG.info("Discard the EditLog files, the given start txid is " + startTxId);
+    // go through the editlog files to make sure the startTxId is right at the
+    // segment boundary
+    for (EditLogFile elf : allLogFiles) {
+      if (elf.getFirstTxId() >= startTxId) {
+        toTrash.add(elf);
+      } else {
+        Preconditions.checkState(elf.getLastTxId() < startTxId);
+      }
+    }
+
+    for (EditLogFile elf : toTrash) {
+      // rename these editlog file as .trash
+      elf.moveAsideTrashFile(startTxId);
+      LOG.info("Trash the EditLog file " + elf);
+    }
   }
 
   /**
@@ -172,11 +242,16 @@ class FileJournalManager implements JournalManager {
    * @throws IOException
    *           IOException thrown for invalid logDir
    */
-  static List<EditLogFile> matchEditLogs(File logDir) throws IOException {
+  public static List<EditLogFile> matchEditLogs(File logDir) throws IOException {
     return matchEditLogs(FileUtil.listFiles(logDir));
   }
-  
+
   static List<EditLogFile> matchEditLogs(File[] filesInStorage) {
+    return matchEditLogs(filesInStorage, false);
+  }
+
+  private static List<EditLogFile> matchEditLogs(File[] filesInStorage,
+      boolean forPurging) {
     List<EditLogFile> ret = Lists.newArrayList();
     for (File f : filesInStorage) {
       String name = f.getName();
@@ -184,9 +259,10 @@ class FileJournalManager implements JournalManager {
       Matcher editsMatch = EDITS_REGEX.matcher(name);
       if (editsMatch.matches()) {
         try {
-          long startTxId = Long.valueOf(editsMatch.group(1));
-          long endTxId = Long.valueOf(editsMatch.group(2));
+          long startTxId = Long.parseLong(editsMatch.group(1));
+          long endTxId = Long.parseLong(editsMatch.group(2));
           ret.add(new EditLogFile(f, startTxId, endTxId));
+          continue;
         } catch (NumberFormatException nfe) {
           LOG.error("Edits file " + f + " has improperly formatted " +
                     "transaction ID");
@@ -198,13 +274,31 @@ class FileJournalManager implements JournalManager {
       Matcher inProgressEditsMatch = EDITS_INPROGRESS_REGEX.matcher(name);
       if (inProgressEditsMatch.matches()) {
         try {
-          long startTxId = Long.valueOf(inProgressEditsMatch.group(1));
+          long startTxId = Long.parseLong(inProgressEditsMatch.group(1));
           ret.add(
-              new EditLogFile(f, startTxId, startTxId, true));
+              new EditLogFile(f, startTxId, HdfsConstants.INVALID_TXID, true));
+          continue;
         } catch (NumberFormatException nfe) {
           LOG.error("In-progress edits file " + f + " has improperly " +
                     "formatted transaction ID");
           // skip
+        }
+      }
+      if (forPurging) {
+        // Check for in-progress stale edits
+        Matcher staleInprogressEditsMatch = EDITS_INPROGRESS_STALE_REGEX
+            .matcher(name);
+        if (staleInprogressEditsMatch.matches()) {
+          try {
+            long startTxId = Long.valueOf(staleInprogressEditsMatch.group(1));
+            ret.add(new EditLogFile(f, startTxId, HdfsConstants.INVALID_TXID,
+                true));
+            continue;
+          } catch (NumberFormatException nfe) {
+            LOG.error("In-progress stale edits file " + f + " has improperly "
+                + "formatted transaction ID");
+            // skip
+          }
         }
       }
     }
@@ -212,90 +306,45 @@ class FileJournalManager implements JournalManager {
   }
 
   @Override
-  synchronized public EditLogInputStream getInputStream(long fromTxId,
+  synchronized public void selectInputStreams(
+      Collection<EditLogInputStream> streams, long fromTxId,
       boolean inProgressOk) throws IOException {
-    for (EditLogFile elf : getLogFiles(fromTxId)) {
-      if (elf.containsTxId(fromTxId)) {
-        if (!inProgressOk && elf.isInProgress()) {
+    List<EditLogFile> elfs = matchEditLogs(sd.getCurrentDir());
+    LOG.debug(this + ": selecting input streams starting at " + fromTxId + 
+        (inProgressOk ? " (inProgress ok) " : " (excluding inProgress) ") +
+        "from among " + elfs.size() + " candidate file(s)");
+    addStreamsToCollectionFromFiles(elfs, streams, fromTxId, inProgressOk);
+  }
+  
+  static void addStreamsToCollectionFromFiles(Collection<EditLogFile> elfs,
+      Collection<EditLogInputStream> streams, long fromTxId, boolean inProgressOk) {
+    for (EditLogFile elf : elfs) {
+      if (elf.isInProgress()) {
+        if (!inProgressOk) {
+          LOG.debug("passing over " + elf + " because it is in progress " +
+              "and we are ignoring in-progress logs.");
           continue;
         }
-        if (elf.isInProgress()) {
+        try {
           elf.validateLog();
+        } catch (IOException e) {
+          LOG.error("got IOException while trying to validate header of " +
+              elf + ".  Skipping.", e);
+          continue;
         }
-        if (LOG.isTraceEnabled()) {
-          LOG.trace("Returning edit stream reading from " + elf);
-        }
-        EditLogFileInputStream elfis = new EditLogFileInputStream(elf.getFile(),
+      }
+      if (elf.lastTxId < fromTxId) {
+        assert elf.lastTxId != HdfsConstants.INVALID_TXID;
+        LOG.debug("passing over " + elf + " because it ends at " +
+            elf.lastTxId + ", but we only care about transactions " +
+            "as new as " + fromTxId);
+        continue;
+      }
+      EditLogFileInputStream elfis = new EditLogFileInputStream(elf.getFile(),
             elf.getFirstTxId(), elf.getLastTxId(), elf.isInProgress());
-        long transactionsToSkip = fromTxId - elf.getFirstTxId();
-        if (transactionsToSkip > 0) {
-          LOG.info(String.format("Log begins at txid %d, but requested start "
-              + "txid is %d. Skipping %d edits.", elf.getFirstTxId(), fromTxId,
-              transactionsToSkip));
-        }
-        if (elfis.skipUntil(fromTxId) == false) {
-          throw new IOException("failed to advance input stream to txid " +
-              fromTxId);
-        }
-        return elfis;
-      }
+      LOG.debug("selecting edit log stream " + elf);
+      streams.add(elfis);
     }
-
-    throw new IOException("Cannot find editlog file containing " + fromTxId);
-  }
-
-  @Override
-  public long getNumberOfTransactions(long fromTxId, boolean inProgressOk)
-      throws IOException, CorruptionException {
-    long numTxns = 0L;
-    
-    for (EditLogFile elf : getLogFiles(fromTxId)) {
-      if (LOG.isTraceEnabled()) {
-        LOG.trace("Counting " + elf);
-      }
-      if (elf.getFirstTxId() > fromTxId) { // there must be a gap
-        LOG.warn("Gap in transactions in " + sd.getRoot() + ". Gap is "
-            + fromTxId + " - " + (elf.getFirstTxId() - 1));
-        break;
-      } else if (elf.containsTxId(fromTxId)) {
-        if (!inProgressOk && elf.isInProgress()) {
-          break;
-        }
-        
-        if (elf.isInProgress()) {
-          elf.validateLog();
-        } 
-
-        if (elf.hasCorruptHeader()) {
-          break;
-        }
-        numTxns += elf.getLastTxId() + 1 - fromTxId;
-        fromTxId = elf.getLastTxId() + 1;
-        
-        if (elf.isInProgress()) {
-          break;
-        }
-      }
-    }
-
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Journal " + this + " has " + numTxns 
-                + " txns from " + fromTxId);
-    }
-
-    long max = findMaxTransaction(inProgressOk);
-    
-    // fromTxId should be greater than max, as it points to the next 
-    // transaction we should expect to find. If it is less than or equal
-    // to max, it means that a transaction with txid == max has not been found
-    if (numTxns == 0 && fromTxId <= max) { 
-      String error = String.format("Gap in transactions, max txnid is %d"
-                                   + ", 0 txns from %d", max, fromTxId);
-      LOG.error(error);
-      throw new CorruptionException(error);
-    }
-
-    return numTxns;
   }
 
   @Override
@@ -318,7 +367,7 @@ class FileJournalManager implements JournalManager {
           }
           continue;
         }
-        
+
         elf.validateLog();
 
         if (elf.hasCorruptHeader()) {
@@ -326,25 +375,22 @@ class FileJournalManager implements JournalManager {
           throw new CorruptionException("In-progress edit log file is corrupt: "
               + elf);
         }
-        
-        // If the file has a valid header (isn't corrupt) but contains no
-        // transactions, we likely just crashed after opening the file and
-        // writing the header, but before syncing any transactions. Safe to
-        // delete the file.
-        if (elf.getNumTransactions() == 0) {
-          LOG.info("Deleting edit log file with zero transactions " + elf);
-          if (!elf.getFile().delete()) {
-            throw new IOException("Unable to delete " + elf.getFile());
-          }
+        if (elf.getLastTxId() == HdfsConstants.INVALID_TXID) {
+          // If the file has a valid header (isn't corrupt) but contains no
+          // transactions, we likely just crashed after opening the file and
+          // writing the header, but before syncing any transactions. Safe to
+          // delete the file.
+          LOG.info("Moving aside edit log file that seems to have zero " +
+              "transactions " + elf);
+          elf.moveAsideEmptyFile();
           continue;
         }
-        
         finalizeLogSegment(elf.getFirstTxId(), elf.getLastTxId());
       }
     }
   }
 
-  List<EditLogFile> getLogFiles(long fromTxId) throws IOException {
+  public List<EditLogFile> getLogFiles(long fromTxId) throws IOException {
     File currentDir = sd.getCurrentDir();
     List<EditLogFile> allLogFiles = matchEditLogs(currentDir);
     List<EditLogFile> logFiles = Lists.newArrayList();
@@ -360,37 +406,30 @@ class FileJournalManager implements JournalManager {
 
     return logFiles;
   }
-
-  /** 
-   * Find the maximum transaction in the journal.
-   */
-  private long findMaxTransaction(boolean inProgressOk)
+  
+  public EditLogFile getLogFile(long startTxId) throws IOException {
+    return getLogFile(sd.getCurrentDir(), startTxId);
+  }
+  
+  public static EditLogFile getLogFile(File dir, long startTxId)
       throws IOException {
-    boolean considerSeenTxId = true;
-    long seenTxId = NNStorage.readTransactionIdFile(sd);
-    long maxSeenTransaction = 0;
-    for (EditLogFile elf : getLogFiles(0)) {
-      if (elf.isInProgress() && !inProgressOk) {
-        if (elf.getFirstTxId() != HdfsConstants.INVALID_TXID &&
-            elf.getFirstTxId() <= seenTxId) {
-          // don't look at the seen_txid file if in-progress logs are not to be
-          // examined, and the value in seen_txid falls within the in-progress
-          // segment.
-          considerSeenTxId = false;
-        }
-        continue;
+    List<EditLogFile> files = matchEditLogs(dir);
+    List<EditLogFile> ret = Lists.newLinkedList();
+    for (EditLogFile elf : files) {
+      if (elf.getFirstTxId() == startTxId) {
+        ret.add(elf);
       }
-      
-      if (elf.isInProgress()) {
-        maxSeenTransaction = Math.max(elf.getFirstTxId(), maxSeenTransaction);
-        elf.validateLog();
-      }
-      maxSeenTransaction = Math.max(elf.getLastTxId(), maxSeenTransaction);
     }
-    if (considerSeenTxId) {
-      return Math.max(maxSeenTransaction, seenTxId);
+    
+    if (ret.isEmpty()) {
+      // no matches
+      return null;
+    } else if (ret.size() == 1) {
+      return ret.get(0);
     } else {
-      return maxSeenTransaction;
+      throw new IllegalStateException("More than one log segment in " + 
+          dir + " starting at txid " + startTxId + ": " +
+          Joiner.on(", ").join(ret));
     }
   }
 
@@ -402,17 +441,18 @@ class FileJournalManager implements JournalManager {
   /**
    * Record of an edit log that has been located and had its filename parsed.
    */
-  static class EditLogFile {
+  @InterfaceAudience.Private
+  public static class EditLogFile {
     private File file;
     private final long firstTxId;
     private long lastTxId;
-    private long numTx = -1;
 
     private boolean hasCorruptHeader = false;
     private final boolean isInProgress;
 
     final static Comparator<EditLogFile> COMPARE_BY_START_TXID 
       = new Comparator<EditLogFile>() {
+      @Override
       public int compare(EditLogFile a, EditLogFile b) {
         return ComparisonChain.start()
         .compare(a.getFirstTxId(), b.getFirstTxId())
@@ -435,17 +475,20 @@ class FileJournalManager implements JournalManager {
       assert (firstTxId > 0) || (firstTxId == HdfsConstants.INVALID_TXID);
       assert file != null;
       
+      Preconditions.checkArgument(!isInProgress ||
+          lastTxId == HdfsConstants.INVALID_TXID);
+      
       this.firstTxId = firstTxId;
       this.lastTxId = lastTxId;
       this.file = file;
       this.isInProgress = isInProgress;
     }
     
-    long getFirstTxId() {
+    public long getFirstTxId() {
       return firstTxId;
     }
     
-    long getLastTxId() {
+    public long getLastTxId() {
       return lastTxId;
     }
     
@@ -454,26 +497,27 @@ class FileJournalManager implements JournalManager {
     }
 
     /** 
-     * Count the number of valid transactions in a log.
+     * Find out where the edit log ends.
      * This will update the lastTxId of the EditLogFile or
      * mark it as corrupt if it is.
      */
-    void validateLog() throws IOException {
+    public void validateLog() throws IOException {
       EditLogValidation val = EditLogFileInputStream.validateEditLog(file);
-      this.numTx = val.getNumTransactions();
       this.lastTxId = val.getEndTxId();
       this.hasCorruptHeader = val.hasCorruptHeader();
     }
-    
-    long getNumTransactions() {
-      return numTx;
+
+    public void scanLog() throws IOException {
+      EditLogValidation val = EditLogFileInputStream.scanEditLog(file);
+      this.lastTxId = val.getEndTxId();
+      this.hasCorruptHeader = val.hasCorruptHeader();
     }
 
-    boolean isInProgress() {
+    public boolean isInProgress() {
       return isInProgress;
     }
 
-    File getFile() {
+    public File getFile() {
       return file;
     }
     
@@ -483,23 +527,93 @@ class FileJournalManager implements JournalManager {
 
     void moveAsideCorruptFile() throws IOException {
       assert hasCorruptHeader;
-    
+      renameSelf(".corrupt");
+    }
+
+    void moveAsideTrashFile(long markerTxid) throws IOException {
+      assert this.getFirstTxId() >= markerTxid;
+      renameSelf(".trash");
+    }
+
+    public void moveAsideEmptyFile() throws IOException {
+      assert lastTxId == HdfsConstants.INVALID_TXID;
+      renameSelf(".empty");
+    }
+      
+    private void renameSelf(String newSuffix) throws IOException {
       File src = file;
-      File dst = new File(src.getParent(), src.getName() + ".corrupt");
-      boolean success = src.renameTo(dst);
-      if (!success) {
+      File dst = new File(src.getParent(), src.getName() + newSuffix);
+      // renameTo fails on Windows if the destination file already exists.
+      try {
+        if (dst.exists()) {
+          if (!dst.delete()) {
+            throw new IOException("Couldn't delete " + dst);
+          }
+        }
+        NativeIO.renameTo(src, dst);
+      } catch (IOException e) {
         throw new IOException(
-          "Couldn't rename corrupt log " + src + " to " + dst);
+            "Couldn't rename log " + src + " to " + dst, e);
       }
       file = dst;
     }
-    
+
     @Override
     public String toString() {
       return String.format("EditLogFile(file=%s,first=%019d,last=%019d,"
-                           +"inProgress=%b,hasCorruptHeader=%b,numTx=%d)",
+                           +"inProgress=%b,hasCorruptHeader=%b)",
                            file.toString(), firstTxId, lastTxId,
-                           isInProgress(), hasCorruptHeader, numTx);
+                           isInProgress(), hasCorruptHeader);
     }
+  }
+  
+  @Override
+  public void doPreUpgrade() throws IOException {
+    LOG.info("Starting upgrade of edits directory " + sd.getRoot());
+    try {
+     NNUpgradeUtil.doPreUpgrade(sd);
+    } catch (IOException ioe) {
+     LOG.error("Failed to move aside pre-upgrade storage " +
+         "in image directory " + sd.getRoot(), ioe);
+     throw ioe;
+    }
+  }
+  
+  /**
+   * This method assumes that the fields of the {@link Storage} object have
+   * already been updated to the appropriate new values for the upgrade.
+   */
+  @Override
+  public void doUpgrade(Storage storage) throws IOException {
+    NNUpgradeUtil.doUpgrade(sd, storage);
+  }
+  
+  @Override
+  public void doFinalize() throws IOException {
+    NNUpgradeUtil.doFinalize(sd);
+  }
+
+  @Override
+  public boolean canRollBack(StorageInfo storage, StorageInfo prevStorage,
+      int targetLayoutVersion) throws IOException {
+    return NNUpgradeUtil.canRollBack(sd, storage,
+        prevStorage, targetLayoutVersion);
+  }
+
+  @Override
+  public void doRollback() throws IOException {
+    NNUpgradeUtil.doRollBack(sd);
+  }
+
+  @Override
+  public void discardSegments(long startTxid) throws IOException {
+    discardEditLogSegments(startTxid);
+  }
+
+  @Override
+  public long getJournalCTime() throws IOException {
+    StorageInfo sInfo = new StorageInfo((NodeType)null);
+    sInfo.readProperties(sd);
+    return sInfo.getCTime();
   }
 }

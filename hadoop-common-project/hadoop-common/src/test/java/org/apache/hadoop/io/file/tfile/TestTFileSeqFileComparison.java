@@ -33,6 +33,7 @@ import org.apache.commons.cli.Option;
 import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -42,6 +43,7 @@ import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.io.SequenceFile;
 import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.io.file.tfile.TFile.Reader.Scanner.Entry;
+import org.apache.hadoop.util.Time;
 
 public class TestTFileSeqFileComparison extends TestCase {
   MyOptions options;
@@ -86,12 +88,12 @@ public class TestTFileSeqFileComparison extends TestCase {
   }
 
   public void startTime() throws IOException {
-    startTimeEpoch = System.currentTimeMillis();
+    startTimeEpoch = Time.now();
     System.out.println(formatTime() + " Started timing.");
   }
 
   public void stopTime() throws IOException {
-    finishTimeEpoch = System.currentTimeMillis();
+    finishTimeEpoch = Time.now();
     System.out.println(formatTime() + " Stopped timing.");
   }
 
@@ -111,7 +113,7 @@ public class TestTFileSeqFileComparison extends TestCase {
   }
 
   public String formatTime() {
-    return formatTime(System.currentTimeMillis());
+    return formatTime(Time.now());
   }
 
   private interface KVAppendable {
@@ -146,12 +148,14 @@ public class TestTFileSeqFileComparison extends TestCase {
       this.writer = new TFile.Writer(fsdos, minBlkSize, compress, null, conf);
     }
 
+    @Override
     public void append(BytesWritable key, BytesWritable value)
         throws IOException {
       writer.append(key.get(), 0, key.getSize(), value.get(), 0, value
           .getSize());
     }
 
+    @Override
     public void close() throws IOException {
       writer.close();
       fsdos.close();
@@ -194,22 +198,27 @@ public class TestTFileSeqFileComparison extends TestCase {
               - valueBuffer.length)];
     }
 
+    @Override
     public byte[] getKey() {
       return keyBuffer;
     }
 
+    @Override
     public int getKeyLength() {
       return keyLength;
     }
 
+    @Override
     public byte[] getValue() {
       return valueBuffer;
     }
 
+    @Override
     public int getValueLength() {
       return valueLength;
     }
 
+    @Override
     public boolean next() throws IOException {
       if (scanner.atEnd()) return false;
       Entry entry = scanner.entry();
@@ -223,6 +232,7 @@ public class TestTFileSeqFileComparison extends TestCase {
       return true;
     }
 
+    @Override
     public void close() throws IOException {
       scanner.close();
       reader.close();
@@ -237,7 +247,8 @@ public class TestTFileSeqFileComparison extends TestCase {
     public SeqFileAppendable(FileSystem fs, Path path, int osBufferSize,
         String compress, int minBlkSize) throws IOException {
       Configuration conf = new Configuration();
-      conf.setBoolean("hadoop.native.lib", true);
+      conf.setBoolean(CommonConfigurationKeys.IO_NATIVE_LIB_AVAILABLE_KEY,
+                      true);
 
       CompressionCodec codec = null;
       if ("lzo".equals(compress)) {
@@ -263,11 +274,13 @@ public class TestTFileSeqFileComparison extends TestCase {
       }
     }
 
+    @Override
     public void append(BytesWritable key, BytesWritable value)
         throws IOException {
       writer.append(key, value);
     }
 
+    @Override
     public void close() throws IOException {
       writer.close();
       fsdos.close();
@@ -288,26 +301,32 @@ public class TestTFileSeqFileComparison extends TestCase {
       value = new BytesWritable();
     }
 
+    @Override
     public byte[] getKey() {
       return key.get();
     }
 
+    @Override
     public int getKeyLength() {
       return key.getSize();
     }
 
+    @Override
     public byte[] getValue() {
       return value.get();
     }
 
+    @Override
     public int getValueLength() {
       return value.getSize();
     }
 
+    @Override
     public boolean next() throws IOException {
       return reader.next(key, value);
     }
 
+    @Override
     public void close() throws IOException {
       reader.close();
     }

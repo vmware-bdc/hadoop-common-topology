@@ -18,19 +18,37 @@
 package org.apache.hadoop.hdfs.protocolPB;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
 import org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol;
+import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.protocol.HdfsBlocksMetadata;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.DeleteBlockPoolRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.DeleteBlockPoolResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetBlockLocalPathInfoRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetBlockLocalPathInfoResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetDatanodeInfoRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetDatanodeInfoResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetHdfsBlockLocationsRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetHdfsBlockLocationsResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetHdfsBlockLocationsResponseProto.Builder;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetReplicaVisibleLengthRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetReplicaVisibleLengthResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.RefreshNamenodesRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.RefreshNamenodesResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.ShutdownDatanodeRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.ShutdownDatanodeResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.ExtendedBlockProto;
+import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
+import org.apache.hadoop.security.proto.SecurityProtos.TokenProto;
+import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.util.VersionInfo;
 
+import com.google.common.primitives.Longs;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.RpcController;
 import com.google.protobuf.ServiceException;
 
@@ -46,6 +64,8 @@ public class ClientDatanodeProtocolServerSideTranslatorPB implements
       RefreshNamenodesResponseProto.newBuilder().build();
   private final static DeleteBlockPoolResponseProto DELETE_BLOCKPOOL_RESP =
       DeleteBlockPoolResponseProto.newBuilder().build();
+  private final static ShutdownDatanodeResponseProto SHUTDOWN_DATANODE_RESP =
+      ShutdownDatanodeResponseProto.newBuilder().build();
   
   private final ClientDatanodeProtocol impl;
 
@@ -105,5 +125,61 @@ public class ClientDatanodeProtocolServerSideTranslatorPB implements
         .setBlock(PBHelper.convert(resp.getBlock()))
         .setLocalPath(resp.getBlockPath()).setLocalMetaPath(resp.getMetaPath())
         .build();
+  }
+
+  @Override
+  public GetHdfsBlockLocationsResponseProto getHdfsBlockLocations(
+      RpcController controller, GetHdfsBlockLocationsRequestProto request)
+      throws ServiceException {
+    HdfsBlocksMetadata resp;
+    try {
+      String poolId = request.getBlockPoolId();
+
+      List<Token<BlockTokenIdentifier>> tokens = 
+          new ArrayList<Token<BlockTokenIdentifier>>(request.getTokensCount());
+      for (TokenProto b : request.getTokensList()) {
+        tokens.add(PBHelper.convert(b));
+      }
+      long[] blockIds = Longs.toArray(request.getBlockIdsList());
+      
+      // Call the real implementation
+      resp = impl.getHdfsBlocksMetadata(poolId, blockIds, tokens);
+    } catch (IOException e) {
+      throw new ServiceException(e);
+    }
+    List<ByteString> volumeIdsByteStrings = 
+        new ArrayList<ByteString>(resp.getVolumeIds().size());
+    for (byte[] b : resp.getVolumeIds()) {
+      volumeIdsByteStrings.add(ByteString.copyFrom(b));
+    }
+    // Build and return the response
+    Builder builder = GetHdfsBlockLocationsResponseProto.newBuilder();
+    builder.addAllVolumeIds(volumeIdsByteStrings);
+    builder.addAllVolumeIndexes(resp.getVolumeIndexes());
+    return builder.build();
+  }
+
+  @Override
+  public ShutdownDatanodeResponseProto shutdownDatanode(
+      RpcController unused, ShutdownDatanodeRequestProto request)
+      throws ServiceException {
+    try {
+      impl.shutdownDatanode(request.getForUpgrade());
+    } catch (IOException e) {
+      throw new ServiceException(e);
+    }
+    return SHUTDOWN_DATANODE_RESP;
+  }
+
+  public GetDatanodeInfoResponseProto getDatanodeInfo(RpcController unused,
+      GetDatanodeInfoRequestProto request) throws ServiceException {
+    GetDatanodeInfoResponseProto res;
+    try {
+      res = GetDatanodeInfoResponseProto.newBuilder()
+          .setLocalInfo(PBHelper.convert(impl.getDatanodeInfo())).build();
+    } catch (IOException e) {
+      throw new ServiceException(e);
+    }
+    return res;
   }
 }

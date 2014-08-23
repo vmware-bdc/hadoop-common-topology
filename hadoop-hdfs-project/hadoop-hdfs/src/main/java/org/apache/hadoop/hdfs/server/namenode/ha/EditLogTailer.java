@@ -21,6 +21,7 @@ package org.apache.hadoop.hdfs.server.namenode.ha;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.security.PrivilegedAction;
+import java.security.PrivilegedExceptionAction;
 import java.util.Collection;
 
 import org.apache.commons.logging.Log;
@@ -43,7 +44,8 @@ import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.security.SecurityUtil;
 
-import static org.apache.hadoop.hdfs.server.common.Util.now;
+import static org.apache.hadoop.util.Time.now;
+import static org.apache.hadoop.util.ExitUtil.terminate;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -64,8 +66,6 @@ public class EditLogTailer {
   private final Configuration conf;
   private final FSNamesystem namesystem;
   private FSEditLog editLog;
-  
-  private volatile Runtime runtime = Runtime.getRuntime();
 
   private InetSocketAddress activeAddr;
   private NamenodeProtocol cachedActiveProxy = null;
@@ -91,13 +91,13 @@ public class EditLogTailer {
    * from finalized log segments, the Standby will only be as up-to-date as how
    * often the logs are rolled.
    */
-  private long logRollPeriodMs;
+  private final long logRollPeriodMs;
 
   /**
    * How often the Standby should check if there are new finalized segment(s)
    * available to be read from.
    */
-  private long sleepTimeMs;
+  private final long sleepTimeMs;
   
   public EditLogTailer(FSNamesystem namesystem, Configuration conf) {
     this.tailerThread = new EditLogTailerThread();
@@ -135,9 +135,12 @@ public class EditLogTailer {
   
   private NamenodeProtocol getActiveNodeProxy() throws IOException {
     if (cachedActiveProxy == null) {
-      NamenodeProtocolPB proxy = 
-        RPC.waitForProxy(NamenodeProtocolPB.class,
-            RPC.getProtocolVersion(NamenodeProtocolPB.class), activeAddr, conf);
+      int rpcTimeout = conf.getInt(
+          DFSConfigKeys.DFS_HA_LOGROLL_RPC_TIMEOUT_KEY,
+          DFSConfigKeys.DFS_HA_LOGROLL_RPC_TIMEOUT_DEFAULT);
+      NamenodeProtocolPB proxy = RPC.waitForProxy(NamenodeProtocolPB.class,
+          RPC.getProtocolVersion(NamenodeProtocolPB.class), activeAddr, conf,
+          rpcTimeout, Long.MAX_VALUE);
       cachedActiveProxy = new NamenodeProtocolTranslatorPB(proxy);
     }
     assert cachedActiveProxy != null;
@@ -165,27 +168,32 @@ public class EditLogTailer {
   }
   
   @VisibleForTesting
-  void setEditLog(FSEditLog editLog) {
+  public void setEditLog(FSEditLog editLog) {
     this.editLog = editLog;
-  }
-  
-  @VisibleForTesting
-  synchronized void setRuntime(Runtime runtime) {
-    this.runtime = runtime;
   }
   
   public void catchupDuringFailover() throws IOException {
     Preconditions.checkState(tailerThread == null ||
         !tailerThread.isAlive(),
         "Tailer thread should not be running once failover starts");
-    try {
-      doTailEdits();
-    } catch (InterruptedException e) {
-      throw new IOException(e);
-    }
+    // Important to do tailing as the login user, in case the shared
+    // edits storage is implemented by a JournalManager that depends
+    // on security credentials to access the logs (eg QuorumJournalManager).
+    SecurityUtil.doAsLoginUser(new PrivilegedExceptionAction<Void>() {
+      @Override
+      public Void run() throws Exception {
+        try {
+          doTailEdits();
+        } catch (InterruptedException e) {
+          throw new IOException(e);
+        }
+        return null;
+      }
+    });
   }
   
-  private void doTailEdits() throws IOException, InterruptedException {
+  @VisibleForTesting
+  void doTailEdits() throws IOException, InterruptedException {
     // Write lock needs to be interruptible here because the 
     // transitionToActive RPC takes the write lock before calling
     // tailer.stop() -- so if we're not interruptible, it will
@@ -201,7 +209,7 @@ public class EditLogTailer {
       }
       Collection<EditLogInputStream> streams;
       try {
-        streams = editLog.selectInputStreams(lastTxnId + 1, 0, false);
+        streams = editLog.selectInputStreams(lastTxnId + 1, 0, null, false);
       } catch (IOException ioe) {
         // This is acceptable. If we try to tail edits in the middle of an edits
         // log roll, i.e. the last one has been finalized but the new inprogress
@@ -219,7 +227,7 @@ public class EditLogTailer {
       // disk are ignored.
       long editsLoaded = 0;
       try {
-        editsLoaded = image.loadEdits(streams, namesystem, null);
+        editsLoaded = image.loadEdits(streams, namesystem);
       } catch (EditLogInputException elie) {
         editsLoaded = elie.getNumEditsLoaded();
         throw elie;
@@ -320,9 +328,9 @@ public class EditLogTailer {
           // interrupter should have already set shouldRun to false
           continue;
         } catch (Throwable t) {
-          LOG.error("Unknown error encountered while tailing edits. " +
+          LOG.fatal("Unknown error encountered while tailing edits. " +
               "Shutting down standby NN.", t);
-          runtime.exit(1);
+          terminate(1, t);
         }
 
         try {

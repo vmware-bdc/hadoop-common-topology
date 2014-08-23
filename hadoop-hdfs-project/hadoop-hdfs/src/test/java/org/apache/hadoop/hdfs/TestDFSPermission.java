@@ -17,13 +17,17 @@
  */
 package org.apache.hadoop.hdfs;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.security.PrivilegedExceptionAction;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
-
-import junit.framework.AssertionFailedError;
-import junit.framework.TestCase;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -35,12 +39,16 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.hdfs.server.common.Util;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.Time;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
 
 /** Unit tests for permission */
-public class TestDFSPermission extends TestCase {
+public class TestDFSPermission {
   public static final Log LOG = LogFactory.getLog(TestDFSPermission.class);
   final private static Configuration conf = new HdfsConfiguration();
   
@@ -52,14 +60,13 @@ public class TestDFSPermission extends TestCase {
   final private static String USER2_NAME = "user2";
   final private static String USER3_NAME = "user3";
 
-  private static UserGroupInformation SUPERUSER;
-  private static UserGroupInformation USER1;
-  private static UserGroupInformation USER2;
-  private static UserGroupInformation USER3;
+  private static final UserGroupInformation SUPERUSER;
+  private static final UserGroupInformation USER1;
+  private static final UserGroupInformation USER2;
+  private static final UserGroupInformation USER3;
 
   final private static short MAX_PERMISSION = 511;
   final private static short DEFAULT_UMASK = 022;
-  final private static short FILE_MASK = 0666;
   final private static FsPermission DEFAULT_PERMISSION = 
     FsPermission.createImmutable((short) 0777);
   final static private int NUM_TEST_PERMISSIONS = 
@@ -72,12 +79,12 @@ public class TestDFSPermission extends TestCase {
 
   private FileSystem fs;
   private MiniDFSCluster cluster;
-  private static Random r;
+  private static final Random r;
 
   static {
     try {
       // Initiate the random number generator and logging the seed
-      long seed = Util.now();
+      long seed = Time.now();
       r = new Random(seed);
       LOG.info("Random number generator uses seed " + seed);
       LOG.info("NUM_TEST_PERMISSIONS=" + NUM_TEST_PERMISSIONS);
@@ -105,13 +112,13 @@ public class TestDFSPermission extends TestCase {
     }
   }
 
-  @Override
+  @Before
   public void setUp() throws IOException {
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(3).build();
     cluster.waitActive();
   }
   
-  @Override
+  @After
   public void tearDown() throws IOException {
     if (cluster != null) {
       cluster.shutdown();
@@ -121,6 +128,7 @@ public class TestDFSPermission extends TestCase {
   /** This tests if permission setting in create, mkdir, and 
    * setPermission works correctly
    */
+  @Test
   public void testPermissionSetting() throws Exception {
     testPermissionSetting(OpType.CREATE); // test file creation
     testPermissionSetting(OpType.MKDIRS); // test directory creation
@@ -166,7 +174,7 @@ public class TestDFSPermission extends TestCase {
     uMask = (short) 0111;
     initFileSystem(uMask);
     fs.setPermission(FILE_DIR_PATH, new FsPermission(uMask));
-    short expectedPermission = (short) ((op == OpType.CREATE) ? 0 : 0111);
+    short expectedPermission = (short) 0111;
     checkPermission(FILE_DIR_PATH, expectedPermission, true);
     closeFileSystem();
 
@@ -202,7 +210,7 @@ public class TestDFSPermission extends TestCase {
     case CREATE:
       FSDataOutputStream out = fs.create(name, permission, true, 
           conf.getInt(CommonConfigurationKeys.IO_FILE_BUFFER_SIZE_KEY, 4096),
-          fs.getDefaultReplication(), fs.getDefaultBlockSize(), null);
+          fs.getDefaultReplication(name), fs.getDefaultBlockSize(name), null);
       out.close();
       break;
     case MKDIRS:
@@ -229,7 +237,7 @@ public class TestDFSPermission extends TestCase {
 
     // get the expected permission
     short expectedPermission = (op == OpType.CREATE) ? (short) (~umask
-        & permissionNum & FILE_MASK) : (short) (~umask & permissionNum);
+        & permissionNum) : (short) (~umask & permissionNum);
 
     // check if permission is correctly set
     checkPermission(name, expectedPermission, delete);
@@ -256,6 +264,7 @@ public class TestDFSPermission extends TestCase {
    * check that ImmutableFsPermission can be used as the argument
    * to setPermission
    */
+  @Test
   public void testImmutableFsPermission() throws IOException {
     fs = FileSystem.get(conf);
 
@@ -265,6 +274,7 @@ public class TestDFSPermission extends TestCase {
   }
   
   /* check if the ownership of a file/directory is set correctly */
+  @Test
   public void testOwnership() throws Exception {
     testOwnership(OpType.CREATE); // test file creation
     testOwnership(OpType.MKDIRS); // test directory creation
@@ -353,6 +363,7 @@ public class TestDFSPermission extends TestCase {
 
   /* Check if namenode performs permission checking correctly for
    * superuser, file owner, group owner, and other users */
+  @Test
   public void testPermissionChecking() throws Exception {
     try {
       fs = FileSystem.get(conf);
@@ -414,6 +425,79 @@ public class TestDFSPermission extends TestCase {
     }
   }
 
+  @Test
+  public void testAccessOwner() throws IOException, InterruptedException {
+    FileSystem rootFs = FileSystem.get(conf);
+    Path p1 = new Path("/p1");
+    rootFs.mkdirs(p1);
+    rootFs.setOwner(p1, USER1_NAME, GROUP1_NAME);
+    fs = USER1.doAs(new PrivilegedExceptionAction<FileSystem>() {
+      @Override
+      public FileSystem run() throws Exception {
+        return FileSystem.get(conf);
+      }
+    });
+    fs.setPermission(p1, new FsPermission((short) 0444));
+    fs.access(p1, FsAction.READ);
+    try {
+      fs.access(p1, FsAction.WRITE);
+      fail("The access call should have failed.");
+    } catch (AccessControlException e) {
+      // expected
+    }
+
+    Path badPath = new Path("/bad/bad");
+    try {
+      fs.access(badPath, FsAction.READ);
+      fail("The access call should have failed");
+    } catch (FileNotFoundException e) {
+      // expected
+    }
+  }
+
+  @Test
+  public void testAccessGroupMember() throws IOException, InterruptedException {
+    FileSystem rootFs = FileSystem.get(conf);
+    Path p2 = new Path("/p2");
+    rootFs.mkdirs(p2);
+    rootFs.setOwner(p2, UserGroupInformation.getCurrentUser().getShortUserName(), GROUP1_NAME);
+    rootFs.setPermission(p2, new FsPermission((short) 0740));
+    fs = USER1.doAs(new PrivilegedExceptionAction<FileSystem>() {
+      @Override
+      public FileSystem run() throws Exception {
+        return FileSystem.get(conf);
+      }
+    });
+    fs.access(p2, FsAction.READ);
+    try {
+      fs.access(p2, FsAction.EXECUTE);
+      fail("The access call should have failed.");
+    } catch (AccessControlException e) {
+      // expected
+    }
+  }
+
+  @Test
+  public void testAccessOthers() throws IOException, InterruptedException {
+    FileSystem rootFs = FileSystem.get(conf);
+    Path p3 = new Path("/p3");
+    rootFs.mkdirs(p3);
+    rootFs.setPermission(p3, new FsPermission((short) 0774));
+    fs = USER1.doAs(new PrivilegedExceptionAction<FileSystem>() {
+      @Override
+      public FileSystem run() throws Exception {
+        return FileSystem.get(conf);
+      }
+    });
+    fs.access(p3, FsAction.READ);
+    try {
+      fs.access(p3, FsAction.READ_WRITE);
+      fail("The access call should have failed.");
+    } catch (AccessControlException e) {
+      // expected
+    }
+  }
+
   /* Check if namenode performs permission checking correctly 
    * for the given user for operations mkdir, open, setReplication, 
    * getFileInfo, isDirectory, exists, getContentLength, list, rename,
@@ -422,6 +506,7 @@ public class TestDFSPermission extends TestCase {
       short[] ancestorPermission, short[] parentPermission,
       short[] filePermission, Path[] parentDirs, Path[] files, Path[] dirs)
       throws Exception {
+    boolean[] isDirEmpty = new boolean[NUM_TEST_PERMISSIONS];
     login(SUPERUSER);
     for (int i = 0; i < NUM_TEST_PERMISSIONS; i++) {
       create(OpType.CREATE, files[i]);
@@ -434,6 +519,8 @@ public class TestDFSPermission extends TestCase {
       FsPermission fsPermission = new FsPermission(filePermission[i]);
       fs.setPermission(files[i], fsPermission);
       fs.setPermission(dirs[i], fsPermission);
+
+      isDirEmpty[i] = (fs.listStatus(dirs[i]).length == 0);
     }
 
     login(ugi);
@@ -454,7 +541,7 @@ public class TestDFSPermission extends TestCase {
           parentPermission[i], ancestorPermission[next], parentPermission[next]);
       testDeleteFile(ugi, files[i], ancestorPermission[i], parentPermission[i]);
       testDeleteDir(ugi, dirs[i], ancestorPermission[i], parentPermission[i],
-          filePermission[i], null);
+          filePermission[i], null, isDirEmpty[i]);
     }
     
     // test non existent file
@@ -465,8 +552,8 @@ public class TestDFSPermission extends TestCase {
    * value is generated only once.
    */
   static private class PermissionGenerator {
-    private Random r;
-    private short permissions[] = new short[MAX_PERMISSION + 1];
+    private final Random r;
+    private final short[] permissions = new short[MAX_PERMISSION + 1];
     private int numLeft = MAX_PERMISSION + 1;
 
     PermissionGenerator(Random r) {
@@ -532,7 +619,7 @@ public class TestDFSPermission extends TestCase {
         } catch(AccessControlException e) {
           assertTrue(expectPermissionDeny());
         }
-      } catch (AssertionFailedError ae) {
+      } catch (AssertionError ae) {
         logPermissions();
         throw ae;
       }
@@ -635,7 +722,7 @@ public class TestDFSPermission extends TestCase {
     }
   }
 
-  private CreatePermissionVerifier createVerifier =
+  private final CreatePermissionVerifier createVerifier =
     new CreatePermissionVerifier();
   /* test if the permission checking of create/mkdir is correct */
   private void testCreateMkdirs(UserGroupInformation ugi, Path path,
@@ -665,7 +752,7 @@ public class TestDFSPermission extends TestCase {
     }
   }
 
-  private OpenPermissionVerifier openVerifier = new OpenPermissionVerifier();
+  private final OpenPermissionVerifier openVerifier = new OpenPermissionVerifier();
   /* test if the permission checking of open is correct */
   private void testOpen(UserGroupInformation ugi, Path path,
       short ancestorPermission, short parentPermission, short filePermission)
@@ -690,7 +777,7 @@ public class TestDFSPermission extends TestCase {
     }
   }
 
-  private SetReplicationPermissionVerifier replicatorVerifier =
+  private final SetReplicationPermissionVerifier replicatorVerifier =
     new SetReplicationPermissionVerifier();
   /* test if the permission checking of setReplication is correct */
   private void testSetReplication(UserGroupInformation ugi, Path path,
@@ -718,7 +805,7 @@ public class TestDFSPermission extends TestCase {
     }
   }
 
-  private SetTimesPermissionVerifier timesVerifier =
+  private final SetTimesPermissionVerifier timesVerifier =
     new SetTimesPermissionVerifier();
   /* test if the permission checking of setReplication is correct */
   private void testSetTimes(UserGroupInformation ugi, Path path,
@@ -773,7 +860,7 @@ public class TestDFSPermission extends TestCase {
     }
   }
 
-  private StatsPermissionVerifier statsVerifier = new StatsPermissionVerifier();
+  private final StatsPermissionVerifier statsVerifier = new StatsPermissionVerifier();
   /* test if the permission checking of isDirectory, exist,
    * getFileInfo, getContentSummary is correct */
   private void testStats(UserGroupInformation ugi, Path path,
@@ -833,7 +920,7 @@ public class TestDFSPermission extends TestCase {
     }
   }
 
-  ListPermissionVerifier listVerifier = new ListPermissionVerifier();
+  final ListPermissionVerifier listVerifier = new ListPermissionVerifier();
   /* test if the permission checking of list is correct */
   private void testList(UserGroupInformation ugi, Path file, Path dir,
       short ancestorPermission, short parentPermission, short filePermission)
@@ -879,6 +966,7 @@ public class TestDFSPermission extends TestCase {
                 requiredAncestorPermission;
     }
 
+    @Override
     protected void logPermissions() {
       super.logPermissions();
       LOG.info("dst ancestor permission: "
@@ -888,7 +976,7 @@ public class TestDFSPermission extends TestCase {
     }
   }
 
-  RenamePermissionVerifier renameVerifier = new RenamePermissionVerifier();
+  final RenamePermissionVerifier renameVerifier = new RenamePermissionVerifier();
   /* test if the permission checking of rename is correct */
   private void testRename(UserGroupInformation ugi, Path src, Path dst,
       short srcAncestorPermission, short srcParentPermission,
@@ -916,7 +1004,8 @@ public class TestDFSPermission extends TestCase {
   }
 
   /* A class that verifies the permission checking is correct for
-   * directory deletion */
+   * directory deletion
+   */
   private class DeleteDirPermissionVerifier extends DeletePermissionVerifier {
     private short[] childPermissions;
 
@@ -950,7 +1039,18 @@ public class TestDFSPermission extends TestCase {
     }
   }
 
-  DeletePermissionVerifier fileDeletionVerifier =
+  /* A class that verifies the permission checking is correct for
+   * empty-directory deletion
+   */
+  private class DeleteEmptyDirPermissionVerifier extends DeleteDirPermissionVerifier {
+    @Override
+    void setOpPermission() {
+      this.opParentPermission = SEARCH_MASK | WRITE_MASK;
+      this.opPermission = NULL_MASK;
+    }
+  }
+
+  final DeletePermissionVerifier fileDeletionVerifier =
     new DeletePermissionVerifier();
 
   /* test if the permission checking of file deletion is correct */
@@ -960,17 +1060,22 @@ public class TestDFSPermission extends TestCase {
     fileDeletionVerifier.verifyPermission(ugi);
   }
 
-  DeleteDirPermissionVerifier dirDeletionVerifier =
+  final DeleteDirPermissionVerifier dirDeletionVerifier =
     new DeleteDirPermissionVerifier();
+
+  final DeleteEmptyDirPermissionVerifier emptyDirDeletionVerifier =
+      new DeleteEmptyDirPermissionVerifier();
 
   /* test if the permission checking of directory deletion is correct */
   private void testDeleteDir(UserGroupInformation ugi, Path path,
       short ancestorPermission, short parentPermission, short permission,
-      short[] childPermissions) throws Exception {
-    dirDeletionVerifier.set(path, ancestorPermission, parentPermission,
-        permission, childPermissions);
-    dirDeletionVerifier.verifyPermission(ugi);
-
+      short[] childPermissions,
+      final boolean isDirEmpty) throws Exception {
+    DeleteDirPermissionVerifier ddpv = isDirEmpty?
+        emptyDirDeletionVerifier : dirDeletionVerifier;
+    ddpv.set(path, ancestorPermission, parentPermission, permission,
+        childPermissions);
+    ddpv.verifyPermission(ugi);
   }
 
   /* log into dfs as the given user */

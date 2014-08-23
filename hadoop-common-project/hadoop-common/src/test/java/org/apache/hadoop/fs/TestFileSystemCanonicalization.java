@@ -18,18 +18,21 @@
 
 package org.apache.hadoop.fs;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+
 import java.io.IOException;
 import java.net.URI;
 
-import junit.framework.TestCase;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.NetUtilsTestResolver;
 import org.apache.hadoop.util.Progressable;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
-public class TestFileSystemCanonicalization extends TestCase {
+public class TestFileSystemCanonicalization {
   static String[] authorities = {
     "myfs://host",
     "myfs://host.a",
@@ -41,8 +44,8 @@ public class TestFileSystemCanonicalization extends TestCase {
   };
 
 
-  @Test
-  public void testSetupResolver() throws Exception {
+  @BeforeClass
+  public static void initialize() throws Exception {
     NetUtilsTestResolver.install();
   }
 
@@ -310,6 +313,11 @@ public class TestFileSystemCanonicalization extends TestCase {
       return defaultPort;
     }
     
+    @Override
+    protected URI canonicalizeUri(URI uri) {
+      return NetUtils.getCanonicalUri(uri, getDefaultPort());
+    }
+
     @Override
     public FSDataInputStream open(Path f, int bufferSize) throws IOException {
       throw new IOException("not supposed to be here");

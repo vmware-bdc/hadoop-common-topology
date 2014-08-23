@@ -116,5 +116,13 @@ public class TestSwitchMapping extends Assert {
     public List<String> resolve(List<String> names) {
       return names;
     }
+
+    @Override
+    public void reloadCachedMappings() {
+    }
+
+    @Override
+    public void reloadCachedMappings(List<String> names) {
+    }
   }
 }

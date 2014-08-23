@@ -24,20 +24,24 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.EnumSet;
 
-import junit.framework.Assert;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileContext;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.WrappedJvmID;
+import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.mapreduce.JobID;
+import org.apache.hadoop.mapreduce.JobStatus.State;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.OutputCommitter;
+import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryEvent;
 import org.apache.hadoop.mapreduce.jobhistory.NormalizedResourceEvent;
+import org.apache.hadoop.mapreduce.security.TokenCache;
 import org.apache.hadoop.mapreduce.security.token.JobTokenSecretManager;
 import org.apache.hadoop.mapreduce.split.JobSplit.TaskSplitMetaInfo;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
@@ -49,9 +53,15 @@ import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptState;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskReport;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskState;
 import org.apache.hadoop.mapreduce.v2.app.client.ClientService;
+import org.apache.hadoop.mapreduce.v2.app.client.MRClientService;
+import org.apache.hadoop.mapreduce.v2.app.commit.CommitterEvent;
+import org.apache.hadoop.mapreduce.v2.app.commit.CommitterEventHandler;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
+import org.apache.hadoop.mapreduce.v2.app.job.JobStateInternal;
 import org.apache.hadoop.mapreduce.v2.app.job.Task;
 import org.apache.hadoop.mapreduce.v2.app.job.TaskAttempt;
+import org.apache.hadoop.mapreduce.v2.app.job.TaskAttemptStateInternal;
+import org.apache.hadoop.mapreduce.v2.app.job.TaskStateInternal;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobEventType;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobFinishEvent;
@@ -60,33 +70,37 @@ import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptContainerLaunched
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
 import org.apache.hadoop.mapreduce.v2.app.job.impl.JobImpl;
+import org.apache.hadoop.mapreduce.v2.app.job.impl.TaskAttemptImpl;
+import org.apache.hadoop.mapreduce.v2.app.job.impl.TaskImpl;
 import org.apache.hadoop.mapreduce.v2.app.launcher.ContainerLauncher;
 import org.apache.hadoop.mapreduce.v2.app.launcher.ContainerLauncherEvent;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerAllocator;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerAllocatorEvent;
-import org.apache.hadoop.mapreduce.v2.app.taskclean.TaskCleaner;
-import org.apache.hadoop.mapreduce.v2.app.taskclean.TaskCleanupEvent;
+import org.apache.hadoop.mapreduce.v2.app.rm.RMHeartbeatHandler;
+import org.apache.hadoop.mapreduce.v2.app.rm.preemption.AMPreemptionPolicy;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.yarn.Clock;
-import org.apache.hadoop.yarn.ClusterInfo;
-import org.apache.hadoop.yarn.SystemClock;
-import org.apache.hadoop.yarn.YarnException;
+import org.apache.hadoop.service.Service;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.Priority;
+import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.event.EventHandler;
-import org.apache.hadoop.yarn.factories.RecordFactory;
-import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
-import org.apache.hadoop.yarn.service.Service;
+import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
+import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
 import org.apache.hadoop.yarn.state.StateMachine;
 import org.apache.hadoop.yarn.state.StateMachineFactory;
-import org.apache.hadoop.yarn.util.BuilderUtils;
+import org.apache.hadoop.yarn.util.Clock;
+import org.apache.hadoop.yarn.util.SystemClock;
+import org.junit.Assert;
 
 
 /**
@@ -103,13 +117,13 @@ public class MRApp extends MRAppMaster {
   private File testWorkDir;
   private Path testAbsPath;
   private ClusterInfo clusterInfo;
+  
+  // Queue to pretend the RM assigned us
+  private String assignedQueue;
 
   public static String NM_HOST = "localhost";
   public static int NM_PORT = 1234;
   public static int NM_HTTP_PORT = 8042;
-
-  private static final RecordFactory recordFactory =
-      RecordFactoryProvider.getRecordFactory(null);
 
   //if true, tasks complete automatically as soon as they are launched
   protected boolean autoComplete = false;
@@ -117,14 +131,18 @@ public class MRApp extends MRAppMaster {
   static ApplicationId applicationId;
 
   static {
-    applicationId = recordFactory.newRecordInstance(ApplicationId.class);
-    applicationId.setClusterTimestamp(0);
-    applicationId.setId(0);
+    applicationId = ApplicationId.newInstance(0, 0);
   }
 
   public MRApp(int maps, int reduces, boolean autoComplete, String testName,
       boolean cleanOnStart, Clock clock) {
-    this(maps, reduces, autoComplete, testName, cleanOnStart, 1, clock);
+    this(maps, reduces, autoComplete, testName, cleanOnStart, 1, clock, null);
+  }
+
+  public MRApp(int maps, int reduces, boolean autoComplete, String testName,
+      boolean cleanOnStart, Clock clock, boolean unregistered) {
+    this(maps, reduces, autoComplete, testName, cleanOnStart, 1, clock,
+        unregistered);
   }
 
   public MRApp(int maps, int reduces, boolean autoComplete, String testName,
@@ -132,16 +150,28 @@ public class MRApp extends MRAppMaster {
     this(maps, reduces, autoComplete, testName, cleanOnStart, 1);
   }
   
+  public MRApp(int maps, int reduces, boolean autoComplete, String testName,
+      boolean cleanOnStart, String assignedQueue) {
+    this(maps, reduces, autoComplete, testName, cleanOnStart, 1,
+        new SystemClock(), assignedQueue);
+  }
+
+  public MRApp(int maps, int reduces, boolean autoComplete, String testName,
+      boolean cleanOnStart, boolean unregistered) {
+    this(maps, reduces, autoComplete, testName, cleanOnStart, 1, unregistered);
+  }
+
   @Override
-  protected void downloadTokensAndSetupUGI(Configuration conf) {
+  protected void initJobCredentialsAndUGI(Configuration conf) {
+    // Fake a shuffle secret that normally is provided by the job client.
+    String shuffleSecret = "fake-shuffle-secret";
+    TokenCache.setShuffleSecretKey(shuffleSecret.getBytes(), getCredentials());
   }
 
   private static ApplicationAttemptId getApplicationAttemptId(
       ApplicationId applicationId, int startCount) {
     ApplicationAttemptId applicationAttemptId =
-        recordFactory.newRecordInstance(ApplicationAttemptId.class);
-    applicationAttemptId.setApplicationId(applicationId);
-    applicationAttemptId.setAttemptId(startCount);
+        ApplicationAttemptId.newInstance(applicationId, startCount);
     return applicationAttemptId;
   }
   
@@ -150,35 +180,56 @@ public class MRApp extends MRAppMaster {
     ApplicationAttemptId appAttemptId =
         getApplicationAttemptId(applicationId, startCount);
     ContainerId containerId =
-        BuilderUtils.newContainerId(appAttemptId, startCount);
+        ContainerId.newInstance(appAttemptId, startCount);
     return containerId;
   }
 
   public MRApp(int maps, int reduces, boolean autoComplete, String testName,
       boolean cleanOnStart, int startCount) {
     this(maps, reduces, autoComplete, testName, cleanOnStart, startCount,
-        new SystemClock());
+        new SystemClock(), null);
   }
 
   public MRApp(int maps, int reduces, boolean autoComplete, String testName,
-      boolean cleanOnStart, int startCount, Clock clock) {
+      boolean cleanOnStart, int startCount, boolean unregistered) {
+    this(maps, reduces, autoComplete, testName, cleanOnStart, startCount,
+        new SystemClock(), unregistered);
+  }
+
+  public MRApp(int maps, int reduces, boolean autoComplete, String testName,
+      boolean cleanOnStart, int startCount, Clock clock, boolean unregistered) {
     this(getApplicationAttemptId(applicationId, startCount), getContainerId(
       applicationId, startCount), maps, reduces, autoComplete, testName,
-      cleanOnStart, startCount, clock);
+      cleanOnStart, startCount, clock, unregistered, null);
+  }
+
+  public MRApp(int maps, int reduces, boolean autoComplete, String testName,
+      boolean cleanOnStart, int startCount, Clock clock, String assignedQueue) {
+    this(getApplicationAttemptId(applicationId, startCount), getContainerId(
+      applicationId, startCount), maps, reduces, autoComplete, testName,
+      cleanOnStart, startCount, clock, true, assignedQueue);
+  }
+
+  public MRApp(ApplicationAttemptId appAttemptId, ContainerId amContainerId,
+      int maps, int reduces, boolean autoComplete, String testName,
+      boolean cleanOnStart, int startCount, boolean unregistered) {
+    this(appAttemptId, amContainerId, maps, reduces, autoComplete, testName,
+        cleanOnStart, startCount, new SystemClock(), unregistered, null);
   }
 
   public MRApp(ApplicationAttemptId appAttemptId, ContainerId amContainerId,
       int maps, int reduces, boolean autoComplete, String testName,
       boolean cleanOnStart, int startCount) {
     this(appAttemptId, amContainerId, maps, reduces, autoComplete, testName,
-        cleanOnStart, startCount, new SystemClock());
+        cleanOnStart, startCount, new SystemClock(), true, null);
   }
 
   public MRApp(ApplicationAttemptId appAttemptId, ContainerId amContainerId,
       int maps, int reduces, boolean autoComplete, String testName,
-      boolean cleanOnStart, int startCount, Clock clock) {
-    super(appAttemptId, amContainerId, NM_HOST, NM_PORT, NM_HTTP_PORT, clock, System
-        .currentTimeMillis());
+      boolean cleanOnStart, int startCount, Clock clock, boolean unregistered,
+      String assignedQueue) {
+    super(appAttemptId, amContainerId, NM_HOST, NM_PORT, NM_HTTP_PORT, clock,
+        System.currentTimeMillis());
     this.testWorkDir = new File("target", testName);
     testAbsPath = new Path(testWorkDir.getAbsolutePath());
     LOG.info("PathUsed: " + testAbsPath);
@@ -188,56 +239,126 @@ public class MRApp extends MRAppMaster {
         FileContext.getLocalFSFileContext().delete(testAbsPath, true);
       } catch (Exception e) {
         LOG.warn("COULD NOT CLEANUP: " + testAbsPath, e);
-        throw new YarnException("could not cleanup test dir", e);
+        throw new YarnRuntimeException("could not cleanup test dir", e);
       }
     }
 
     this.maps = maps;
     this.reduces = reduces;
     this.autoComplete = autoComplete;
+    // If safeToReportTerminationToUser is set to true, we can verify whether
+    // the job can reaches the final state when MRAppMaster shuts down.
+    this.successfullyUnregistered.set(unregistered);
+    this.assignedQueue = assignedQueue;
   }
 
   @Override
-  public void init(Configuration conf) {
-    super.init(conf);
+  protected void serviceInit(Configuration conf) throws Exception {
+    try {
+      //Create the staging directory if it does not exist
+      String user = UserGroupInformation.getCurrentUser().getShortUserName();
+      Path stagingDir = MRApps.getStagingAreaDir(conf, user);
+      FileSystem fs = getFileSystem(conf);
+      fs.mkdirs(stagingDir);
+    } catch (Exception e) {
+      throw new YarnRuntimeException("Error creating staging dir", e);
+    }
+    
+    super.serviceInit(conf);
     if (this.clusterInfo != null) {
-      getContext().getClusterInfo().setMinContainerCapability(
-          this.clusterInfo.getMinContainerCapability());
       getContext().getClusterInfo().setMaxContainerCapability(
           this.clusterInfo.getMaxContainerCapability());
     } else {
-      getContext().getClusterInfo().setMinContainerCapability(
-          BuilderUtils.newResource(1024));
       getContext().getClusterInfo().setMaxContainerCapability(
-          BuilderUtils.newResource(10240));
+          Resource.newInstance(10240, 1));
     }
   }
 
   public Job submit(Configuration conf) throws Exception {
+    //TODO: fix the bug where the speculator gets events with 
+    //not-fully-constructed objects. For now, disable speculative exec
+    return submit(conf, false, false);
+  }
+
+  public Job submit(Configuration conf, boolean mapSpeculative,
+      boolean reduceSpeculative) throws Exception {
     String user = conf.get(MRJobConfig.USER_NAME, UserGroupInformation
-      .getCurrentUser().getShortUserName());
+        .getCurrentUser().getShortUserName());
     conf.set(MRJobConfig.USER_NAME, user);
     conf.set(MRJobConfig.MR_AM_STAGING_DIR, testAbsPath.toString());
     conf.setBoolean(MRJobConfig.MR_AM_CREATE_JH_INTERMEDIATE_BASE_DIR, true);
-    //TODO: fix the bug where the speculator gets events with 
-    //not-fully-constructed objects. For now, disable speculative exec
-    LOG.info("****DISABLING SPECULATIVE EXECUTION*****");
-    conf.setBoolean(MRJobConfig.MAP_SPECULATIVE, false);
-    conf.setBoolean(MRJobConfig.REDUCE_SPECULATIVE, false);
+    // TODO: fix the bug where the speculator gets events with
+    // not-fully-constructed objects. For now, disable speculative exec
+    conf.setBoolean(MRJobConfig.MAP_SPECULATIVE, mapSpeculative);
+    conf.setBoolean(MRJobConfig.REDUCE_SPECULATIVE, reduceSpeculative);
 
     init(conf);
     start();
     DefaultMetricsSystem.shutdown();
     Job job = getContext().getAllJobs().values().iterator().next();
+    if (assignedQueue != null) {
+      job.setQueueName(assignedQueue);
+    }
 
     // Write job.xml
     String jobFile = MRApps.getJobFile(conf, user,
-      TypeConverter.fromYarn(job.getID()));
+        TypeConverter.fromYarn(job.getID()));
     LOG.info("Writing job conf to " + jobFile);
     new File(jobFile).getParentFile().mkdirs();
     conf.writeXml(new FileOutputStream(jobFile));
 
     return job;
+  }
+
+  public void waitForInternalState(JobImpl job,
+      JobStateInternal finalState) throws Exception {
+    int timeoutSecs = 0;
+    JobStateInternal iState = job.getInternalState();
+    while (!finalState.equals(iState) && timeoutSecs++ < 20) {
+      System.out.println("Job Internal State is : " + iState
+          + " Waiting for Internal state : " + finalState);
+      Thread.sleep(500);
+      iState = job.getInternalState();
+    }
+    System.out.println("Task Internal State is : " + iState);
+    Assert.assertEquals("Task Internal state is not correct (timedout)",
+        finalState, iState);
+  }
+
+  public void waitForInternalState(TaskImpl task,
+      TaskStateInternal finalState) throws Exception {
+    int timeoutSecs = 0;
+    TaskReport report = task.getReport();
+    TaskStateInternal iState = task.getInternalState();
+    while (!finalState.equals(iState) && timeoutSecs++ < 20) {
+      System.out.println("Task Internal State is : " + iState
+          + " Waiting for Internal state : " + finalState + "   progress : "
+          + report.getProgress());
+      Thread.sleep(500);
+      report = task.getReport();
+      iState = task.getInternalState();
+    }
+    System.out.println("Task Internal State is : " + iState);
+    Assert.assertEquals("Task Internal state is not correct (timedout)",
+        finalState, iState);
+  }
+
+  public void waitForInternalState(TaskAttemptImpl attempt,
+      TaskAttemptStateInternal finalState) throws Exception {
+    int timeoutSecs = 0;
+    TaskAttemptReport report = attempt.getReport();
+    TaskAttemptStateInternal iState = attempt.getInternalState();
+    while (!finalState.equals(iState) && timeoutSecs++ < 20) {
+      System.out.println("TaskAttempt Internal State is : " + iState
+          + " Waiting for Internal state : " + finalState + "   progress : "
+          + report.getProgress());
+      Thread.sleep(500);
+      report = attempt.getReport();
+      iState = attempt.getInternalState();
+    }
+    System.out.println("TaskAttempt Internal State is : " + iState);
+    Assert.assertEquals("TaskAttempt Internal state is not correct (timedout)",
+        finalState, iState);
   }
 
   public void waitForState(TaskAttempt attempt, 
@@ -292,15 +413,20 @@ public class MRApp extends MRAppMaster {
   }
 
   public void waitForState(Service.STATE finalState) throws Exception {
-    int timeoutSecs = 0;
-    while (!finalState.equals(getServiceState()) && timeoutSecs++ < 20) {
-      System.out.println("MRApp State is : " + getServiceState()
-          + " Waiting for state : " + finalState);
-      Thread.sleep(500);
+    if (finalState == Service.STATE.STOPPED) {
+       Assert.assertTrue("Timeout while waiting for MRApp to stop",
+           waitForServiceToStop(20 * 1000));
+    } else {
+      int timeoutSecs = 0;
+      while (!finalState.equals(getServiceState()) && timeoutSecs++ < 20) {
+        System.out.println("MRApp State is : " + getServiceState()
+            + " Waiting for state : " + finalState);
+        Thread.sleep(500);
+      }
+      System.out.println("MRApp State is : " + getServiceState());
+      Assert.assertEquals("MRApp state is not correct (timedout)", finalState,
+          getServiceState());
     }
-    System.out.println("MRApp State is : " + getServiceState());
-    Assert.assertEquals("MRApp state is not correct (timedout)", finalState,
-        getServiceState());
   }
 
   public void verifyCompleted() {
@@ -328,18 +454,20 @@ public class MRApp extends MRAppMaster {
   }
 
   @Override
-  protected Job createJob(Configuration conf) {
+  protected Job createJob(Configuration conf, JobStateInternal forcedState, 
+      String diagnostic) {
     UserGroupInformation currentUser = null;
     try {
       currentUser = UserGroupInformation.getCurrentUser();
     } catch (IOException e) {
-      throw new YarnException(e);
+      throw new YarnRuntimeException(e);
     }
     Job newJob = new TestJob(getJobId(), getAttemptID(), conf, 
     		getDispatcher().getEventHandler(),
             getTaskAttemptListener(), getContext().getClock(),
             getCommitter(), isNewApiCommitter(),
-            currentUser.getUserName(), getContext());
+            currentUser.getUserName(), getContext(),
+            forcedState, diagnostic);
     ((AppContext) getContext()).getAllJobs().put(newJob.getID(), newJob);
 
     getDispatcher().register(JobFinishEvent.Type.class,
@@ -354,7 +482,8 @@ public class MRApp extends MRAppMaster {
   }
 
   @Override
-  protected TaskAttemptListener createTaskAttemptListener(AppContext context) {
+  protected TaskAttemptListener createTaskAttemptListener(
+      AppContext context, AMPreemptionPolicy policy) {
     return new TaskAttemptListener(){
       @Override
       public InetSocketAddress getAddress() {
@@ -431,17 +560,25 @@ public class MRApp extends MRAppMaster {
     return new MRAppContainerAllocator();
   }
 
-  protected class MRAppContainerAllocator implements ContainerAllocator {
+  protected class MRAppContainerAllocator
+      implements ContainerAllocator, RMHeartbeatHandler {
     private int containerCount;
 
      @Override
       public void handle(ContainerAllocatorEvent event) {
-        ContainerId cId = recordFactory.newRecordInstance(ContainerId.class);
-        cId.setApplicationAttemptId(getContext().getApplicationAttemptId());
-        cId.setId(containerCount++);
-        NodeId nodeId = BuilderUtils.newNodeId(NM_HOST, NM_PORT);
-        Container container = BuilderUtils.newContainer(cId, nodeId,
-            NM_HOST + ":" + NM_HTTP_PORT, null, null, null);
+        ContainerId cId =
+            ContainerId.newInstance(getContext().getApplicationAttemptId(),
+              containerCount++);
+        NodeId nodeId = NodeId.newInstance(NM_HOST, NM_PORT);
+        Resource resource = Resource.newInstance(1234, 2);
+        ContainerTokenIdentifier containerTokenIdentifier =
+            new ContainerTokenIdentifier(cId, nodeId.toString(), "user",
+            resource, System.currentTimeMillis() + 10000, 42, 42,
+            Priority.newInstance(0), 0);
+        Token containerToken = newContainerToken(nodeId, "password".getBytes(),
+              containerTokenIdentifier);
+        Container container = Container.newInstance(cId, nodeId,
+            NM_HOST + ":" + NM_HTTP_PORT, resource, null, containerToken);
         JobID id = TypeConverter.fromYarn(applicationId);
         JobId jobId = TypeConverter.toYarn(id);
         getContext().getEventHandler().handle(new JobHistoryEvent(jobId, 
@@ -456,24 +593,83 @@ public class MRApp extends MRAppMaster {
             new TaskAttemptContainerAssignedEvent(event.getAttemptID(),
                 container, null));
       }
+
+    @Override
+    public long getLastHeartbeatTime() {
+      return getContext().getClock().getTime();
+    }
+
+    @Override
+    public void runOnNextHeartbeat(Runnable callback) {
+      callback.run();
+    }
   }
 
   @Override
-  protected TaskCleaner createTaskCleaner(AppContext context) {
-    return new TaskCleaner() {
+  protected EventHandler<CommitterEvent> createCommitterEventHandler(
+      AppContext context, final OutputCommitter committer) {
+    // create an output committer with the task methods stubbed out
+    OutputCommitter stubbedCommitter = new OutputCommitter() {
       @Override
-      public void handle(TaskCleanupEvent event) {
-        //send the cleanup done event
-        getContext().getEventHandler().handle(
-            new TaskAttemptEvent(event.getAttemptID(),
-                TaskAttemptEventType.TA_CLEANUP_DONE));
+      public void setupJob(JobContext jobContext) throws IOException {
+        committer.setupJob(jobContext);
+      }
+      @SuppressWarnings("deprecation")
+      @Override
+      public void cleanupJob(JobContext jobContext) throws IOException {
+        committer.cleanupJob(jobContext);
+      }
+      @Override
+      public void commitJob(JobContext jobContext) throws IOException {
+        committer.commitJob(jobContext);
+      }
+      @Override
+      public void abortJob(JobContext jobContext, State state)
+          throws IOException {
+        committer.abortJob(jobContext, state);
+      }
+
+      @Override
+      public boolean isRecoverySupported(JobContext jobContext) throws IOException{
+        return committer.isRecoverySupported(jobContext);
+      }
+
+      @SuppressWarnings("deprecation")
+      @Override
+      public boolean isRecoverySupported() {
+        return committer.isRecoverySupported();
+      }
+
+      @Override
+      public void setupTask(TaskAttemptContext taskContext)
+          throws IOException {
+      }
+      @Override
+      public boolean needsTaskCommit(TaskAttemptContext taskContext)
+          throws IOException {
+        return false;
+      }
+      @Override
+      public void commitTask(TaskAttemptContext taskContext)
+          throws IOException {
+      }
+      @Override
+      public void abortTask(TaskAttemptContext taskContext)
+          throws IOException {
+      }
+      @Override
+      public void recoverTask(TaskAttemptContext taskContext)
+          throws IOException {
       }
     };
+
+    return new CommitterEventHandler(context, stubbedCommitter,
+        getRMHeartbeatHandler());
   }
 
   @Override
   protected ClientService createClientService(AppContext context) {
-    return new ClientService(){
+    return new MRClientService(context) {
       @Override
       public InetSocketAddress getBindAddress() {
         return NetUtils.createSocketAddr("localhost:9876");
@@ -501,18 +697,18 @@ public class MRApp extends MRAppMaster {
     //override the init transition
     private final TestInitTransition initTransition = new TestInitTransition(
         maps, reduces);
-    StateMachineFactory<JobImpl, JobState, JobEventType, JobEvent> localFactory
-        = stateMachineFactory.addTransition(JobState.NEW,
-            EnumSet.of(JobState.INITED, JobState.FAILED),
+    StateMachineFactory<JobImpl, JobStateInternal, JobEventType, JobEvent> localFactory
+        = stateMachineFactory.addTransition(JobStateInternal.NEW,
+            EnumSet.of(JobStateInternal.INITED, JobStateInternal.FAILED),
             JobEventType.JOB_INIT,
             // This is abusive.
             initTransition);
 
-    private final StateMachine<JobState, JobEventType, JobEvent>
+    private final StateMachine<JobStateInternal, JobEventType, JobEvent>
         localStateMachine;
 
     @Override
-    protected StateMachine<JobState, JobEventType, JobEvent> getStateMachine() {
+    protected StateMachine<JobStateInternal, JobEventType, JobEvent> getStateMachine() {
       return localStateMachine;
     }
 
@@ -520,14 +716,15 @@ public class MRApp extends MRAppMaster {
     public TestJob(JobId jobId, ApplicationAttemptId applicationAttemptId,
         Configuration conf, EventHandler eventHandler,
         TaskAttemptListener taskAttemptListener, Clock clock,
-        OutputCommitter committer, boolean newApiCommitter, String user, 
-        AppContext appContext) {
+        OutputCommitter committer, boolean newApiCommitter,
+        String user, AppContext appContext,
+        JobStateInternal forcedState, String diagnostic) {
       super(jobId, getApplicationAttemptId(applicationId, getStartCount()),
           conf, eventHandler, taskAttemptListener,
           new JobTokenSecretManager(), new Credentials(), clock,
           getCompletedTaskFromPreviousRun(), metrics, committer,
           newApiCommitter, user, System.currentTimeMillis(), getAllAMInfos(),
-          appContext);
+          appContext, forcedState, diagnostic);
 
       // This "this leak" is okay because the retained pointer is in an
       //  instance variable.
@@ -559,5 +756,37 @@ public class MRApp extends MRAppMaster {
     }
   }
 
+  public static Token newContainerToken(NodeId nodeId,
+      byte[] password, ContainerTokenIdentifier tokenIdentifier) {
+    // RPC layer client expects ip:port as service for tokens
+    InetSocketAddress addr =
+        NetUtils.createSocketAddrForHost(nodeId.getHost(), nodeId.getPort());
+    // NOTE: use SecurityUtil.setTokenService if this becomes a "real" token
+    Token containerToken =
+        Token.newInstance(tokenIdentifier.getBytes(),
+          ContainerTokenIdentifier.KIND.toString(), password, SecurityUtil
+            .buildTokenService(addr).toString());
+    return containerToken;
+  }
+
+
+  public static ContainerId newContainerId(int appId, int appAttemptId,
+      long timestamp, int containerId) {
+    ApplicationId applicationId = ApplicationId.newInstance(timestamp, appId);
+    ApplicationAttemptId applicationAttemptId =
+        ApplicationAttemptId.newInstance(applicationId, appAttemptId);
+    return ContainerId.newInstance(applicationAttemptId, containerId);
+  }
+
+  public static ContainerTokenIdentifier newContainerTokenIdentifier(
+      Token containerToken) throws IOException {
+    org.apache.hadoop.security.token.Token<ContainerTokenIdentifier> token =
+        new org.apache.hadoop.security.token.Token<ContainerTokenIdentifier>(
+            containerToken.getIdentifier()
+                .array(), containerToken.getPassword().array(), new Text(
+                containerToken.getKind()),
+            new Text(containerToken.getService()));
+    return token.decodeIdentifier();
+  }
 }
  

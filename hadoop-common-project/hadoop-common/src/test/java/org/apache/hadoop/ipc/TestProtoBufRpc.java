@@ -22,9 +22,12 @@ import static org.apache.hadoop.test.MetricsAsserts.assertCounterGt;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URISyntaxException;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.ipc.RpcPayloadHeader.RpcKind;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.RpcResponseHeaderProto.RpcErrorCodeProto;
 import org.apache.hadoop.ipc.protobuf.TestProtos.EchoRequestProto;
 import org.apache.hadoop.ipc.protobuf.TestProtos.EchoResponseProto;
 import org.apache.hadoop.ipc.protobuf.TestProtos.EmptyRequestProto;
@@ -69,6 +72,10 @@ public class TestProtoBufRpc {
     @Override
     public EmptyResponseProto ping(RpcController unused,
         EmptyRequestProto request) throws ServiceException {
+      // Ensure clientId is received
+      byte[] clientId = Server.getClientId();
+      Assert.assertNotNull(Server.getClientId());
+      Assert.assertEquals(16, clientId.length);
       return EmptyResponseProto.newBuilder().build();
     }
 
@@ -83,6 +90,13 @@ public class TestProtoBufRpc {
     public EmptyResponseProto error(RpcController unused,
         EmptyRequestProto request) throws ServiceException {
       throw new ServiceException("error", new RpcServerException("error"));
+    }
+    
+    @Override
+    public EmptyResponseProto error2(RpcController unused,
+        EmptyRequestProto request) throws ServiceException {
+      throw new ServiceException("error", new URISyntaxException("",
+          "testException"));
     }
   }
   
@@ -105,6 +119,7 @@ public class TestProtoBufRpc {
   @Before
   public  void setUp() throws IOException { // Setup server for both protocols
     conf = new Configuration();
+    conf.setInt(CommonConfigurationKeys.IPC_MAXIMUM_DATA_LENGTH, 1024);
     // Set RPC engine to protobuf RPC engine
     RPC.setProtocolEngine(conf, TestRpcService.class, ProtobufRpcEngine.class);
 
@@ -114,7 +129,8 @@ public class TestProtoBufRpc {
         .newReflectiveBlockingService(serverImpl);
 
     // Get RPC server for server side implementation
-    server = RPC.getServer(TestRpcService.class, service, ADDRESS, PORT, conf);
+    server = new RPC.Builder(conf).setProtocol(TestRpcService.class)
+        .setInstance(service).setBindAddress(ADDRESS).setPort(PORT).build();
     addr = NetUtils.getConnectAddress(server);
     
     // now the second protocol
@@ -122,7 +138,7 @@ public class TestProtoBufRpc {
     BlockingService service2 = TestProtobufRpc2Proto
         .newReflectiveBlockingService(server2Impl);
     
-    server.addProtocol(RpcKind.RPC_PROTOCOL_BUFFER, TestRpcService2.class,
+    server.addProtocol(RPC.RpcKind.RPC_PROTOCOL_BUFFER, TestRpcService2.class,
         service2);
     server.start();
   }
@@ -135,10 +151,8 @@ public class TestProtoBufRpc {
 
   private static TestRpcService getClient() throws IOException {
     // Set RPC engine to protobuf RPC engine
-    RPC.setProtocolEngine(conf, TestRpcService.class,
-        ProtobufRpcEngine.class);
-        return RPC.getProxy(TestRpcService.class, 0, addr,
-        conf);
+    RPC.setProtocolEngine(conf, TestRpcService.class, ProtobufRpcEngine.class);
+    return RPC.getProxy(TestRpcService.class, 0, addr, conf);
   }
   
   private static TestRpcService2 getClient2() throws IOException {
@@ -149,7 +163,7 @@ public class TestProtoBufRpc {
         conf);
   }
 
-  @Test
+  @Test (timeout=5000)
   public void testProtoBufRpc() throws Exception {
     TestRpcService client = getClient();
     testProtoBufRpc(client);
@@ -175,10 +189,13 @@ public class TestProtoBufRpc {
       RemoteException re = (RemoteException)e.getCause();
       RpcServerException rse = (RpcServerException) re
           .unwrapRemoteException(RpcServerException.class);
+      Assert.assertNotNull(rse);
+      Assert.assertTrue(re.getErrorCode().equals(
+          RpcErrorCodeProto.ERROR_RPC_SERVER));
     }
   }
   
-  @Test
+  @Test (timeout=5000)
   public void testProtoBufRpc2() throws Exception {
     TestRpcService2 client = getClient2();
     
@@ -200,5 +217,44 @@ public class TestProtoBufRpc {
     MetricsRecordBuilder rpcDetailedMetrics = 
         getMetrics(server.getRpcDetailedMetrics().name());
     assertCounterGt("Echo2NumOps", 0L, rpcDetailedMetrics);
+  }
+
+  @Test (timeout=5000)
+  public void testProtoBufRandomException() throws Exception {
+    TestRpcService client = getClient();
+    EmptyRequestProto emptyRequest = EmptyRequestProto.newBuilder().build();
+
+    try {
+      client.error2(null, emptyRequest);
+    } catch (ServiceException se) {
+      Assert.assertTrue(se.getCause() instanceof RemoteException);
+      RemoteException re = (RemoteException) se.getCause();
+      Assert.assertTrue(re.getClassName().equals(
+          URISyntaxException.class.getName()));
+      Assert.assertTrue(re.getMessage().contains("testException"));
+      Assert.assertTrue(
+          re.getErrorCode().equals(RpcErrorCodeProto.ERROR_APPLICATION));
+    }
+  }
+  
+  @Test(timeout=6000)
+  public void testExtraLongRpc() throws Exception {
+    TestRpcService2 client = getClient2();
+    final String shortString = StringUtils.repeat("X", 4);
+    EchoRequestProto echoRequest = EchoRequestProto.newBuilder()
+        .setMessage(shortString).build();
+    // short message goes through
+    EchoResponseProto echoResponse = client.echo2(null, echoRequest);
+    Assert.assertEquals(shortString, echoResponse.getMessage());
+    
+    final String longString = StringUtils.repeat("X", 4096);
+    echoRequest = EchoRequestProto.newBuilder()
+        .setMessage(longString).build();
+    try {
+      echoResponse = client.echo2(null, echoRequest);
+      Assert.fail("expected extra-long RPC to fail");
+    } catch (ServiceException se) {
+      // expected
+    }
   }
 }

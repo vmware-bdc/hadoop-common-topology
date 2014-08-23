@@ -18,11 +18,14 @@
 
 package org.apache.hadoop.io;
 
-import java.io.*;
-import java.util.*;
+import java.io.DataInput;
+import java.io.IOException;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.conf.Configurable;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.util.ReflectionUtils;
 
 /** A Comparator for {@link WritableComparable}s.
@@ -36,14 +39,21 @@ import org.apache.hadoop.util.ReflectionUtils;
  */
 @InterfaceAudience.Public
 @InterfaceStability.Stable
-public class WritableComparator implements RawComparator {
+public class WritableComparator implements RawComparator, Configurable {
 
-  private static HashMap<Class, WritableComparator> comparators =
-    new HashMap<Class, WritableComparator>(); // registry
+  private static final ConcurrentHashMap<Class, WritableComparator> comparators 
+          = new ConcurrentHashMap<Class, WritableComparator>(); // registry
+
+  private Configuration conf;
+
+  /** For backwards compatibility. **/
+  public static WritableComparator get(Class<? extends WritableComparable> c) {
+    return get(c, null);
+  }
 
   /** Get a comparator for a {@link WritableComparable} implementation. */
-  public static synchronized 
-  WritableComparator get(Class<? extends WritableComparable> c) {
+  public static WritableComparator get(
+      Class<? extends WritableComparable> c, Configuration conf) {
     WritableComparator comparator = comparators.get(c);
     if (comparator == null) {
       // force the static initializers to run
@@ -52,10 +62,22 @@ public class WritableComparator implements RawComparator {
       comparator = comparators.get(c);
       // if not, use the generic one
       if (comparator == null) {
-        comparator = new WritableComparator(c, true);
+        comparator = new WritableComparator(c, conf, true);
       }
     }
+    // Newly passed Configuration objects should be used.
+    ReflectionUtils.setConf(comparator, conf);
     return comparator;
+  }
+
+  @Override
+  public void setConf(Configuration conf) {
+    this.conf = conf;
+  }
+
+  @Override
+  public Configuration getConf() {
+    return conf;
   }
 
   /**
@@ -76,25 +98,34 @@ public class WritableComparator implements RawComparator {
   /** Register an optimized comparator for a {@link WritableComparable}
    * implementation. Comparators registered with this method must be
    * thread-safe. */
-  public static synchronized void define(Class c,
-                                         WritableComparator comparator) {
+  public static void define(Class c, WritableComparator comparator) {
     comparators.put(c, comparator);
   }
-
 
   private final Class<? extends WritableComparable> keyClass;
   private final WritableComparable key1;
   private final WritableComparable key2;
   private final DataInputBuffer buffer;
 
+  protected WritableComparator() {
+    this(null);
+  }
+
   /** Construct for a {@link WritableComparable} implementation. */
   protected WritableComparator(Class<? extends WritableComparable> keyClass) {
-    this(keyClass, false);
+    this(keyClass, null, false);
   }
 
   protected WritableComparator(Class<? extends WritableComparable> keyClass,
       boolean createInstances) {
+    this(keyClass, null, createInstances);
+  }
+
+  protected WritableComparator(Class<? extends WritableComparable> keyClass,
+                               Configuration conf,
+                               boolean createInstances) {
     this.keyClass = keyClass;
+    this.conf = (conf != null) ? conf : new Configuration();
     if (createInstances) {
       key1 = newKey();
       key2 = newKey();
@@ -110,7 +141,7 @@ public class WritableComparator implements RawComparator {
 
   /** Construct a new {@link WritableComparable} instance. */
   public WritableComparable newKey() {
-    return ReflectionUtils.newInstance(keyClass, null);
+    return ReflectionUtils.newInstance(keyClass, conf);
   }
 
   /** Optimization hook.  Override this to make SequenceFile.Sorter's scream.
@@ -120,6 +151,7 @@ public class WritableComparator implements RawComparator {
    * Writable#readFields(DataInput)}, then calls {@link
    * #compare(WritableComparable,WritableComparable)}.
    */
+  @Override
   public int compare(byte[] b1, int s1, int l1, byte[] b2, int s2, int l2) {
     try {
       buffer.reset(b1, s1, l1);                   // parse key1
@@ -144,6 +176,7 @@ public class WritableComparator implements RawComparator {
     return a.compareTo(b);
   }
 
+  @Override
   public int compare(Object a, Object b) {
     return compare((WritableComparable)a, (WritableComparable)b);
   }

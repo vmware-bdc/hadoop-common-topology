@@ -19,7 +19,9 @@ package org.apache.hadoop.hdfs.protocol;
 
 import java.util.Iterator;
 import java.util.List;
+import java.util.Random;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.ReplicaState;
@@ -75,7 +77,7 @@ public class BlockListAsLongs implements Iterable<Block> {
             + (blockIndex - finalizedSize) * LONGS_PER_UC_BLOCK;
   }
 
-  private long[] blockList;
+  private final long[] blockList;
   
   /**
    * Create block report from finalized and under construction lists of blocks.
@@ -139,7 +141,7 @@ public class BlockListAsLongs implements Iterable<Block> {
   @InterfaceStability.Evolving
   public class BlockReportIterator implements Iterator<Block> {
     private int currentBlockIndex;
-    private Block block;
+    private final Block block;
     private ReplicaState currentReplicaState;
 
     BlockReportIterator() {
@@ -148,10 +150,12 @@ public class BlockListAsLongs implements Iterable<Block> {
       this.currentReplicaState = null;
     }
 
+    @Override
     public boolean hasNext() {
       return currentBlockIndex < getNumberOfBlocks();
     }
 
+    @Override
     public Block next() {
       block.set(blockId(currentBlockIndex),
                 blockLength(currentBlockIndex),
@@ -161,6 +165,7 @@ public class BlockListAsLongs implements Iterable<Block> {
       return block;
     }
 
+    @Override
     public void remove() {
       throw new UnsupportedOperationException("Sorry. can't remove.");
     }
@@ -178,6 +183,7 @@ public class BlockListAsLongs implements Iterable<Block> {
   /**
    * Returns an iterator over blocks in the block report. 
    */
+  @Override
   public Iterator<Block> iterator() {
     return getBlockReportIterator();
   }
@@ -246,33 +252,28 @@ public class BlockListAsLongs implements Iterable<Block> {
   }
 
   /**
-   * The block-id of the indexTh block
-   * @param index - the block whose block-id is desired
-   * @return the block-id
+   * Corrupt the generation stamp of the block with the given index.
+   * Not meant to be used outside of tests.
    */
-  @Deprecated
-  public long getBlockId(final int index)  {
-    return blockId(index);
-  }
-  
-  /**
-   * The block-len of the indexTh block
-   * @param index - the block whose block-len is desired
-   * @return - the block-len
-   */
-  @Deprecated
-  public long getBlockLen(final int index)  {
-    return blockLength(index);
+  @VisibleForTesting
+  public long corruptBlockGSForTesting(final int blockIndex, Random rand) {
+    long oldGS = blockList[index2BlockId(blockIndex) + 2];
+    while (blockList[index2BlockId(blockIndex) + 2] == oldGS) {
+      blockList[index2BlockId(blockIndex) + 2] = rand.nextInt();
+    }
+    return oldGS;
   }
 
   /**
-   * The generation stamp of the indexTh block
-   * @param index - the block whose block-len is desired
-   * @return - the generation stamp
+   * Corrupt the length of the block with the given index by truncation.
+   * Not meant to be used outside of tests.
    */
-  @Deprecated
-  public long getBlockGenStamp(final int index)  {
-    return blockGenerationStamp(index);
+  @VisibleForTesting
+  public long corruptBlockLengthForTesting(final int blockIndex, Random rand) {
+    long oldLength = blockList[index2BlockId(blockIndex) + 1];
+    blockList[index2BlockId(blockIndex) + 1] =
+        rand.nextInt((int) oldLength - 1);
+    return oldLength;
   }
   
   /**

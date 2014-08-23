@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.text.NumberFormat;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -35,6 +36,11 @@ import org.apache.hadoop.util.Progressable;
 @InterfaceStability.Stable
 public abstract class FileOutputFormat<K, V> implements OutputFormat<K, V> {
 
+  @Deprecated
+  public static enum Counter { 
+    BYTES_WRITTEN
+  }
+  
   /**
    * Set whether the output of the job is compressed.
    * @param conf the {@link JobConf} to modify
@@ -152,8 +158,8 @@ public abstract class FileOutputFormat<K, V> implements OutputFormat<K, V> {
    * @param outputDir the {@link Path} of the output directory 
    * for the map-reduce job.
    */
-  
-  static void setWorkOutputPath(JobConf conf, Path outputDir) {
+  @Private
+  public static void setWorkOutputPath(JobConf conf, Path outputDir) {
     outputDir = new Path(conf.getWorkingDirectory(), outputDir);
     conf.set(JobContext.TASK_OUTPUT_DIR, outputDir.toString());
   }

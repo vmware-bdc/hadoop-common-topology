@@ -43,6 +43,7 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.util.ExitUtil;
 
 /**
  * tool to get data from NameNode or DataNode using MBeans currently the
@@ -63,7 +64,7 @@ import org.apache.hadoop.classification.InterfaceAudience;
 @InterfaceAudience.Private
 public class JMXGet {
 
-  private static final String format = "%s=%s\n";
+  private static final String format = "%s=%s%n";
   private ArrayList<ObjectName> hadoopObjectNames;
   private MBeanServerConnection mbsc;
   private String service = "NameNode", port = "", server = "localhost";
@@ -126,7 +127,8 @@ public class JMXGet {
           continue;
         }
       }
-      err("Info: key = " + key + "; val = "+ val.getClass() +":"+ val);
+      err("Info: key = " + key + "; val = " +
+          (val == null ? "null" : val.getClass()) + ":" + val);
       break;
     }
 
@@ -215,7 +217,7 @@ public class JMXGet {
   }
 
   /**
-   * @param msg
+   * @param msg error message
    */
   private static void err(String msg) {
     System.err.println(msg);
@@ -272,13 +274,7 @@ public class JMXGet {
     return commandLine;
   }
 
-  /**
-   * main
-   * 
-   * @param args
-   */
   public static void main(String[] args) {
-
     int res = -1;
 
     // parse arguments
@@ -294,7 +290,7 @@ public class JMXGet {
       // invalid arguments
       err("Invalid args");
       printUsage(opts);
-      System.exit(-1);
+      ExitUtil.terminate(-1);      
     }
 
     JMXGet jm = new JMXGet();
@@ -316,7 +312,7 @@ public class JMXGet {
 
     if (commandLine.hasOption("help")) {
       printUsage(opts);
-      System.exit(0);
+      ExitUtil.terminate(0);
     }
 
     // rest of args
@@ -341,6 +337,6 @@ public class JMXGet {
       res = -1;
     }
 
-    System.exit(res);
+    ExitUtil.terminate(res);
   }
 }

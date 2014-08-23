@@ -26,6 +26,7 @@ public enum TaskAttemptEventType {
   //Producer:Task
   TA_SCHEDULE,
   TA_RESCHEDULE,
+  TA_RECOVER,
 
   //Producer:Client, Task
   TA_KILL,
@@ -46,6 +47,7 @@ public enum TaskAttemptEventType {
   TA_FAILMSG,
   TA_UPDATE,
   TA_TIMED_OUT,
+  TA_PREEMPTED,
 
   //Producer:TaskCleaner
   TA_CLEANUP_DONE,

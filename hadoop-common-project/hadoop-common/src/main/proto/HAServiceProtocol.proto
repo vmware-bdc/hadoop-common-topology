@@ -16,15 +16,32 @@
  * limitations under the License.
  */
 
+/**
+ * These .proto interfaces are private and stable.
+ * Please see http://wiki.apache.org/hadoop/Compatibility
+ * for what changes are allowed for a *stable* .proto interface.
+ */
+
 option java_package = "org.apache.hadoop.ha.proto";
 option java_outer_classname = "HAServiceProtocolProtos";
 option java_generic_services = true;
 option java_generate_equals_and_hash = true;
+package hadoop.common;
 
 enum HAServiceStateProto {
   INITIALIZING = 0;
   ACTIVE = 1;
   STANDBY = 2;
+}
+
+enum HARequestSource {
+  REQUEST_BY_USER = 0;
+  REQUEST_BY_USER_FORCED = 1;
+  REQUEST_BY_ZKFC = 2;
+}
+
+message HAStateChangeRequestInfoProto {
+  required HARequestSource reqSource = 1;
 }
 
 /**
@@ -43,6 +60,7 @@ message MonitorHealthResponseProto {
  * void request
  */
 message TransitionToActiveRequestProto { 
+  required HAStateChangeRequestInfoProto reqInfo = 1;
 }
 
 /**
@@ -55,6 +73,7 @@ message TransitionToActiveResponseProto {
  * void request
  */
 message TransitionToStandbyRequestProto { 
+  required HAStateChangeRequestInfoProto reqInfo = 1;
 }
 
 /**

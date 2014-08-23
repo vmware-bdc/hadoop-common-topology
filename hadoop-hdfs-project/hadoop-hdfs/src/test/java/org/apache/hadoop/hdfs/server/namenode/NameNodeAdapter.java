@@ -17,27 +17,35 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import static org.mockito.Mockito.spy;
+
 import java.io.File;
 import java.io.IOException;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.apache.hadoop.fs.UnresolvedLinkException;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.MkdirOp;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem.SafeModeInfo;
 import org.apache.hadoop.hdfs.server.namenode.LeaseManager.Lease;
+import org.apache.hadoop.hdfs.server.namenode.ha.EditLogTailer;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.HeartbeatResponse;
+import org.apache.hadoop.hdfs.server.protocol.NamenodeCommand;
+import org.apache.hadoop.hdfs.server.protocol.NamenodeRegistration;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.security.AccessControlException;
 import org.mockito.Mockito;
+import org.mockito.internal.util.reflection.Whitebox;
 
 /**
  * This is a utility class to expose NameNode functionality for unit tests.
@@ -56,12 +64,12 @@ public class NameNodeAdapter {
   public static LocatedBlocks getBlockLocations(NameNode namenode,
       String src, long offset, long length) throws IOException {
     return namenode.getNamesystem().getBlockLocations(
-        src, offset, length, false, true);
+        src, offset, length, false, true, true);
   }
   
   public static HdfsFileStatus getFileInfo(NameNode namenode, String src,
       boolean resolveLink) throws AccessControlException, UnresolvedLinkException,
-        StandbyException {
+        StandbyException, IOException {
     return namenode.getNamesystem().getFileInfo(src, resolveLink);
   }
   
@@ -81,9 +89,8 @@ public class NameNodeAdapter {
     namenode.getNamesystem().enterSafeMode(resourcesLow);
   }
   
-  public static void leaveSafeMode(NameNode namenode, boolean checkForUpgrades)
-      throws SafeModeException {
-    namenode.getNamesystem().leaveSafeMode(checkForUpgrades);
+  public static void leaveSafeMode(NameNode namenode) {
+    namenode.getNamesystem().leaveSafeMode();
   }
   
   public static void abortEditLogs(NameNode nn) {
@@ -106,8 +113,9 @@ public class NameNodeAdapter {
 
   public static HeartbeatResponse sendHeartBeat(DatanodeRegistration nodeReg,
       DatanodeDescriptor dd, FSNamesystem namesystem) throws IOException {
-    return namesystem.handleHeartbeat(nodeReg, dd.getCapacity(), 
-        dd.getDfsUsed(), dd.getRemaining(), dd.getBlockPoolUsed(), 0, 0, 0);
+    return namesystem.handleHeartbeat(nodeReg,
+        BlockManagerTestUtil.getStorageReportsForDatanode(dd),
+        dd.getCacheCapacity(), dd.getCacheRemaining(), 0, 0, 0);
   }
 
   public static boolean setReplication(final FSNamesystem ns,
@@ -126,7 +134,8 @@ public class NameNodeAdapter {
   }
 
   public static String getLeaseHolderForPath(NameNode namenode, String path) {
-    return namenode.getNamesystem().leaseManager.getLeaseByPath(path).getHolder();
+    Lease l = namenode.getNamesystem().leaseManager.getLeaseByPath(path);
+    return l == null? null: l.getHolder();
   }
 
   /**
@@ -169,9 +178,27 @@ public class NameNodeAdapter {
   }
 
   public static FSImage spyOnFsImage(NameNode nn1) {
-    FSImage spy = Mockito.spy(nn1.getNamesystem().dir.fsImage);
-    nn1.getNamesystem().dir.fsImage = spy;
+    FSNamesystem fsn = nn1.getNamesystem();
+    FSImage spy = Mockito.spy(fsn.getFSImage());
+    Whitebox.setInternalState(fsn, "fsImage", spy);
     return spy;
+  }
+  
+  public static FSEditLog spyOnEditLog(NameNode nn) {
+    FSEditLog spyEditLog = spy(nn.getNamesystem().getFSImage().getEditLog());
+    nn.getFSImage().setEditLogForTesting(spyEditLog);
+    EditLogTailer tailer = nn.getNamesystem().getEditLogTailer();
+    if (tailer != null) {
+      tailer.setEditLog(spyEditLog);
+    }
+    return spyEditLog;
+  }
+  
+  public static JournalSet spyOnJournalSet(NameNode nn) {
+    FSEditLog editLog = nn.getFSImage().getEditLog();
+    JournalSet js = Mockito.spy(editLog.getJournalSet());
+    editLog.setJournalSetForTesting(js);
+    return js;
   }
   
   public static String getMkdirOpPath(FSEditLogOp op) {
@@ -180,6 +207,15 @@ public class NameNodeAdapter {
     } else {
       return null;
     }
+  }
+  
+  public static FSEditLogOp createMkdirOp(String path) {
+    MkdirOp op = MkdirOp.getInstance(new FSEditLogOp.OpInstanceCache())
+      .setPath(path)
+      .setTimestamp(0)
+      .setPermissionStatus(new PermissionStatus(
+              "testuser", "testgroup", FsPermission.getDefault()));
+    return op;
   }
   
   /**
@@ -195,18 +231,20 @@ public class NameNodeAdapter {
   }
   
   /**
-   * @return true if safemode is not running, or if safemode has already
-   * initialized the replication queues
+   * @return Replication queue initialization status
    */
   public static boolean safeModeInitializedReplQueues(NameNode nn) {
-    SafeModeInfo smi = nn.getNamesystem().getSafeModeInfoForTests();
-    if (smi == null) {
-      return true;
-    }
-    return smi.initializedReplQueues;
+    return nn.getNamesystem().isPopulatingReplQueues();
   }
   
   public static File getInProgressEditsFile(StorageDirectory sd, long startTxId) {
     return NNStorage.getInProgressEditsFile(sd, startTxId);
   }
+
+  public static NamenodeCommand startCheckpoint(NameNode nn,
+      NamenodeRegistration backupNode, NamenodeRegistration activeNamenode)
+          throws IOException {
+    return nn.getNamesystem().startCheckpoint(backupNode, activeNamenode);
+  }
 }
+

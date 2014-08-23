@@ -27,6 +27,8 @@ import java.util.Locale;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang.StringUtils;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.mapreduce.JobACL;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
@@ -34,19 +36,24 @@ import org.apache.hadoop.mapreduce.v2.api.records.TaskId;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
 import org.apache.hadoop.mapreduce.v2.app.webapp.dao.AppInfo;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
+import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.util.StringHelper;
 import org.apache.hadoop.yarn.util.Times;
 import org.apache.hadoop.yarn.webapp.Controller;
 import org.apache.hadoop.yarn.webapp.View;
+import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 
+import com.google.common.base.Joiner;
 import com.google.inject.Inject;
 
 /**
  * This class renders the various pages that the web app supports.
  */
 public class AppController extends Controller implements AMParams {
+  private static final Log LOG = LogFactory.getLog(AppController.class);
+  private static final Joiner JOINER = Joiner.on("");
+  
   protected final App app;
   
   protected AppController(App app, Configuration conf, RequestContext ctx,
@@ -54,7 +61,10 @@ public class AppController extends Controller implements AMParams {
     super(ctx);
     this.app = app;
     set(APP_ID, app.context.getApplicationID().toString());
-    set(RM_WEB, YarnConfiguration.getRMWebAppURL(conf));
+    set(RM_WEB,
+        JOINER.join(MRWebAppUtil.getYARNWebappScheme(),
+            WebAppUtils.getResolvedRMWebAppURLWithoutScheme(conf,
+                MRWebAppUtil.getYARNHttpPolicy())));
   }
 
   @Inject
@@ -220,6 +230,8 @@ public class AppController extends Controller implements AMParams {
             toString().toLowerCase(Locale.US));
         setTitle(join(tt, " Tasks for ", $(JOB_ID)));
       } catch (Exception e) {
+        LOG.error("Failed to render tasks page with task type : "
+            + $(TASK_TYPE) + " for job id : " + $(JOB_ID), e);
         badRequest(e.getMessage());
       }
     }
@@ -283,6 +295,8 @@ public class AppController extends Controller implements AMParams {
 
         render(attemptsPage());
       } catch (Exception e) {
+        LOG.error("Failed to render attempts page with task type : "
+            + $(TASK_TYPE) + " for job id : " + $(JOB_ID), e);
         badRequest(e.getMessage());
       }
     }
@@ -316,7 +330,8 @@ public class AppController extends Controller implements AMParams {
    */
   void badRequest(String s) {
     setStatus(HttpServletResponse.SC_BAD_REQUEST);
-    setTitle(join("Bad request: ", s));
+    String title = "Bad request: ";
+    setTitle((s != null) ? join(title, s) : title);
   }
 
   /**

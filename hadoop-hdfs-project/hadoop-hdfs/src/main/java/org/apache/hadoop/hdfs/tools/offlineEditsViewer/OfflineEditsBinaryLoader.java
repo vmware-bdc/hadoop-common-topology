@@ -18,12 +18,16 @@
 package org.apache.hadoop.hdfs.tools.offlineEditsViewer;
 
 import java.io.IOException;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-
+import org.apache.hadoop.hdfs.tools.offlineEditsViewer.OfflineEditsViewer;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogOp;
 
 import org.apache.hadoop.hdfs.server.namenode.EditLogInputStream;
+import org.apache.hadoop.io.IOUtils;
 
 /**
  * OfflineEditsBinaryLoader loads edits from a binary edits file
@@ -31,53 +35,74 @@ import org.apache.hadoop.hdfs.server.namenode.EditLogInputStream;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 class OfflineEditsBinaryLoader implements OfflineEditsLoader {
-  private OfflineEditsVisitor visitor;
-  private EditLogInputStream inputStream;
-  private boolean fixTxIds;
+  private final OfflineEditsVisitor visitor;
+  private final EditLogInputStream inputStream;
+  private final boolean fixTxIds;
+  private final boolean recoveryMode;
   private long nextTxId;
+  public static final Log LOG =
+      LogFactory.getLog(OfflineEditsBinaryLoader.class.getName());
   
   /**
    * Constructor
    */
   public OfflineEditsBinaryLoader(OfflineEditsVisitor visitor,
-        EditLogInputStream inputStream) {
+        EditLogInputStream inputStream, OfflineEditsViewer.Flags flags) {
     this.visitor = visitor;
     this.inputStream = inputStream;
-    this.fixTxIds = false;
+    this.fixTxIds = flags.getFixTxIds();
+    this.recoveryMode = flags.getRecoveryMode();
     this.nextTxId = -1;
   }
 
   /**
    * Loads edits file, uses visitor to process all elements
    */
+  @Override
   public void loadEdits() throws IOException {
     try {
-      visitor.start(inputStream.getVersion());
+      visitor.start(inputStream.getVersion(true));
       while (true) {
-        FSEditLogOp op = inputStream.readOp();
-        if (op == null)
-          break;
-        if (fixTxIds) {
-          if (nextTxId <= 0) {
-            nextTxId = op.getTransactionId();
+        try {
+          FSEditLogOp op = inputStream.readOp();
+          if (op == null)
+            break;
+          if (fixTxIds) {
             if (nextTxId <= 0) {
-              nextTxId = 1;
+              nextTxId = op.getTransactionId();
+              if (nextTxId <= 0) {
+                nextTxId = 1;
+              }
             }
+            op.setTransactionId(nextTxId);
+            nextTxId++;
           }
-          op.setTransactionId(nextTxId);
-          nextTxId++;
+          visitor.visitOp(op);
+        } catch (IOException e) {
+          if (!recoveryMode) {
+            // Tell the visitor to clean up, then re-throw the exception
+            LOG.error("Got IOException at position " +
+              inputStream.getPosition());
+            visitor.close(e);
+            throw e;
+          }
+          LOG.error("Got IOException while reading stream!  Resyncing.", e);
+          inputStream.resync();
+        } catch (RuntimeException e) {
+          if (!recoveryMode) {
+            // Tell the visitor to clean up, then re-throw the exception
+            LOG.error("Got RuntimeException at position " +
+              inputStream.getPosition());
+            visitor.close(e);
+            throw e;
+          }
+          LOG.error("Got RuntimeException while reading stream!  Resyncing.", e);
+          inputStream.resync();
         }
-        visitor.visitOp(op);
       }
       visitor.close(null);
-    } catch(IOException e) {
-      // Tell the visitor to clean up, then re-throw the exception
-      visitor.close(e);
-      throw e;
+    } finally {
+      IOUtils.cleanup(LOG, inputStream);
     }
-  }
-  
-  public void setFixTxIds() {
-    fixTxIds = true;
   }
 }

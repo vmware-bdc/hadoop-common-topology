@@ -21,7 +21,7 @@ import java.io.IOException;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
-import org.apache.hadoop.hdfs.server.namenode.FSImage;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 
 import com.google.common.collect.ComparisonChain;
 
@@ -47,17 +47,18 @@ public class CheckpointSignature extends StorageInfo
   }
 
   CheckpointSignature(String str) {
+    super(NodeType.NAME_NODE);
     String[] fields = str.split(FIELD_SEPARATOR);
     assert fields.length == NUM_FIELDS :
       "Must be " + NUM_FIELDS + " fields in CheckpointSignature";
     int i = 0;
-    layoutVersion = Integer.valueOf(fields[i++]);
-    namespaceID = Integer.valueOf(fields[i++]);
-    cTime = Long.valueOf(fields[i++]);
-    mostRecentCheckpointTxId  = Long.valueOf(fields[i++]);
-    curSegmentTxId  = Long.valueOf(fields[i++]);
+    layoutVersion = Integer.parseInt(fields[i++]);
+    namespaceID = Integer.parseInt(fields[i++]);
+    cTime = Long.parseLong(fields[i++]);
+    mostRecentCheckpointTxId  = Long.parseLong(fields[i++]);
+    curSegmentTxId  = Long.parseLong(fields[i++]);
     clusterID = fields[i++];
-    blockpoolID = fields[i++];
+    blockpoolID = fields[i];
   }
 
   public CheckpointSignature(StorageInfo info, String blockpoolID,
@@ -72,6 +73,7 @@ public class CheckpointSignature extends StorageInfo
    * Get the cluster id from CheckpointSignature
    * @return the cluster id
    */
+  @Override
   public String getClusterID() {
     return clusterID;
   }
@@ -101,6 +103,7 @@ public class CheckpointSignature extends StorageInfo
     this.blockpoolID = blockpoolID;
   }
   
+  @Override
   public String toString() {
     return String.valueOf(layoutVersion) + FIELD_SEPARATOR
          + String.valueOf(namespaceID) + FIELD_SEPARATOR
@@ -111,12 +114,23 @@ public class CheckpointSignature extends StorageInfo
          + blockpoolID ;
   }
 
+  boolean storageVersionMatches(StorageInfo si) throws IOException {
+    return (layoutVersion == si.layoutVersion) && (cTime == si.cTime);
+  }
+
+  boolean isSameCluster(FSImage si) {
+    return namespaceID == si.getStorage().namespaceID &&
+      clusterID.equals(si.getClusterID()) &&
+      blockpoolID.equals(si.getBlockPoolID());
+  }
+
+  boolean namespaceIdMatches(FSImage si) {
+    return namespaceID == si.getStorage().namespaceID;
+  }
+
   void validateStorageInfo(FSImage si) throws IOException {
-    if(layoutVersion != si.getStorage().layoutVersion
-       || namespaceID != si.getStorage().namespaceID 
-       || cTime != si.getStorage().cTime
-       || !clusterID.equals(si.getClusterID())
-       || !blockpoolID.equals(si.getBlockPoolID())) {
+    if (!isSameCluster(si)
+        || !storageVersionMatches(si.getStorage())) {
       throw new IOException("Inconsistent checkpoint fields.\n"
           + "LV = " + layoutVersion + " namespaceID = " + namespaceID
           + " cTime = " + cTime
@@ -133,6 +147,7 @@ public class CheckpointSignature extends StorageInfo
   //
   // Comparable interface
   //
+  @Override
   public int compareTo(CheckpointSignature o) {
     return ComparisonChain.start()
       .compare(layoutVersion, o.layoutVersion)
@@ -145,6 +160,7 @@ public class CheckpointSignature extends StorageInfo
       .result();
   }
 
+  @Override
   public boolean equals(Object o) {
     if (!(o instanceof CheckpointSignature)) {
       return false;
@@ -152,6 +168,7 @@ public class CheckpointSignature extends StorageInfo
     return compareTo((CheckpointSignature)o) == 0;
   }
 
+  @Override
   public int hashCode() {
     return layoutVersion ^ namespaceID ^
             (int)(cTime ^ mostRecentCheckpointTxId ^ curSegmentTxId)

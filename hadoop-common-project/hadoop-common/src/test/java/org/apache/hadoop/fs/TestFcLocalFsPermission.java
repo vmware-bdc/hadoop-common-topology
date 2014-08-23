@@ -26,15 +26,21 @@ import org.junit.Before;
 public class TestFcLocalFsPermission extends 
   FileContextPermissionBase {
 
+  @Override
   @Before
   public void setUp() throws Exception {
-    fc = FileContext.getLocalFSFileContext();
     super.setUp();
   }
 
+  @Override
   @After
   public void tearDown() throws Exception {
     super.tearDown();
+  }
+
+  @Override
+  protected FileContext getFileContext() throws UnsupportedFileSystemException {
+    return FileContext.getLocalFSFileContext();
   }
 
 }

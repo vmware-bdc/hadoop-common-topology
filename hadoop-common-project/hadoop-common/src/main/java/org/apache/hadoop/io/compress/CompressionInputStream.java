@@ -41,6 +41,8 @@ public abstract class CompressionInputStream extends InputStream implements Seek
   protected final InputStream in;
   protected long maxAvailableData = 0L;
 
+  private Decompressor trackedDecompressor;
+
   /**
    * Create a compression input stream that reads
    * the decompressed bytes from the given stream.
@@ -55,14 +57,20 @@ public abstract class CompressionInputStream extends InputStream implements Seek
     this.in = in;
   }
 
+  @Override
   public void close() throws IOException {
     in.close();
+    if (trackedDecompressor != null) {
+      CodecPool.returnDecompressor(trackedDecompressor);
+      trackedDecompressor = null;
+    }
   }
   
   /**
    * Read bytes from the stream.
    * Made abstract to prevent leakage to underlying stream.
    */
+  @Override
   public abstract int read(byte[] b, int off, int len) throws IOException;
 
   /**
@@ -76,6 +84,7 @@ public abstract class CompressionInputStream extends InputStream implements Seek
    *
    * @return Current position in stream as a long
    */
+  @Override
   public long getPos() throws IOException {
     if (!(in instanceof Seekable) || !(in instanceof PositionedReadable)){
       //This way of getting the current position will not work for file
@@ -95,6 +104,7 @@ public abstract class CompressionInputStream extends InputStream implements Seek
    * @throws UnsupportedOperationException
    */
 
+  @Override
   public void seek(long pos) throws UnsupportedOperationException {
     throw new UnsupportedOperationException();
   }
@@ -104,7 +114,12 @@ public abstract class CompressionInputStream extends InputStream implements Seek
    *
    * @throws UnsupportedOperationException
    */
+  @Override
   public boolean seekToNewSource(long targetPos) throws UnsupportedOperationException {
     throw new UnsupportedOperationException();
+  }
+
+  void setTrackedDecompressor(Decompressor decompressor) {
+    trackedDecompressor = decompressor;
   }
 }

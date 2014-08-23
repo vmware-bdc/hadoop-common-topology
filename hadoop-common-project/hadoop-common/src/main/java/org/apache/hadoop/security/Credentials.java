@@ -18,14 +18,18 @@
 
 package org.apache.hadoop.security;
 
+import java.io.BufferedInputStream;
 import java.io.DataInput;
 import java.io.DataInputStream;
 import java.io.DataOutput;
 import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.logging.Log;
@@ -57,12 +61,17 @@ public class Credentials implements Writable {
     new HashMap<Text, Token<? extends TokenIdentifier>>(); 
 
   /**
-   * Returns the key bytes for the alias
-   * @param alias the alias for the key
-   * @return key for this alias
+   * Create an empty credentials instance
    */
-  public byte[] getSecretKey(Text alias) {
-    return secretKeysMap.get(alias);
+  public Credentials() {
+  }
+  
+  /**
+   * Create a copy of the given credentials
+   * @param credentials to copy
+   */
+  public Credentials(Credentials credentials) {
+    this.addAll(credentials);
   }
   
   /**
@@ -100,6 +109,15 @@ public class Credentials implements Writable {
   public int numberOfTokens() {
     return tokenMap.size();
   }
+
+  /**
+   * Returns the key bytes for the alias
+   * @param alias the alias for the key
+   * @return key for this alias
+   */
+  public byte[] getSecretKey(Text alias) {
+    return secretKeysMap.get(alias);
+  }
   
   /**
    * @return number of keys in the in-memory map
@@ -116,7 +134,25 @@ public class Credentials implements Writable {
   public void addSecretKey(Text alias, byte[] key) {
     secretKeysMap.put(alias, key);
   }
- 
+
+  /**
+   * Remove the key for a given alias.
+   * @param alias the alias for the key
+   */
+  public void removeSecretKey(Text alias) {
+    secretKeysMap.remove(alias);
+  }
+
+  /**
+   * Return all the secret key entries in the in-memory map
+   */
+  public List<Text> getAllSecretKeys() {
+    List<Text> list = new java.util.ArrayList<Text>();
+    list.addAll(secretKeysMap.keySet());
+
+    return list;
+  }
+
   /**
    * Convenience method for reading a token storage file, and loading the Tokens
    * therein in the passed UGI
@@ -134,8 +170,32 @@ public class Credentials implements Writable {
       in.close();
       return credentials;
     } catch(IOException ioe) {
-      IOUtils.cleanup(LOG, in);
       throw new IOException("Exception reading " + filename, ioe);
+    } finally {
+      IOUtils.cleanup(LOG, in);
+    }
+  }
+
+  /**
+   * Convenience method for reading a token storage file, and loading the Tokens
+   * therein in the passed UGI
+   * @param filename
+   * @param conf
+   * @throws IOException
+   */
+  public static Credentials readTokenStorageFile(File filename, Configuration conf)
+      throws IOException {
+    DataInputStream in = null;
+    Credentials credentials = new Credentials();
+    try {
+      in = new DataInputStream(new BufferedInputStream(
+          new FileInputStream(filename)));
+      credentials.readTokenStorageStream(in);
+      return credentials;
+    } catch(IOException ioe) {
+      throw new IOException("Exception reading " + filename, ioe);
+    } finally {
+      IOUtils.cleanup(LOG, in);
     }
   }
   

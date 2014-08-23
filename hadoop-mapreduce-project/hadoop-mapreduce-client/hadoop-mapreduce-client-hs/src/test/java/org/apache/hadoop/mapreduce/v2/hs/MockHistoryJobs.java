@@ -1,3 +1,20 @@
+/**
+* Licensed to the Apache Software Foundation (ASF) under one
+* or more contributor license agreements.  See the NOTICE file
+* distributed with this work for additional information
+* regarding copyright ownership.  The ASF licenses this file
+* to you under the Apache License, Version 2.0 (the
+* "License"); you may not use this file except in compliance
+* with the License.  You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
 package org.apache.hadoop.mapreduce.v2.hs;
 
 import java.io.IOException;
@@ -6,6 +23,7 @@ import java.util.Map;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.mapred.TaskCompletionEvent;
 import org.apache.hadoop.mapreduce.JobACL;
 import org.apache.hadoop.mapreduce.v2.api.records.AMInfo;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
@@ -43,6 +61,14 @@ public class MockHistoryJobs extends MockJobs {
         numAttemptsPerTask);
     return split(mocked);
   }
+  
+  public static JobsPair newHistoryJobs(ApplicationId appID, int numJobsPerApp,
+      int numTasksPerJob, int numAttemptsPerTask, boolean hasFailedTasks)
+      throws IOException {
+    Map<JobId, Job> mocked = newJobs(appID, numJobsPerApp, numTasksPerJob,
+        numAttemptsPerTask, hasFailedTasks);
+    return split(mocked);
+  }
 
   private static JobsPair split(Map<JobId, Job> mocked) throws IOException {
     JobsPair ret = new JobsPair();
@@ -51,13 +77,19 @@ public class MockHistoryJobs extends MockJobs {
     for(Map.Entry<JobId, Job> entry: mocked.entrySet()) {
       JobId id = entry.getKey();
       Job j = entry.getValue();
-      ret.full.put(id, new MockCompletedJob(j));
-      JobReport report = j.getReport();
+      MockCompletedJob mockJob = new MockCompletedJob(j);
+      // use MockCompletedJob to set everything below to make sure
+      // consistent with what history server would do
+      ret.full.put(id, mockJob);
+      JobReport report = mockJob.getReport();
       JobIndexInfo info = new JobIndexInfo(report.getStartTime(), 
-          report.getFinishTime(), j.getUserName(), j.getName(), id, 
-          j.getCompletedMaps(), j.getCompletedReduces(), String.valueOf(j.getState()));
-      info.setQueueName(j.getQueueName());
+          report.getFinishTime(), mockJob.getUserName(), mockJob.getName(), id, 
+          mockJob.getCompletedMaps(), mockJob.getCompletedReduces(),
+          String.valueOf(mockJob.getState()));
+      info.setJobStartTime(report.getStartTime());
+      info.setQueueName(mockJob.getQueueName());
       ret.partial.put(id, new PartialJob(info, id));
+
     }
     return ret;
   }
@@ -73,12 +105,16 @@ public class MockHistoryJobs extends MockJobs {
 
     @Override
     public int getCompletedMaps() {
-      return job.getCompletedMaps();
+      // we always return total since this is history server
+      // and PartialJob also assumes completed - total
+      return job.getTotalMaps();
     }
 
     @Override
     public int getCompletedReduces() {
-      return job.getCompletedReduces();
+      // we always return total since this is history server
+      // and PartialJob also assumes completed - total
+      return job.getTotalReduces();
     }
 
     @Override
@@ -115,6 +151,12 @@ public class MockHistoryJobs extends MockJobs {
     public TaskAttemptCompletionEvent[] getTaskAttemptCompletionEvents(
         int fromEventId, int maxEvents) {
       return job.getTaskAttemptCompletionEvents(fromEventId, maxEvents);
+    }
+
+    @Override
+    public TaskCompletionEvent[] getMapAttemptCompletionEvents(
+        int startIndex, int maxEvents) {
+      return job.getMapAttemptCompletionEvents(startIndex, maxEvents);
     }
 
     @Override

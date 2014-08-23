@@ -20,6 +20,7 @@ package org.apache.hadoop.fs;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.Progressable;
 
 /**
@@ -45,6 +46,10 @@ public final class Options {
     }
     public static BytesPerChecksum bytesPerChecksum(short crc) {
       return new BytesPerChecksum(crc);
+    }
+    public static ChecksumParam checksumParam(
+        ChecksumOpt csumOpt) {
+      return new ChecksumParam(csumOpt);
     }
     public static Perms perms(FsPermission perm) {
       return new Perms(perm);
@@ -91,7 +96,8 @@ public final class Options {
       }
       public int getValue() { return bufferSize; }
     }
-    
+
+    /** This is not needed if ChecksumParam is specified. **/
     public static class BytesPerChecksum extends CreateOpts {
       private final int bytesPerChecksum;
       protected BytesPerChecksum(short bpc) { 
@@ -102,6 +108,14 @@ public final class Options {
         bytesPerChecksum = bpc; 
       }
       public int getValue() { return bytesPerChecksum; }
+    }
+
+    public static class ChecksumParam extends CreateOpts {
+      private final ChecksumOpt checksumOpt;
+      protected ChecksumParam(ChecksumOpt csumOpt) {
+        checksumOpt = csumOpt;
+      }
+      public ChecksumOpt getValue() { return checksumOpt; }
     }
     
     public static class Perms extends CreateOpts {
@@ -136,21 +150,25 @@ public final class Options {
     
     /**
      * Get an option of desired type
-     * @param theClass is the desired class of the opt
+     * @param clazz is the desired class of the opt
      * @param opts - not null - at least one opt must be passed
      * @return an opt from one of the opts of type theClass.
      *   returns null if there isn't any
      */
-    protected static CreateOpts getOpt(Class<? extends CreateOpts> theClass,  CreateOpts ...opts) {
+    static <T extends CreateOpts> T getOpt(Class<T> clazz, CreateOpts... opts) {
       if (opts == null) {
         throw new IllegalArgumentException("Null opt");
       }
-      CreateOpts result = null;
+      T result = null;
       for (int i = 0; i < opts.length; ++i) {
-        if (opts[i].getClass() == theClass) {
-          if (result != null) 
-            throw new IllegalArgumentException("multiple blocksize varargs");
-          result = opts[i];
+        if (opts[i].getClass() == clazz) {
+          if (result != null) {
+            throw new IllegalArgumentException("multiple opts varargs: " + clazz);
+          }
+
+          @SuppressWarnings("unchecked")
+          T t = (T)opts[i];
+          result = t;
         }
       }
       return result;
@@ -161,14 +179,16 @@ public final class Options {
      * @param opts  - the option is set into this array of opts
      * @return updated CreateOpts[] == opts + newValue
      */
-    protected static <T extends CreateOpts> CreateOpts[] setOpt(T newValue,
-        CreateOpts ...opts) {
+    static <T extends CreateOpts> CreateOpts[] setOpt(final T newValue,
+        final CreateOpts... opts) {
+      final Class<?> clazz = newValue.getClass();
       boolean alreadyInOpts = false;
       if (opts != null) {
         for (int i = 0; i < opts.length; ++i) {
-          if (opts[i].getClass() == newValue.getClass()) {
-            if (alreadyInOpts) 
-              throw new IllegalArgumentException("multiple opts varargs");
+          if (opts[i].getClass() == clazz) {
+            if (alreadyInOpts) {
+              throw new IllegalArgumentException("multiple opts varargs: " + clazz);
+            }
             alreadyInOpts = true;
             opts[i] = newValue;
           }
@@ -176,9 +196,12 @@ public final class Options {
       }
       CreateOpts[] resultOpt = opts;
       if (!alreadyInOpts) { // no newValue in opt
-        CreateOpts[] newOpts = new CreateOpts[opts.length + 1];
-        System.arraycopy(opts, 0, newOpts, 0, opts.length);
-        newOpts[opts.length] = newValue;
+        final int oldLength = opts == null? 0: opts.length;
+        CreateOpts[] newOpts = new CreateOpts[oldLength + 1];
+        if (oldLength > 0) {
+          System.arraycopy(opts, 0, newOpts, 0, oldLength);
+        }
+        newOpts[oldLength] = newValue;
         resultOpt = newOpts;
       }
       return resultOpt;
@@ -204,6 +227,97 @@ public final class Options {
 
     public byte value() {
       return code;
+    }
+  }
+
+  /**
+   * This is used in FileSystem and FileContext to specify checksum options.
+   */
+  public static class ChecksumOpt {
+    private final int crcBlockSize;
+    private final DataChecksum.Type crcType;
+
+    /**
+     * Create a uninitialized one
+     */
+    public ChecksumOpt() {
+      crcBlockSize = -1;
+      crcType = DataChecksum.Type.DEFAULT;
+    }
+
+    /**
+     * Normal ctor
+     * @param type checksum type
+     * @param size bytes per checksum
+     */
+    public ChecksumOpt(DataChecksum.Type type, int size) {
+      crcBlockSize = size;
+      crcType = type;
+    }
+
+    public int getBytesPerChecksum() {
+      return crcBlockSize;
+    }
+
+    public DataChecksum.Type getChecksumType() {
+      return crcType;
+    }
+
+    /**
+     * Create a ChecksumOpts that disables checksum
+     */
+    public static ChecksumOpt createDisabled() {
+      return new ChecksumOpt(DataChecksum.Type.NULL, -1);
+    }
+
+    /**
+     * A helper method for processing user input and default value to 
+     * create a combined checksum option. This is a bit complicated because
+     * bytesPerChecksum is kept for backward compatibility.
+     *
+     * @param defaultOpt Default checksum option
+     * @param userOpt User-specified checksum option. Ignored if null.
+     * @param userBytesPerChecksum User-specified bytesPerChecksum
+     *                Ignored if < 0.
+     */
+    public static ChecksumOpt processChecksumOpt(ChecksumOpt defaultOpt, 
+        ChecksumOpt userOpt, int userBytesPerChecksum) {
+      final boolean useDefaultType;
+      final DataChecksum.Type type;
+      if (userOpt != null 
+          && userOpt.getChecksumType() != DataChecksum.Type.DEFAULT) {
+        useDefaultType = false;
+        type = userOpt.getChecksumType();
+      } else {
+        useDefaultType = true;
+        type = defaultOpt.getChecksumType();
+      }
+
+      //  bytesPerChecksum - order of preference
+      //    user specified value in bytesPerChecksum
+      //    user specified value in checksumOpt
+      //    default.
+      if (userBytesPerChecksum > 0) {
+        return new ChecksumOpt(type, userBytesPerChecksum);
+      } else if (userOpt != null && userOpt.getBytesPerChecksum() > 0) {
+        return !useDefaultType? userOpt
+            : new ChecksumOpt(type, userOpt.getBytesPerChecksum());
+      } else {
+        return useDefaultType? defaultOpt
+            : new ChecksumOpt(type, defaultOpt.getBytesPerChecksum());
+      }
+    }
+
+    /**
+     * A helper method for processing user input and default value to 
+     * create a combined checksum option. 
+     *
+     * @param defaultOpt Default checksum option
+     * @param userOpt User-specified checksum option
+     */
+    public static ChecksumOpt processChecksumOpt(ChecksumOpt defaultOpt,
+        ChecksumOpt userOpt) {
+      return processChecksumOpt(defaultOpt, userOpt, -1);
     }
   }
 }

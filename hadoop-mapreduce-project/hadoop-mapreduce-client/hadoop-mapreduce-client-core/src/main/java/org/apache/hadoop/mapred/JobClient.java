@@ -29,6 +29,7 @@ import java.util.List;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
@@ -136,21 +137,22 @@ import org.apache.hadoop.util.ToolRunner;
 @InterfaceAudience.Public
 @InterfaceStability.Stable
 public class JobClient extends CLI {
+
+  @InterfaceAudience.Private
+  public static final String MAPREDUCE_CLIENT_RETRY_POLICY_ENABLED_KEY =
+      "mapreduce.jobclient.retry.policy.enabled";
+  @InterfaceAudience.Private
+  public static final boolean MAPREDUCE_CLIENT_RETRY_POLICY_ENABLED_DEFAULT =
+      false;
+  @InterfaceAudience.Private
+  public static final String MAPREDUCE_CLIENT_RETRY_POLICY_SPEC_KEY =
+      "mapreduce.jobclient.retry.policy.spec";
+  @InterfaceAudience.Private
+  public static final String MAPREDUCE_CLIENT_RETRY_POLICY_SPEC_DEFAULT =
+      "10000,6,60000,10"; // t1,n1,t2,n2,...
+
   public static enum TaskStatusFilter { NONE, KILLED, FAILED, SUCCEEDED, ALL }
   private TaskStatusFilter taskOutputFilter = TaskStatusFilter.FAILED; 
-  /* notes that get delegation token was called. Again this is hack for oozie 
-   * to make sure we add history server delegation tokens to the credentials
-   *  for the job. Since the api only allows one delegation token to be returned, 
-   *  we have to add this hack.
-   */
-  private boolean getDelegationTokenCalled = false;
-  /* notes the renewer that will renew the delegation token */
-  private String dtRenewer = null;
-  /* do we need a HS delegation token for this client */
-  static final String HS_DELEGATION_TOKEN_REQUIRED 
-      = "mapreduce.history.server.delegationtoken.required";
-  static final String HS_DELEGATION_TOKEN_RENEWER 
-      = "mapreduce.history.server.delegationtoken.renewer";
   
   static{
     ConfigUtil.loadResources();
@@ -171,7 +173,12 @@ public class JobClient extends CLI {
      * job completes.)
      */
     public NetworkedJob(JobStatus status, Cluster cluster) throws IOException {
-      job = Job.getInstance(cluster, status, new JobConf(status.getJobFile()));
+      this(status, cluster, new JobConf(status.getJobFile()));
+    }
+    
+    private NetworkedJob(JobStatus status, Cluster cluster, JobConf conf)
+        throws IOException {
+      this(Job.getInstance(cluster, status, conf));
     }
 
     public NetworkedJob(Job job) throws IOException {
@@ -222,11 +229,7 @@ public class JobClient extends CLI {
      * completed.
      */
     public float mapProgress() throws IOException {
-      try {
-        return job.mapProgress();
-      } catch (InterruptedException ie) {
-        throw new IOException(ie);
-      }
+      return job.mapProgress();
     }
 
     /**
@@ -234,11 +237,7 @@ public class JobClient extends CLI {
      * completed.
      */
     public float reduceProgress() throws IOException {
-      try {
-        return job.reduceProgress();
-      } catch (InterruptedException ie) {
-        throw new IOException(ie);
-      }
+      return job.reduceProgress();
     }
 
     /**
@@ -258,33 +257,21 @@ public class JobClient extends CLI {
      * completed.
      */
     public float setupProgress() throws IOException {
-      try {
-        return job.setupProgress();
-      } catch (InterruptedException ie) {
-        throw new IOException(ie);
-      }
+      return job.setupProgress();
     }
 
     /**
      * Returns immediately whether the whole job is done yet or not.
      */
     public synchronized boolean isComplete() throws IOException {
-      try {
-        return job.isComplete();
-      } catch (InterruptedException ie) {
-        throw new IOException(ie);
-      }
+      return job.isComplete();
     }
 
     /**
      * True iff job completed successfully.
      */
     public synchronized boolean isSuccessful() throws IOException {
-      try {
-        return job.isSuccessful();
-      } catch (InterruptedException ie) {
-        throw new IOException(ie);
-      }
+      return job.isSuccessful();
     }
 
     /**
@@ -315,11 +302,7 @@ public class JobClient extends CLI {
      * Tells the service to terminate the current job.
      */
     public synchronized void killJob() throws IOException {
-      try {
-        job.killJob();
-      } catch (InterruptedException ie) {
-        throw new IOException(ie);
-      }
+      job.killJob();
     }
    
     
@@ -344,14 +327,10 @@ public class JobClient extends CLI {
      */
     public synchronized void killTask(TaskAttemptID taskId,
         boolean shouldFail) throws IOException {
-      try {
-        if (shouldFail) {
-          job.failTask(taskId);
-        } else {
-          job.killTask(taskId);
-        }
-      } catch (InterruptedException ie) {
-        throw new IOException(ie);
+      if (shouldFail) {
+        job.failTask(taskId);
+      } else {
+        job.killTask(taskId);
       }
     }
 
@@ -391,16 +370,12 @@ public class JobClient extends CLI {
      * Returns the counters for this job
      */
     public Counters getCounters() throws IOException {
-      try { 
-        Counters result = null;
-        org.apache.hadoop.mapreduce.Counters temp = job.getCounters();
-        if(temp != null) {
-          result = Counters.downgrade(temp);
-        }
-        return result;
-      } catch (InterruptedException ie) {
-        throw new IOException(ie);
+      Counters result = null;
+      org.apache.hadoop.mapreduce.Counters temp = job.getCounters();
+      if(temp != null) {
+        result = Counters.downgrade(temp);
       }
+      return result;
     }
     
     @Override
@@ -441,6 +416,14 @@ public class JobClient extends CLI {
       }
     }
 
+    @Override
+    public JobStatus getJobStatus() throws IOException {
+      try {
+        return JobStatus.downgrade(job.getStatus());
+      } catch (InterruptedException ie) {
+        throw new IOException(ie);
+      }
+    }
   }
 
   /**
@@ -486,36 +469,6 @@ public class JobClient extends CLI {
     setConf(conf);
     cluster = new Cluster(conf);
     clientUgi = UserGroupInformation.getCurrentUser();
-  }
-
-  @InterfaceAudience.Private
-  public static class Renewer extends TokenRenewer {
-
-    @Override
-    public boolean handleKind(Text kind) {
-      return DelegationTokenIdentifier.MAPREDUCE_DELEGATION_KIND.equals(kind);
-    }
-
-    @SuppressWarnings("unchecked")
-    @Override
-    public long renew(Token<?> token, Configuration conf
-                      ) throws IOException, InterruptedException {
-      return new Cluster(conf).
-        renewDelegationToken((Token<DelegationTokenIdentifier>) token);
-    }
-
-    @SuppressWarnings("unchecked")
-    @Override
-    public void cancel(Token<?> token, Configuration conf
-                       ) throws IOException, InterruptedException {
-      new Cluster(conf).
-        cancelDelegationToken((Token<DelegationTokenIdentifier>) token);
-    }
-
-    @Override
-    public boolean isManaged(Token<?> token) throws IOException {
-      return true;
-    }   
   }
 
   /**
@@ -592,15 +545,15 @@ public class JobClient extends CLI {
    */
   public RunningJob submitJob(final JobConf conf) throws FileNotFoundException,
                                                   IOException {
+    return submitJobInternal(conf);
+  }
+
+  @InterfaceAudience.Private
+  public RunningJob submitJobInternal(final JobConf conf)
+      throws FileNotFoundException, IOException {
     try {
       conf.setBooleanIfUnset("mapred.mapper.new-api", false);
       conf.setBooleanIfUnset("mapred.reducer.new-api", false);
-      if (getDelegationTokenCalled) {
-        conf.setBoolean(HS_DELEGATION_TOKEN_REQUIRED, getDelegationTokenCalled);
-        getDelegationTokenCalled = false;
-        conf.set(HS_DELEGATION_TOKEN_RENEWER, dtRenewer);
-        dtRenewer = null;
-      }
       Job job = clientUgi.doAs(new PrivilegedExceptionAction<Job> () {
         @Override
         public Job run() throws IOException, ClassNotFoundException, 
@@ -644,7 +597,8 @@ public class JobClient extends CLI {
       if (job != null) {
         JobStatus status = JobStatus.downgrade(job.getStatus());
         if (status != null) {
-          return new NetworkedJob(status, cluster);
+          return new NetworkedJob(status, cluster,
+              new JobConf(job.getConfiguration()));
         } 
       }
     } catch (InterruptedException ie) {
@@ -763,19 +717,18 @@ public class JobClient extends CLI {
   public ClusterStatus getClusterStatus() throws IOException {
     try {
       return clientUgi.doAs(new PrivilegedExceptionAction<ClusterStatus>() {
-        public ClusterStatus run()  throws IOException, InterruptedException {
+        public ClusterStatus run() throws IOException, InterruptedException {
           ClusterMetrics metrics = cluster.getClusterStatus();
-          return new ClusterStatus(metrics.getTaskTrackerCount(),
-              metrics.getBlackListedTaskTrackerCount(), cluster.getTaskTrackerExpiryInterval(),
-              metrics.getOccupiedMapSlots(),
-              metrics.getOccupiedReduceSlots(), metrics.getMapSlotCapacity(),
-              metrics.getReduceSlotCapacity(),
-              cluster.getJobTrackerStatus(),
-              metrics.getDecommissionedTaskTrackerCount());
+          return new ClusterStatus(metrics.getTaskTrackerCount(), metrics
+            .getBlackListedTaskTrackerCount(), cluster
+            .getTaskTrackerExpiryInterval(), metrics.getOccupiedMapSlots(),
+            metrics.getOccupiedReduceSlots(), metrics.getMapSlotCapacity(),
+            metrics.getReduceSlotCapacity(), cluster.getJobTrackerStatus(),
+            metrics.getDecommissionedTaskTrackerCount(), metrics
+              .getGrayListedTaskTrackerCount());
         }
       });
-    }
-      catch (InterruptedException ie) {
+    } catch (InterruptedException ie) {
       throw new IOException(ie);
     }
   }
@@ -1031,6 +984,50 @@ public class JobClient extends CLI {
     }
   }
 
+  /**
+   * Checks if the job directory is clean and has all the required components
+   * for (re) starting the job
+   */
+  public static boolean isJobDirValid(Path jobDirPath, FileSystem fs)
+      throws IOException {
+    FileStatus[] contents = fs.listStatus(jobDirPath);
+    int matchCount = 0;
+    if (contents != null && contents.length >= 2) {
+      for (FileStatus status : contents) {
+        if ("job.xml".equals(status.getPath().getName())) {
+          ++matchCount;
+        }
+        if ("job.split".equals(status.getPath().getName())) {
+          ++matchCount;
+        }
+      }
+      if (matchCount == 2) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Fetch the staging area directory for the application
+   * 
+   * @return path to staging area directory
+   * @throws IOException
+   */
+  public Path getStagingAreaDir() throws IOException {
+    try {
+      return clientUgi.doAs(new PrivilegedExceptionAction<Path>() {
+        @Override
+        public Path run() throws IOException, InterruptedException {
+          return cluster.getStagingAreaDir();
+        }
+      });
+    } catch (InterruptedException ie) {
+      // throw RuntimeException instead for compatibility reasons
+      throw new RuntimeException(ie);
+    }
+  }
+
   private JobQueueInfo getJobQueueInfo(QueueInfo queue) {
     JobQueueInfo ret = new JobQueueInfo(queue);
     // make sure to convert any children
@@ -1201,8 +1198,6 @@ public class JobClient extends CLI {
    */
   public Token<DelegationTokenIdentifier> 
     getDelegationToken(final Text renewer) throws IOException, InterruptedException {
-    getDelegationTokenCalled = true;
-    dtRenewer = renewer.toString();
     return clientUgi.doAs(new 
         PrivilegedExceptionAction<Token<DelegationTokenIdentifier>>() {
       public Token<DelegationTokenIdentifier> run() throws IOException, 

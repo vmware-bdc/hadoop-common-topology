@@ -50,7 +50,7 @@ public class NameNodeResourceChecker {
   private static final Log LOG = LogFactory.getLog(NameNodeResourceChecker.class.getName());
 
   // Space (in bytes) reserved per volume.
-  private long duReserved;
+  private final long duReserved;
 
   private final Configuration conf;
   private Map<String, CheckedVolume> volumes;
@@ -119,6 +119,7 @@ public class NameNodeResourceChecker {
     Collection<URI> localEditDirs = Collections2.filter(
         FSNamesystem.getNamespaceEditsDirs(conf),
         new Predicate<URI>() {
+          @Override
           public boolean apply(URI input) {
             if (input.getScheme().equals(NNStorage.LOCAL_URI_SCHEME)) {
               return true;
@@ -163,7 +164,7 @@ public class NameNodeResourceChecker {
     
     CheckedVolume newVolume = new CheckedVolume(dir, required);
     CheckedVolume volume = volumes.get(newVolume.getVolume());
-    if (volume == null || (volume != null && !volume.isRequired())) {
+    if (volume == null || !volume.isRequired()) {
       volumes.put(newVolume.getVolume(), newVolume);
     }
   }

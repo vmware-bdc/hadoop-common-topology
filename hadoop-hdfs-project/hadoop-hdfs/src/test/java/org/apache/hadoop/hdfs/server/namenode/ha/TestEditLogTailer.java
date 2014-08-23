@@ -22,8 +22,6 @@ import static org.junit.Assert.assertTrue;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
-import java.util.List;
-import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
@@ -126,8 +124,8 @@ public class TestEditLogTailer {
     // Have to specify IPC ports so the NNs can talk to each other.
     MiniDFSNNTopology topology = new MiniDFSNNTopology()
       .addNameservice(new MiniDFSNNTopology.NSConf("ns1")
-        .addNN(new MiniDFSNNTopology.NNConf("nn1").setIpcPort(10001))
-        .addNN(new MiniDFSNNTopology.NNConf("nn2").setIpcPort(10002)));
+        .addNN(new MiniDFSNNTopology.NNConf("nn1").setIpcPort(10031))
+        .addNN(new MiniDFSNNTopology.NNConf("nn2").setIpcPort(10032)));
 
     MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
       .nnTopology(topology)

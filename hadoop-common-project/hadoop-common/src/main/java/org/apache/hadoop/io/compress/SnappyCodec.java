@@ -24,21 +24,16 @@ import java.io.OutputStream;
 
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.io.compress.snappy.LoadSnappy;
 import org.apache.hadoop.io.compress.snappy.SnappyCompressor;
 import org.apache.hadoop.io.compress.snappy.SnappyDecompressor;
+import org.apache.hadoop.io.compress.snappy.SnappyDecompressor.SnappyDirectDecompressor;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.util.NativeCodeLoader;
 
 /**
  * This class creates snappy compressors/decompressors.
  */
-public class SnappyCodec implements Configurable, CompressionCodec {
-
-  static {
-    LoadSnappy.isLoaded();
-  }
-
+public class SnappyCodec implements Configurable, CompressionCodec, DirectDecompressionCodec {
   Configuration conf;
 
   /**
@@ -63,11 +58,30 @@ public class SnappyCodec implements Configurable, CompressionCodec {
 
   /**
    * Are the native snappy libraries loaded & initialized?
-   *
-   * @return true if loaded & initialized, otherwise false
    */
+  public static void checkNativeCodeLoaded() {
+      if (!NativeCodeLoader.buildSupportsSnappy()) {
+        throw new RuntimeException("native snappy library not available: " +
+            "this version of libhadoop was built without " +
+            "snappy support.");
+      }
+      if (!SnappyCompressor.isNativeCodeLoaded()) {
+        throw new RuntimeException("native snappy library not available: " +
+            "SnappyCompressor has not been loaded.");
+      }
+      if (!SnappyDecompressor.isNativeCodeLoaded()) {
+        throw new RuntimeException("native snappy library not available: " +
+            "SnappyDecompressor has not been loaded.");
+      }
+  }
+  
   public static boolean isNativeCodeLoaded() {
-    return LoadSnappy.isLoaded() && NativeCodeLoader.isNativeCodeLoaded();
+    return SnappyCompressor.isNativeCodeLoaded() && 
+        SnappyDecompressor.isNativeCodeLoaded();
+  }
+
+  public static String getLibraryName() {
+    return SnappyCompressor.getLibraryName();
   }
 
   /**
@@ -81,7 +95,8 @@ public class SnappyCodec implements Configurable, CompressionCodec {
   @Override
   public CompressionOutputStream createOutputStream(OutputStream out)
       throws IOException {
-    return createOutputStream(out, createCompressor());
+    return CompressionCodec.Util.
+        createOutputStreamWithCodecPool(this, conf, out);
   }
 
   /**
@@ -97,9 +112,7 @@ public class SnappyCodec implements Configurable, CompressionCodec {
   public CompressionOutputStream createOutputStream(OutputStream out,
                                                     Compressor compressor)
       throws IOException {
-    if (!isNativeCodeLoaded()) {
-      throw new RuntimeException("native snappy library not available");
-    }
+    checkNativeCodeLoaded();
     int bufferSize = conf.getInt(
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_SNAPPY_BUFFERSIZE_KEY,
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_SNAPPY_BUFFERSIZE_DEFAULT);
@@ -117,10 +130,7 @@ public class SnappyCodec implements Configurable, CompressionCodec {
    */
   @Override
   public Class<? extends Compressor> getCompressorType() {
-    if (!isNativeCodeLoaded()) {
-      throw new RuntimeException("native snappy library not available");
-    }
-
+    checkNativeCodeLoaded();
     return SnappyCompressor.class;
   }
 
@@ -131,9 +141,7 @@ public class SnappyCodec implements Configurable, CompressionCodec {
    */
   @Override
   public Compressor createCompressor() {
-    if (!isNativeCodeLoaded()) {
-      throw new RuntimeException("native snappy library not available");
-    }
+    checkNativeCodeLoaded();
     int bufferSize = conf.getInt(
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_SNAPPY_BUFFERSIZE_KEY,
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_SNAPPY_BUFFERSIZE_DEFAULT);
@@ -151,7 +159,8 @@ public class SnappyCodec implements Configurable, CompressionCodec {
   @Override
   public CompressionInputStream createInputStream(InputStream in)
       throws IOException {
-    return createInputStream(in, createDecompressor());
+    return CompressionCodec.Util.
+        createInputStreamWithCodecPool(this, conf, in);
   }
 
   /**
@@ -167,10 +176,7 @@ public class SnappyCodec implements Configurable, CompressionCodec {
   public CompressionInputStream createInputStream(InputStream in,
                                                   Decompressor decompressor)
       throws IOException {
-    if (!isNativeCodeLoaded()) {
-      throw new RuntimeException("native snappy library not available");
-    }
-
+    checkNativeCodeLoaded();
     return new BlockDecompressorStream(in, decompressor, conf.getInt(
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_SNAPPY_BUFFERSIZE_KEY,
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_SNAPPY_BUFFERSIZE_DEFAULT));
@@ -183,10 +189,7 @@ public class SnappyCodec implements Configurable, CompressionCodec {
    */
   @Override
   public Class<? extends Decompressor> getDecompressorType() {
-    if (!isNativeCodeLoaded()) {
-      throw new RuntimeException("native snappy library not available");
-    }
-
+    checkNativeCodeLoaded();
     return SnappyDecompressor.class;
   }
 
@@ -197,13 +200,19 @@ public class SnappyCodec implements Configurable, CompressionCodec {
    */
   @Override
   public Decompressor createDecompressor() {
-    if (!isNativeCodeLoaded()) {
-      throw new RuntimeException("native snappy library not available");
-    }
+    checkNativeCodeLoaded();
     int bufferSize = conf.getInt(
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_SNAPPY_BUFFERSIZE_KEY,
         CommonConfigurationKeys.IO_COMPRESSION_CODEC_SNAPPY_BUFFERSIZE_DEFAULT);
     return new SnappyDecompressor(bufferSize);
+  }
+  
+  /**
+   * {@inheritDoc}
+   */
+  @Override
+  public DirectDecompressor createDirectDecompressor() {
+    return isNativeCodeLoaded() ? new SnappyDirectDecompressor() : null;
   }
 
   /**

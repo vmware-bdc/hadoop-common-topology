@@ -23,7 +23,9 @@ import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.mapred.TaskCompletionEvent;
 import org.apache.hadoop.mapreduce.Counters;
 import org.apache.hadoop.mapreduce.JobACL;
 import org.apache.hadoop.mapreduce.v2.api.records.AMInfo;
@@ -51,7 +53,8 @@ public class PartialJob implements org.apache.hadoop.mapreduce.v2.app.job.Job {
     this.jobIndexInfo = jobIndexInfo;
     this.jobId = jobId;
     jobReport = RecordFactoryProvider.getRecordFactory(null).newRecordInstance(JobReport.class);
-    jobReport.setStartTime(jobIndexInfo.getSubmitTime());
+    jobReport.setSubmitTime(jobIndexInfo.getSubmitTime());
+    jobReport.setStartTime(jobIndexInfo.getJobStartTime());
     jobReport.setFinishTime(jobIndexInfo.getFinishTime());
     jobReport.setJobState(getState());
   }
@@ -153,6 +156,12 @@ public class PartialJob implements org.apache.hadoop.mapreduce.v2.app.job.Job {
   }
 
   @Override
+  public TaskCompletionEvent[] getMapAttemptCompletionEvents(
+      int startIndex, int maxEvents) {
+    return null;
+  }
+
+  @Override
   public boolean checkAccess(UserGroupInformation callerUGI, JobACL jobOperation) {
     return true;
   }
@@ -166,6 +175,11 @@ public class PartialJob implements org.apache.hadoop.mapreduce.v2.app.job.Job {
   public Path getConfFile() {
     throw new IllegalStateException("Not implemented yet");
   }
+  
+  @Override
+  public Configuration loadConfFile() {
+    throw new IllegalStateException("Not implemented yet");
+  }
 
   @Override
   public Map<JobACL, AccessControlList> getJobACLs() {
@@ -175,6 +189,11 @@ public class PartialJob implements org.apache.hadoop.mapreduce.v2.app.job.Job {
   @Override
   public List<AMInfo> getAMInfos() {
     return null;
+  }
+  
+  @Override
+  public void setQueueName(String queueName) {
+    throw new UnsupportedOperationException("Can't set job's queue name in history");
   }
 
 }

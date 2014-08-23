@@ -16,23 +16,34 @@
  * limitations under the License.
  */
 package org.apache.hadoop.hdfs;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
+import java.io.File;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.MiniDFSCluster.DataNodeProperties;
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.TestInterDatanodeProtocol;
 import org.apache.hadoop.hdfs.server.namenode.LeaseManager;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.junit.Test;
 
-public class TestLeaseRecovery extends junit.framework.TestCase {
+public class TestLeaseRecovery {
   static final int BLOCK_SIZE = 1024;
   static final short REPLICATION_NUM = (short)3;
   private static final long LEASE_PERIOD = 300L;
@@ -66,6 +77,7 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
    * It randomly truncates the replica of the last block stored in each datanode.
    * Finally, it triggers block synchronization to synchronize all stored block.
    */
+  @Test
   public void testBlockSynchronization() throws Exception {
     final int ORG_FILE_SIZE = 3000; 
     Configuration conf = new HdfsConfiguration();
@@ -77,7 +89,7 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
       cluster.waitActive();
 
       //create a file
-      DistributedFileSystem dfs = (DistributedFileSystem)cluster.getFileSystem();
+      DistributedFileSystem dfs = cluster.getFileSystem();
       String filestr = "/foo";
       Path filepath = new Path(filestr);
       DFSTestUtil.createFile(dfs, filepath, ORG_FILE_SIZE, REPLICATION_NUM, 0L);
@@ -129,17 +141,70 @@ public class TestLeaseRecovery extends junit.framework.TestCase {
       filestr = "/foo.safemode";
       filepath = new Path(filestr);
       dfs.create(filepath, (short)1);
-      cluster.getNameNodeRpc().setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_ENTER);
+      cluster.getNameNodeRpc().setSafeMode(
+          HdfsConstants.SafeModeAction.SAFEMODE_ENTER, false);
       assertTrue(dfs.dfs.exists(filestr));
       DFSTestUtil.waitReplication(dfs, filepath, (short)1);
       waitLeaseRecovery(cluster);
       // verify that we still cannot recover the lease
       LeaseManager lm = NameNodeAdapter.getLeaseManager(cluster.getNamesystem());
       assertTrue("Found " + lm.countLease() + " lease, expected 1", lm.countLease() == 1);
-      cluster.getNameNodeRpc().setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_LEAVE);
+      cluster.getNameNodeRpc().setSafeMode(
+          HdfsConstants.SafeModeAction.SAFEMODE_LEAVE, false);
     }
     finally {
       if (cluster != null) {cluster.shutdown();}
     }
+  }
+
+  /**
+   * Block Recovery when the meta file not having crcs for all chunks in block
+   * file
+   */
+  @Test
+  public void testBlockRecoveryWithLessMetafile() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(DFSConfigKeys.DFS_BLOCK_LOCAL_PATH_ACCESS_USER_KEY,
+        UserGroupInformation.getCurrentUser().getShortUserName());
+    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1)
+        .build();
+    Path file = new Path("/testRecoveryFile");
+    DistributedFileSystem dfs = cluster.getFileSystem();
+    FSDataOutputStream out = dfs.create(file);
+    int count = 0;
+    while (count < 2 * 1024 * 1024) {
+      out.writeBytes("Data");
+      count += 4;
+    }
+    out.hsync();
+    // abort the original stream
+    ((DFSOutputStream) out.getWrappedStream()).abort();
+
+    LocatedBlocks locations = cluster.getNameNodeRpc().getBlockLocations(
+        file.toString(), 0, count);
+    ExtendedBlock block = locations.get(0).getBlock();
+    DataNode dn = cluster.getDataNodes().get(0);
+    BlockLocalPathInfo localPathInfo = dn.getBlockLocalPathInfo(block, null);
+    File metafile = new File(localPathInfo.getMetaPath());
+    assertTrue(metafile.exists());
+
+    // reduce the block meta file size
+    RandomAccessFile raf = new RandomAccessFile(metafile, "rw");
+    raf.setLength(metafile.length() - 20);
+    raf.close();
+
+    // restart DN to make replica to RWR
+    DataNodeProperties dnProp = cluster.stopDataNode(0);
+    cluster.restartDataNode(dnProp, true);
+
+    // try to recover the lease
+    DistributedFileSystem newdfs = (DistributedFileSystem) FileSystem
+        .newInstance(cluster.getConfiguration(0));
+    count = 0;
+    while (++count < 10 && !newdfs.recoverLease(file)) {
+      Thread.sleep(1000);
+    }
+    assertTrue("File should be closed", newdfs.recoverLease(file));
+
   }
 }

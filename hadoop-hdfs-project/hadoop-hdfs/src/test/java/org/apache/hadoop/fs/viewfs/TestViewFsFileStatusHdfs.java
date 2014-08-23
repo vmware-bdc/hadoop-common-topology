@@ -23,6 +23,9 @@ package org.apache.hadoop.fs.viewfs;
  * Since viewfs has overlayed ViewFsFileStatus, we ran into
  * serialization problems. THis test is test the fix.
  */
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -40,20 +43,19 @@ import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.security.UserGroupInformation;
-
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
-import static org.junit.Assert.*;
 
 public class TestViewFsFileStatusHdfs {
   
   static final String testfilename = "/tmp/testFileStatusSerialziation";
   static final String someFile = "/hdfstmp/someFileForTestGetFileChecksum";
 
+  private static final FileSystemTestHelper fileSystemTestHelper = new FileSystemTestHelper();
   private static MiniDFSCluster cluster;
   private static Path defaultWorkingDirectory;
-  private static Configuration CONF = new Configuration();
+  private static final Configuration CONF = new Configuration();
   private static FileSystem fHdfs;
   private static FileSystem vfs;
   
@@ -78,7 +80,7 @@ public class TestViewFsFileStatusHdfs {
   @Test
   public void testFileStatusSerialziation()
       throws IOException, URISyntaxException {
-   long len = FileSystemTestHelper.createFile(fHdfs, testfilename);
+   long len = fileSystemTestHelper.createFile(fHdfs, testfilename);
     FileStatus stat = vfs.getFileStatus(new Path(testfilename));
     assertEquals(len, stat.getLen());
     // check serialization/deserialization
@@ -94,8 +96,8 @@ public class TestViewFsFileStatusHdfs {
   @Test
   public void testGetFileChecksum() throws IOException, URISyntaxException {
     // Create two different files in HDFS
-    FileSystemTestHelper.createFile(fHdfs, someFile);
-    FileSystemTestHelper.createFile(fHdfs, FileSystemTestHelper
+    fileSystemTestHelper.createFile(fHdfs, someFile);
+    fileSystemTestHelper.createFile(fHdfs, fileSystemTestHelper
       .getTestRootPath(fHdfs, someFile + "other"), 1, 512);
     // Get checksum through ViewFS
     FileChecksum viewFSCheckSum = vfs.getFileChecksum(

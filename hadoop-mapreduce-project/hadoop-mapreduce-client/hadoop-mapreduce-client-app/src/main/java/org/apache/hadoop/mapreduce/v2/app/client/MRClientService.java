@@ -18,21 +18,23 @@
 
 package org.apache.hadoop.mapreduce.v2.app.client;
 
-import java.net.InetAddress;
+import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
 import java.util.Arrays;
 import java.util.Collection;
 
-import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.http.HttpConfig.Policy;
 import org.apache.hadoop.ipc.Server;
+import org.apache.hadoop.mapreduce.JobACL;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.v2.api.MRClientProtocol;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.CancelDelegationTokenRequest;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.CancelDelegationTokenResponse;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.FailTaskAttemptRequest;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.FailTaskAttemptResponse;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.GetCountersRequest;
@@ -57,6 +59,8 @@ import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskAttemptRequest
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskAttemptResponse;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskRequest;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskResponse;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.RenewDelegationTokenRequest;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.RenewDelegationTokenResponse;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskId;
@@ -76,18 +80,13 @@ import org.apache.hadoop.mapreduce.v2.app.job.event.TaskEventType;
 import org.apache.hadoop.mapreduce.v2.app.security.authorize.MRAMPolicyProvider;
 import org.apache.hadoop.mapreduce.v2.app.webapp.AMWebApp;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.PolicyProvider;
-import org.apache.hadoop.yarn.YarnException;
-import org.apache.hadoop.yarn.api.ApplicationConstants;
-import org.apache.hadoop.yarn.exceptions.YarnRemoteException;
+import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
-import org.apache.hadoop.yarn.ipc.RPCUtil;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
-import org.apache.hadoop.yarn.security.client.ClientToAMSecretManager;
-import org.apache.hadoop.yarn.security.client.ClientTokenIdentifier;
-import org.apache.hadoop.yarn.service.AbstractService;
 import org.apache.hadoop.yarn.webapp.WebApp;
 import org.apache.hadoop.yarn.webapp.WebApps;
 
@@ -96,8 +95,7 @@ import org.apache.hadoop.yarn.webapp.WebApps;
  * jobclient (user facing).
  *
  */
-public class MRClientService extends AbstractService 
-    implements ClientService {
+public class MRClientService extends AbstractService implements ClientService {
 
   static final Log LOG = LogFactory.getLog(MRClientService.class);
   
@@ -108,38 +106,22 @@ public class MRClientService extends AbstractService
   private AppContext appContext;
 
   public MRClientService(AppContext appContext) {
-    super("MRClientService");
+    super(MRClientService.class.getName());
     this.appContext = appContext;
     this.protocolHandler = new MRClientProtocolHandler();
   }
 
-  public void start() {
+  protected void serviceStart() throws Exception {
     Configuration conf = getConfig();
     YarnRPC rpc = YarnRPC.create(conf);
-    InetSocketAddress address = NetUtils.createSocketAddr("0.0.0.0:0");
-    InetAddress hostNameResolved = null;
-    try {
-      hostNameResolved = InetAddress.getLocalHost();
-    } catch (UnknownHostException e) {
-      throw new YarnException(e);
-    }
+    InetSocketAddress address = new InetSocketAddress(0);
 
-    ClientToAMSecretManager secretManager = null;
-    if (UserGroupInformation.isSecurityEnabled()) {
-      secretManager = new ClientToAMSecretManager();
-      String secretKeyStr =
-          System
-              .getenv(ApplicationConstants.APPLICATION_CLIENT_SECRET_ENV_NAME);
-      byte[] bytes = Base64.decodeBase64(secretKeyStr);
-      ClientTokenIdentifier identifier = new ClientTokenIdentifier(
-          this.appContext.getApplicationID());
-      secretManager.setMasterKey(identifier, bytes);
-    }
     server =
         rpc.getServer(MRClientProtocol.class, protocolHandler, address,
-            conf, secretManager,
+            conf, appContext.getClientToAMTokenSecretManager(),
             conf.getInt(MRJobConfig.MR_AM_JOB_CLIENT_THREAD_COUNT, 
-                MRJobConfig.DEFAULT_MR_AM_JOB_CLIENT_THREAD_COUNT));
+                MRJobConfig.DEFAULT_MR_AM_JOB_CLIENT_THREAD_COUNT),
+                MRJobConfig.MR_AM_JOB_CLIENT_PORT_RANGE);
     
     // Enable service authorization?
     if (conf.getBoolean(
@@ -149,17 +131,21 @@ public class MRClientService extends AbstractService
     }
 
     server.start();
-    this.bindAddress =
-        NetUtils.createSocketAddr(hostNameResolved.getHostAddress()
-            + ":" + server.getPort());
+    this.bindAddress = NetUtils.createSocketAddrForHost(appContext.getNMHostname(),
+        server.getListenerAddress().getPort());
     LOG.info("Instantiated MRClientService at " + this.bindAddress);
     try {
-      webApp = WebApps.$for("mapreduce", AppContext.class, appContext, "ws").with(conf).
-          start(new AMWebApp());
+      // Explicitly disabling SSL for map reduce task as we can't allow MR users
+      // to gain access to keystore file for opening SSL listener. We can trust
+      // RM/NM to issue SSL certificates but definitely not MR-AM as it is
+      // running in user-land.
+      webApp =
+          WebApps.$for("mapreduce", AppContext.class, appContext, "ws")
+            .withHttpPolicy(conf, Policy.HTTP_ONLY).start(new AMWebApp());
     } catch (Exception e) {
       LOG.error("Webapps failed to start. Ignoring for now:", e);
     }
-    super.start();
+    super.serviceStart();
   }
 
   void refreshServiceAcls(Configuration configuration, 
@@ -167,12 +153,15 @@ public class MRClientService extends AbstractService
     this.server.refreshServiceAcl(configuration, policyProvider);
   }
 
-  public void stop() {
-    server.stop();
+  @Override
+  protected void serviceStop() throws Exception {
+    if (server != null) {
+      server.stop();
+    }
     if (webApp != null) {
       webApp.stop();
     }
-    super.stop();
+    super.serviceStop();
   }
 
   @Override
@@ -190,37 +179,48 @@ public class MRClientService extends AbstractService
     private RecordFactory recordFactory = 
       RecordFactoryProvider.getRecordFactory(null);
 
-    private Job verifyAndGetJob(JobId jobID, 
-        boolean modifyAccess) throws YarnRemoteException {
+    @Override
+    public InetSocketAddress getConnectAddress() {
+      return getBindAddress();
+    }
+    
+    private Job verifyAndGetJob(JobId jobID,
+        JobACL accessType) throws IOException {
       Job job = appContext.getJob(jobID);
+      UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
+      if (!job.checkAccess(ugi, accessType)) {
+        throw new AccessControlException("User " + ugi.getShortUserName()
+            + " cannot perform operation " + accessType.name() + " on "
+            + jobID);
+      }
       return job;
     }
  
     private Task verifyAndGetTask(TaskId taskID, 
-        boolean modifyAccess) throws YarnRemoteException {
+        JobACL accessType) throws IOException {
       Task task = verifyAndGetJob(taskID.getJobId(), 
-          modifyAccess).getTask(taskID);
+          accessType).getTask(taskID);
       if (task == null) {
-        throw RPCUtil.getRemoteException("Unknown Task " + taskID);
+        throw new IOException("Unknown Task " + taskID);
       }
       return task;
     }
 
     private TaskAttempt verifyAndGetAttempt(TaskAttemptId attemptID, 
-        boolean modifyAccess) throws YarnRemoteException {
+        JobACL accessType) throws IOException {
       TaskAttempt attempt = verifyAndGetTask(attemptID.getTaskId(), 
-          modifyAccess).getAttempt(attemptID);
+          accessType).getAttempt(attemptID);
       if (attempt == null) {
-        throw RPCUtil.getRemoteException("Unknown TaskAttempt " + attemptID);
+        throw new IOException("Unknown TaskAttempt " + attemptID);
       }
       return attempt;
     }
 
     @Override
     public GetCountersResponse getCounters(GetCountersRequest request) 
-      throws YarnRemoteException {
+      throws IOException {
       JobId jobId = request.getJobId();
-      Job job = verifyAndGetJob(jobId, false);
+      Job job = verifyAndGetJob(jobId, JobACL.VIEW_JOB);
       GetCountersResponse response =
         recordFactory.newRecordInstance(GetCountersResponse.class);
       response.setCounters(TypeConverter.toYarn(job.getAllCounters()));
@@ -229,9 +229,9 @@ public class MRClientService extends AbstractService
     
     @Override
     public GetJobReportResponse getJobReport(GetJobReportRequest request) 
-      throws YarnRemoteException {
+      throws IOException {
       JobId jobId = request.getJobId();
-      Job job = verifyAndGetJob(jobId, false);
+      Job job = verifyAndGetJob(jobId, JobACL.VIEW_JOB);
       GetJobReportResponse response = 
         recordFactory.newRecordInstance(GetJobReportResponse.class);
       if (job != null) {
@@ -245,33 +245,34 @@ public class MRClientService extends AbstractService
 
     @Override
     public GetTaskAttemptReportResponse getTaskAttemptReport(
-        GetTaskAttemptReportRequest request) throws YarnRemoteException {
+        GetTaskAttemptReportRequest request) throws IOException {
       TaskAttemptId taskAttemptId = request.getTaskAttemptId();
       GetTaskAttemptReportResponse response =
         recordFactory.newRecordInstance(GetTaskAttemptReportResponse.class);
       response.setTaskAttemptReport(
-          verifyAndGetAttempt(taskAttemptId, false).getReport());
+          verifyAndGetAttempt(taskAttemptId, JobACL.VIEW_JOB).getReport());
       return response;
     }
 
     @Override
     public GetTaskReportResponse getTaskReport(GetTaskReportRequest request) 
-      throws YarnRemoteException {
+      throws IOException {
       TaskId taskId = request.getTaskId();
       GetTaskReportResponse response = 
         recordFactory.newRecordInstance(GetTaskReportResponse.class);
-      response.setTaskReport(verifyAndGetTask(taskId, false).getReport());
+      response.setTaskReport(
+          verifyAndGetTask(taskId, JobACL.VIEW_JOB).getReport());
       return response;
     }
 
     @Override
     public GetTaskAttemptCompletionEventsResponse getTaskAttemptCompletionEvents(
         GetTaskAttemptCompletionEventsRequest request) 
-        throws YarnRemoteException {
+        throws IOException {
       JobId jobId = request.getJobId();
       int fromEventId = request.getFromEventId();
       int maxEvents = request.getMaxEvents();
-      Job job = verifyAndGetJob(jobId, false);
+      Job job = verifyAndGetJob(jobId, JobACL.VIEW_JOB);
       
       GetTaskAttemptCompletionEventsResponse response = 
         recordFactory.newRecordInstance(GetTaskAttemptCompletionEventsResponse.class);
@@ -283,11 +284,13 @@ public class MRClientService extends AbstractService
     @SuppressWarnings("unchecked")
     @Override
     public KillJobResponse killJob(KillJobRequest request) 
-      throws YarnRemoteException {
+      throws IOException {
       JobId jobId = request.getJobId();
-      String message = "Kill Job received from client " + jobId;
+      UserGroupInformation callerUGI = UserGroupInformation.getCurrentUser();
+      String message = "Kill job " + jobId + " received from " + callerUGI
+          + " at " + Server.getRemoteAddress();
       LOG.info(message);
-  	  verifyAndGetJob(jobId, true);
+      verifyAndGetJob(jobId, JobACL.MODIFY_JOB);
       appContext.getEventHandler().handle(
           new JobDiagnosticsUpdateEvent(jobId, message));
       appContext.getEventHandler().handle(
@@ -300,11 +303,13 @@ public class MRClientService extends AbstractService
     @SuppressWarnings("unchecked")
     @Override
     public KillTaskResponse killTask(KillTaskRequest request) 
-      throws YarnRemoteException {
+      throws IOException {
       TaskId taskId = request.getTaskId();
-      String message = "Kill task received from client " + taskId;
+      UserGroupInformation callerUGI = UserGroupInformation.getCurrentUser();
+      String message = "Kill task " + taskId + " received from " + callerUGI
+          + " at " + Server.getRemoteAddress();
       LOG.info(message);
-      verifyAndGetTask(taskId, true);
+      verifyAndGetTask(taskId, JobACL.MODIFY_JOB);
       appContext.getEventHandler().handle(
           new TaskEvent(taskId, TaskEventType.T_KILL));
       KillTaskResponse response = 
@@ -315,11 +320,14 @@ public class MRClientService extends AbstractService
     @SuppressWarnings("unchecked")
     @Override
     public KillTaskAttemptResponse killTaskAttempt(
-        KillTaskAttemptRequest request) throws YarnRemoteException {
+        KillTaskAttemptRequest request) throws IOException {
       TaskAttemptId taskAttemptId = request.getTaskAttemptId();
-      String message = "Kill task attempt received from client " + taskAttemptId;
+      UserGroupInformation callerUGI = UserGroupInformation.getCurrentUser();
+      String message = "Kill task attempt " + taskAttemptId
+          + " received from " + callerUGI + " at "
+          + Server.getRemoteAddress();
       LOG.info(message);
-      verifyAndGetAttempt(taskAttemptId, true);
+      verifyAndGetAttempt(taskAttemptId, JobACL.MODIFY_JOB);
       appContext.getEventHandler().handle(
           new TaskAttemptDiagnosticsUpdateEvent(taskAttemptId, message));
       appContext.getEventHandler().handle(
@@ -332,24 +340,27 @@ public class MRClientService extends AbstractService
 
     @Override
     public GetDiagnosticsResponse getDiagnostics(
-        GetDiagnosticsRequest request) throws YarnRemoteException {
+        GetDiagnosticsRequest request) throws IOException {
       TaskAttemptId taskAttemptId = request.getTaskAttemptId();
       
       GetDiagnosticsResponse response = 
         recordFactory.newRecordInstance(GetDiagnosticsResponse.class);
-      response.addAllDiagnostics(
-          verifyAndGetAttempt(taskAttemptId, false).getDiagnostics());
+      response.addAllDiagnostics(verifyAndGetAttempt(taskAttemptId,
+          JobACL.VIEW_JOB).getDiagnostics());
       return response;
     }
 
     @SuppressWarnings("unchecked")
     @Override
     public FailTaskAttemptResponse failTaskAttempt(
-        FailTaskAttemptRequest request) throws YarnRemoteException {
+        FailTaskAttemptRequest request) throws IOException {
       TaskAttemptId taskAttemptId = request.getTaskAttemptId();
-      String message = "Fail task attempt received from client " + taskAttemptId;
+      UserGroupInformation callerUGI = UserGroupInformation.getCurrentUser();
+      String message = "Fail task attempt " + taskAttemptId
+          + " received from " + callerUGI + " at "
+          + Server.getRemoteAddress();
       LOG.info(message);
-      verifyAndGetAttempt(taskAttemptId, true);
+      verifyAndGetAttempt(taskAttemptId, JobACL.MODIFY_JOB);
       appContext.getEventHandler().handle(
           new TaskAttemptDiagnosticsUpdateEvent(taskAttemptId, message));
       appContext.getEventHandler().handle(
@@ -364,14 +375,14 @@ public class MRClientService extends AbstractService
 
     @Override
     public GetTaskReportsResponse getTaskReports(
-        GetTaskReportsRequest request) throws YarnRemoteException {
+        GetTaskReportsRequest request) throws IOException {
       JobId jobId = request.getJobId();
       TaskType taskType = request.getTaskType();
       
       GetTaskReportsResponse response = 
         recordFactory.newRecordInstance(GetTaskReportsResponse.class);
       
-      Job job = verifyAndGetJob(jobId, false);
+      Job job = verifyAndGetJob(jobId, JobACL.VIEW_JOB);
       Collection<Task> tasks = job.getTasks(taskType).values();
       LOG.info("Getting task report for " + taskType + "   " + jobId
           + ". Report-size will be " + tasks.size());
@@ -389,9 +400,27 @@ public class MRClientService extends AbstractService
 
     @Override
     public GetDelegationTokenResponse getDelegationToken(
-        GetDelegationTokenRequest request) throws YarnRemoteException {
-      throw RPCUtil.getRemoteException("MR AM not authorized to issue delegation" +
+        GetDelegationTokenRequest request) throws IOException {
+      throw new IOException("MR AM not authorized to issue delegation" +
       		" token");
     }
+
+    @Override
+    public RenewDelegationTokenResponse renewDelegationToken(
+        RenewDelegationTokenRequest request) throws IOException {
+      throw new IOException("MR AM not authorized to renew delegation" +
+          " token");
+    }
+
+    @Override
+    public CancelDelegationTokenResponse cancelDelegationToken(
+        CancelDelegationTokenRequest request) throws IOException {
+      throw new IOException("MR AM not authorized to cancel delegation" +
+          " token");
+    }
+  }
+
+  public WebApp getWebApp() {
+    return webApp;
   }
 }

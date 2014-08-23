@@ -18,8 +18,8 @@
 
 package org.apache.hadoop.mapreduce.v2.hs.webapp;
 
-import static org.apache.hadoop.mapreduce.v2.app.webapp.AMParams.TASK_TYPE;
 import static org.apache.hadoop.mapreduce.v2.app.webapp.AMParams.TASK_ID;
+import static org.apache.hadoop.mapreduce.v2.app.webapp.AMParams.TASK_TYPE;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI.ACCORDION;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI.DATATABLES;
 import static org.apache.hadoop.yarn.webapp.view.JQueryUI.DATATABLES_ID;
@@ -29,18 +29,19 @@ import static org.apache.hadoop.yarn.webapp.view.JQueryUI.tableInit;
 
 import java.util.Collection;
 
+import org.apache.commons.lang.StringEscapeUtils;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskType;
 import org.apache.hadoop.mapreduce.v2.app.job.TaskAttempt;
 import org.apache.hadoop.mapreduce.v2.app.webapp.App;
+import org.apache.hadoop.mapreduce.v2.app.webapp.dao.TaskAttemptInfo;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
-import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.yarn.util.Times;
 import org.apache.hadoop.yarn.webapp.SubView;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TABLE;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TBODY;
-import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TD;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TFOOT;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.THEAD;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TR;
@@ -89,7 +90,9 @@ public class HsTaskPage extends HsView {
       headRow.
             th(".id", "Attempt").
             th(".state", "State").
-            th(".node", "node").
+            th(".status", "Status").
+            th(".node", "Node").
+            th(".logs", "Logs").
             th(".tsh", "Start Time");
       
       if(type == TaskType.REDUCE) {
@@ -108,15 +111,20 @@ public class HsTaskPage extends HsView {
               th(".note", "Note");
       
        TBODY<TABLE<Hamlet>> tbody = headRow._()._().tbody();
-      for (TaskAttempt ta : getTaskAttempts()) {
-        String taid = MRApps.toString(ta.getID());
+       // Write all the data into a JavaScript array of arrays for JQuery
+       // DataTables to display
+       StringBuilder attemptsTableData = new StringBuilder("[\n");
 
-        String nodeHttpAddr = ta.getNodeHttpAddress();
-        String containerIdString = ta.getAssignedContainerID().toString();
-        String nodeIdString = ta.getAssignedContainerMgrAddress();
-        String nodeRackName = ta.getNodeRackName();        
+       for (TaskAttempt attempt : getTaskAttempts()) {
+        final TaskAttemptInfo ta = new TaskAttemptInfo(attempt, false);
+        String taid = ta.getId();
 
-        long attemptStartTime = ta.getLaunchTime();
+        String nodeHttpAddr = ta.getNode();
+        String containerIdString = ta.getAssignedContainerIdStr();
+        String nodeIdString = attempt.getAssignedContainerMgrAddress();
+        String nodeRackName = ta.getRack();
+
+        long attemptStartTime = ta.getStartTime();
         long shuffleFinishTime = -1;
         long sortFinishTime = -1;
         long attemptFinishTime = ta.getFinishTime();
@@ -124,8 +132,8 @@ public class HsTaskPage extends HsView {
         long elapsedSortTime = -1;
         long elapsedReduceTime = -1;
         if(type == TaskType.REDUCE) {
-          shuffleFinishTime = ta.getShuffleFinishTime();
-          sortFinishTime = ta.getSortFinishTime();
+          shuffleFinishTime = attempt.getShuffleFinishTime();
+          sortFinishTime = attempt.getSortFinishTime();
           elapsedShuffleTime =
               Times.elapsed(attemptStartTime, shuffleFinishTime, false);
           elapsedSortTime =
@@ -135,58 +143,48 @@ public class HsTaskPage extends HsView {
         }
         long attemptElapsed =
             Times.elapsed(attemptStartTime, attemptFinishTime, false);
-        int sortId = ta.getID().getId() + (ta.getID().getTaskId().getId() * 10000);
-        
-        TR<TBODY<TABLE<Hamlet>>> row = tbody.tr();
-        TD<TR<TBODY<TABLE<Hamlet>>>> td = row.td();
+        int sortId = attempt.getID().getId()
+                   + (attempt.getID().getTaskId().getId() * 10000);
 
-        td.br().$title(String.valueOf(sortId))._(). // sorting
-            _(taid)._().td(ta.getState().toString()).td().a(".nodelink",
-                "http://"+ nodeHttpAddr,
-                nodeRackName + "/" + nodeHttpAddr);
-        td._(" ").a(".logslink",
-            url("logs", nodeIdString, containerIdString, taid, app.getJob()
-                .getUserName()), "logs");
-        td._();
-        
-        row.td().
-          br().$title(String.valueOf(attemptStartTime))._().
-            _(Times.format(attemptStartTime))._();
+        attemptsTableData.append("[\"")
+        .append(sortId + " ").append(taid).append("\",\"")
+        .append(ta.getState()).append("\",\"")
+        .append(StringEscapeUtils.escapeJavaScript(
+              StringEscapeUtils.escapeHtml(ta.getStatus()))).append("\",\"")
+
+        .append("<a class='nodelink' href='" + MRWebAppUtil.getYARNWebappScheme() + nodeHttpAddr + "'>")
+        .append(nodeRackName + "/" + nodeHttpAddr + "</a>\",\"")
+
+        .append("<a class='logslink' href='").append(url("logs", nodeIdString
+          , containerIdString, taid, app.getJob().getUserName()))
+          .append("'>logs</a>\",\"")
+
+          .append(attemptStartTime).append("\",\"");
 
         if(type == TaskType.REDUCE) {
-          row.td().
-            br().$title(String.valueOf(shuffleFinishTime))._().
-            _(Times.format(shuffleFinishTime))._();
-          row.td().
-          br().$title(String.valueOf(sortFinishTime))._().
-          _(Times.format(sortFinishTime))._();
+          attemptsTableData.append(shuffleFinishTime).append("\",\"")
+          .append(sortFinishTime).append("\",\"");
         }
-        row.
-            td().
-              br().$title(String.valueOf(attemptFinishTime))._().
-              _(Times.format(attemptFinishTime))._();
-        
+        attemptsTableData.append(attemptFinishTime).append("\",\"");
+
         if(type == TaskType.REDUCE) {
-          row.td().
-            br().$title(String.valueOf(elapsedShuffleTime))._().
-          _(formatTime(elapsedShuffleTime))._();
-          row.td().
-          br().$title(String.valueOf(elapsedSortTime))._().
-        _(formatTime(elapsedSortTime))._();
-          row.td().
-            br().$title(String.valueOf(elapsedReduceTime))._().
-          _(formatTime(elapsedReduceTime))._();
+          attemptsTableData.append(elapsedShuffleTime).append("\",\"")
+          .append(elapsedSortTime).append("\",\"")
+          .append(elapsedReduceTime).append("\",\"");
         }
-        
-        row.
-          td().
-            br().$title(String.valueOf(attemptElapsed))._().
-          _(formatTime(attemptElapsed))._().
-          td(".note", Joiner.on('\n').join(ta.getDiagnostics()));
-        row._();
+          attemptsTableData.append(attemptElapsed).append("\",\"")
+          .append(StringEscapeUtils.escapeJavaScript(
+              StringEscapeUtils.escapeHtml(ta.getNote())))
+          .append("\"],\n");
       }
-      
-      
+       //Remove the last comma and close off the array of arrays
+       if(attemptsTableData.charAt(attemptsTableData.length() - 2) == ',') {
+         attemptsTableData.delete(attemptsTableData.length()-2, attemptsTableData.length()-1);
+       }
+       attemptsTableData.append("]");
+       html.script().$type("text/javascript").
+       _("var attemptsTableData=" + attemptsTableData)._();
+
       TR<TFOOT<TABLE<Hamlet>>> footRow = tbody._().tfoot().tr();
       footRow.
           th().input("search_init").$type(InputType.text).
@@ -194,7 +192,11 @@ public class HsTaskPage extends HsView {
           th().input("search_init").$type(InputType.text).
               $name("attempt_state").$value("State")._()._().
           th().input("search_init").$type(InputType.text).
+              $name("attempt_status").$value("Status")._()._().
+          th().input("search_init").$type(InputType.text).
               $name("attempt_node").$value("Node")._()._().
+          th().input("search_init").$type(InputType.text).
+              $name("attempt_node").$value("Logs")._()._().
           th().input("search_init").$type(InputType.text).
               $name("attempt_start_time").$value("Start Time")._()._();
       
@@ -232,10 +234,6 @@ public class HsTaskPage extends HsView {
       footRow._()._()._();
     }
 
-    private String formatTime(long elapsed) {
-      return elapsed < 0 ? "N/A" : StringUtils.formatTime(elapsed);
-    }
-    
     /**
      * @return true if this is a valid request else false.
      */
@@ -287,24 +285,34 @@ public class HsTaskPage extends HsView {
       TaskId taskID = MRApps.toTaskID($(TASK_ID));
       type = taskID.getTaskType();
     }
-    StringBuilder b = tableInit().
-      append(",aoColumnDefs:[");
+    StringBuilder b = tableInit()
+      .append(", 'aaData': attemptsTableData")
+      .append(", bDeferRender: true")
+      .append(", bProcessing: true")
+      .append("\n,aoColumnDefs:[\n")
 
-    b.append("{'sType':'title-numeric', 'aTargets': [ 0");
-    if(type == TaskType.REDUCE) {
-      b.append(", 7, 8, 9, 10");
-    } else { //MAP
-      b.append(", 5");
-    }
-    b.append(" ] }]");
+      //logs column should not filterable (it includes container ID which may pollute searches)
+      .append("\n{'aTargets': [ 4 ]")
+      .append(", 'bSearchable': false }")
 
-    // Sort by id upon page load
-    b.append(", aaSorting: [[0, 'asc']]");
+      .append("\n, {'sType':'numeric', 'aTargets': [ 0 ]")
+      .append(", 'mRender': parseHadoopAttemptID }")
 
-    b.append("}");
-    return b.toString();
+      .append("\n, {'sType':'numeric', 'aTargets': [ 5, 6")
+      //Column numbers are different for maps and reduces
+      .append(type == TaskType.REDUCE ? ", 7, 8" : "")
+      .append(" ], 'mRender': renderHadoopDate }")
+
+      .append("\n, {'sType':'numeric', 'aTargets': [")
+      .append(type == TaskType.REDUCE ? "9, 10, 11, 12" : "7")
+      .append(" ], 'mRender': renderHadoopElapsedTime }]")
+
+      // Sort by id upon page load
+      .append("\n, aaSorting: [[0, 'asc']]")
+      .append("}");
+      return b.toString();
   }
-  
+
   private String attemptsPostTableInit() {
     return "var asInitVals = new Array();\n" +
            "$('tfoot input').keyup( function () \n{"+

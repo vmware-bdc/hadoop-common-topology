@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+function hadoop_usage
+{
+  echo "Usage: yarn [--config confdir] [--daemon (start|stop|status)] COMMAND"
+  echo "where COMMAND is one of:"
+  echo "  application                           prints application(s) report/kill application"
+  echo "  applicationattempt                    prints applicationattempt(s) report"
+  echo "  classpath                             prints the class path needed to get the"
+  echo "                                        Hadoop jar and the required libraries"
+  echo "  container                             prints container(s) report"
+  echo "  daemonlog                             get/set the log level for each daemon"
+  echo "  jar <jar>                             run a jar file"
+  echo "  logs                                  dump container logs"
+  echo "  node                                  prints node report(s)"
+  echo "  nodemanager                           run a nodemanager on each slave"
+  echo "  proxyserver                           run the web app proxy server"
+  echo "  resourcemanager                       run the ResourceManager"
+  echo "  resourcemanager -format-state-store   deletes the RMStateStore"
+  echo "  rmadmin                               admin tools"
+  echo "  timelineserver                        run the timeline server"
+  echo "  version                               print the version"
+  echo " or"
+  echo "  CLASSNAME                             run the class named CLASSNAME"
+  echo "Most commands print help when invoked w/o parameters."
+}
+
+
+# let's locate libexec...
+if [[ -n "${HADOOP_PREFIX}" ]]; then
+  DEFAULT_LIBEXEC_DIR="${HADOOP_PREFIX}/libexec"
+else
+  this="${BASH_SOURCE-$0}"
+  bin=$(cd -P -- "$(dirname -- "${this}")" >/dev/null && pwd -P)
+  DEFAULT_LIBEXEC_DIR="${bin}/../libexec"
+fi
+
+HADOOP_LIBEXEC_DIR="${HADOOP_LIBEXEC_DIR:-$DEFAULT_LIBEXEC_DIR}"
+# shellcheck disable=SC2034
+HADOOP_NEW_CONFIG=true
+if [[ -f "${HADOOP_LIBEXEC_DIR}/yarn-config.sh" ]]; then
+  . "${HADOOP_LIBEXEC_DIR}/yarn-config.sh"
+else
+  echo "ERROR: Cannot execute ${HADOOP_LIBEXEC_DIR}/yarn-config.sh." 2>&1
+  exit 1
+fi
+
+# if no args specified, show usage
+if [[ $# = 0 ]]; then
+  hadoop_exit_with_usage 1
+fi
+
+# get arguments
+COMMAND=$1
+shift
+
+case "${COMMAND}" in
+  application|applicationattempt|container)
+    CLASS=org.apache.hadoop.yarn.client.cli.ApplicationCLI
+    YARN_OPTS="${YARN_OPTS} ${YARN_CLIENT_OPTS}"
+    set -- "${COMMAND}" "$@"
+  ;;
+  classpath)
+    hadoop_finalize
+    echo "${CLASSPATH}"
+    exit
+  ;;
+  daemonlog)
+    CLASS=org.apache.hadoop.log.LogLevel
+    YARN_OPTS="${YARN_OPTS} ${YARN_CLIENT_OPTS}"
+  ;;
+  jar)
+    CLASS=org.apache.hadoop.util.RunJar
+    YARN_OPTS="${YARN_OPTS} ${YARN_CLIENT_OPTS}"
+  ;;
+  historyserver)
+    daemon="true"
+    echo "DEPRECATED: Use of this command to start the timeline server is deprecated." 1>&2
+    echo "Instead use the timelineserver command for it." 1>&2
+    echo "Starting the History Server anyway..." 1>&2
+    CLASS='org.apache.hadoop.yarn.server.applicationhistoryservice.ApplicationHistoryServer'
+  ;;
+  logs)
+    CLASS=org.apache.hadoop.yarn.logaggregation.LogDumper
+    YARN_OPTS="${YARN_OPTS} ${YARN_CLIENT_OPTS}"
+  ;;
+  node)
+    CLASS=org.apache.hadoop.yarn.client.cli.NodeCLI
+    YARN_OPTS="${YARN_OPTS} ${YARN_CLIENT_OPTS}"
+  ;;
+  nodemanager)
+    daemon="true"
+    CLASS='org.apache.hadoop.yarn.server.nodemanager.NodeManager'
+    YARN_OPTS="${YARN_OPTS} ${YARN_NODEMANAGER_OPTS}"
+    if [[ -n "${YARN_NODEMANAGER_HEAPSIZE}" ]]; then
+      JAVA_HEAP_MAX="-Xmx${YARN_NODEMANAGER_HEAPSIZE}m"
+    fi
+  ;;
+  proxyserver)
+    daemon="true"
+    CLASS='org.apache.hadoop.yarn.server.webproxy.WebAppProxyServer'
+    YARN_OPTS="${YARN_OPTS} ${YARN_PROXYSERVER_OPTS}"
+    if [[ -n "${YARN_PROXYSERVER_HEAPSIZE}" ]]; then
+      JAVA_HEAP_MAX="-Xmx${YARN_PROXYSERVER_HEAPSIZE}m"
+    fi
+  ;;
+  resourcemanager)
+    daemon="true"
+    CLASS='org.apache.hadoop.yarn.server.resourcemanager.ResourceManager'
+    YARN_OPTS="${YARN_OPTS} ${YARN_RESOURCEMANAGER_OPTS}"
+    if [[ -n "${YARN_RESOURCEMANAGER_HEAPSIZE}" ]]; then
+      JAVA_HEAP_MAX="-Xmx${YARN_RESOURCEMANAGER_HEAPSIZE}m"
+    fi
+  ;;
+  rmadmin)
+    CLASS='org.apache.hadoop.yarn.client.cli.RMAdminCLI'
+    YARN_OPTS="${YARN_OPTS} ${YARN_CLIENT_OPTS}"
+  ;;
+  timelineserver)
+    daemon="true"
+    CLASS='org.apache.hadoop.yarn.server.applicationhistoryservice.ApplicationHistoryServer'
+    YARN_OPTS="${YARN_OPTS} ${YARN_TIMELINESERVER_OPTS}"
+    if [[ -n "${YARN_TIMELINESERVER_HEAPSIZE}" ]]; then
+      JAVA_HEAP_MAX="-Xmx${YARN_TIMELINESERVER_HEAPSIZE}m"
+    fi
+  ;;
+  version)
+    CLASS=org.apache.hadoop.util.VersionInfo
+    YARN_OPTS="${YARN_OPTS} ${YARN_CLIENT_OPTS}"
+  ;;
+  -*)
+    hadoop_exit_with_usage 1
+  ;;
+  *)
+    CLASS="${COMMAND}"
+  ;;
+esac
+
+# set HADOOP_OPTS to YARN_OPTS so that we can use
+# finalize, etc, without doing anything funky
+HADOOP_OPTS="${YARN_OPTS}"
+
+daemon_outfile="${HADOOP_LOG_DIR}/hadoop-${HADOOP_IDENT_STRING}-${COMMAND}-${HOSTNAME}.out"
+daemon_pidfile="${HADOOP_PID_DIR}/hadoop-${HADOOP_IDENT_STRING}-${COMMAND}.pid"
+
+if [[  "${HADOOP_DAEMON_MODE}" != "default" ]]; then
+  # shellcheck disable=SC2034
+  HADOOP_ROOT_LOGGER="${HADOOP_DAEMON_ROOT_LOGGER}"
+  YARN_ROOT_LOGGER="${HADOOP_DAEMON_ROOT_LOGGER}"
+  HADOOP_LOGFILE="hadoop-${HADOOP_IDENT_STRING}-${COMMAND}-${HOSTNAME}.log"
+fi
+
+hadoop_add_param HADOOP_OPTS Xmx "${JAVA_HEAP_MAX}"
+
+# Add YARN custom options to comamnd line in case someone actaully 
+# used these.
+#
+# Note that we are replacing ' ' with '\ ' so that when we exec
+# stuff it works
+#
+hadoop_add_param HADOOP_OPTS yarn.log.dir "-Dyarn.log.dir=${HADOOP_LOG_DIR/ /\ }"
+hadoop_add_param HADOOP_OPTS yarn.log.file "-Dyarn.log.file=${HADOOP_LOGFILE/ /\ }"
+hadoop_add_param HADOOP_OPTS yarn.home.dir "-Dyarn.home.dir=${HADOOP_YARN_HOME/ /\ }"
+hadoop_add_param HADOOP_OPTS yarn.root.logger "-Dyarn.root.logger=${YARN_ROOT_LOGGER:-INFO,console}"
+
+hadoop_finalize
+
+export CLASSPATH
+
+if [[ -n "${daemon}" ]]; then
+  if [[ -n "${secure_service}" ]]; then
+    hadoop_secure_daemon_handler "${HADOOP_DAEMON_MODE}" "${COMMAND}" \
+    "${CLASS}" "${daemon_pidfile}" "${daemon_outfile}" \
+    "${priv_pidfile}" "${priv_outfile}" "${priv_errfile}" "$@"
+  else
+    hadoop_daemon_handler "${HADOOP_DAEMON_MODE}" "${COMMAND}" "${CLASS}" \
+    "${daemon_pidfile}" "${daemon_outfile}" "$@"
+  fi
+  exit $?
+else
+  hadoop_java_exec "${COMMAND}" "${CLASS}" "$@"
+fi

@@ -29,6 +29,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.conf.Configuration.DeprecationDelta;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.LongWritable;
@@ -65,17 +66,18 @@ import org.apache.hadoop.mapreduce.lib.map.RegexMapper;
 public class Logalyzer {
   // Constants
   private static Configuration fsConfig = new Configuration();
-  public static String SORT_COLUMNS = 
+  public static final String SORT_COLUMNS = 
     "logalizer.logcomparator.sort.columns";
-  public static String COLUMN_SEPARATOR = 
+  public static final String COLUMN_SEPARATOR = 
     "logalizer.logcomparator.column.separator";
   
   static {
-    Configuration.addDeprecation("mapred.reducer.sort", 
-      new String[] {SORT_COLUMNS});
-    Configuration.addDeprecation("mapred.reducer.separator", 
-      new String[] {COLUMN_SEPARATOR});
+    Configuration.addDeprecations(new DeprecationDelta[] {
+      new DeprecationDelta("mapred.reducer.sort", SORT_COLUMNS),
+      new DeprecationDelta("mapred.reducer.separator", COLUMN_SEPARATOR)
+    });
   }
+
   /** A {@link Mapper} that extracts text matching a regular expression. */
   public static class LogRegexMapper<K extends WritableComparable>
     extends MapReduceBase
@@ -194,7 +196,7 @@ public class Logalyzer {
     throws IOException
   {
     String destURL = FileSystem.getDefaultUri(fsConfig) + archiveDirectory;
-    DistCp.copy(new JobConf(fsConfig), logListURI, destURL, null, true, false);
+    DistCpV1.copy(new JobConf(fsConfig), logListURI, destURL, null, true, false);
   }
   
   /**

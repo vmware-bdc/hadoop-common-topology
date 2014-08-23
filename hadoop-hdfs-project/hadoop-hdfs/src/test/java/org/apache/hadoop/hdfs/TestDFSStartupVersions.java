@@ -19,25 +19,27 @@ package org.apache.hadoop.hdfs;
 
 import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType.DATA_NODE;
 import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType.NAME_NODE;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.io.File;
-
-import junit.framework.TestCase;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.server.common.Storage;
-import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.common.StorageInfo;
+import org.junit.After;
+import org.junit.Test;
 
 /**
  * This test ensures the appropriate response (successful or failure) from 
  * a Datanode when the system is started with differing version combinations. 
  */
-public class TestDFSStartupVersions extends TestCase {
+public class TestDFSStartupVersions {
   
   private static final Log LOG = LogFactory.getLog(
                                                    "org.apache.hadoop.hdfs.TestDFSStartupVersions");
@@ -73,7 +75,7 @@ public class TestDFSStartupVersions extends TestCase {
     StorageData(int layoutVersion, int namespaceId, String clusterId,
         long cTime, String bpid) {
       storageInfo = new StorageInfo(layoutVersion, namespaceId, clusterId,
-          cTime);
+          cTime, NodeType.DATA_NODE);
       blockPoolId = bpid;
     }
   }
@@ -87,7 +89,7 @@ public class TestDFSStartupVersions extends TestCase {
    */
   private StorageData[] initializeVersions() throws Exception {
     int layoutVersionOld = Storage.LAST_UPGRADABLE_LAYOUT_VERSION;
-    int layoutVersionCur = UpgradeUtilities.getCurrentLayoutVersion();
+    int layoutVersionCur = HdfsConstants.DATANODE_LAYOUT_VERSION;
     int layoutVersionNew = Integer.MIN_VALUE;
     int namespaceIdCur = UpgradeUtilities.getCurrentNamespaceID(null);
     int namespaceIdOld = Integer.MIN_VALUE;
@@ -198,7 +200,7 @@ public class TestDFSStartupVersions extends TestCase {
       return false;
     }
     // check #3
-    int softwareLV = HdfsConstants.LAYOUT_VERSION;  // will also be Namenode's LV
+    int softwareLV = HdfsConstants.DATANODE_LAYOUT_VERSION;
     int storedLV = datanodeVer.getLayoutVersion();
     if (softwareLV == storedLV &&  
         datanodeVer.getCTime() == namenodeVer.getCTime()) 
@@ -235,6 +237,7 @@ public class TestDFSStartupVersions extends TestCase {
    *         this iterations version 3-tuple
    * </pre>
    */
+  @Test (timeout=300000)
   public void testVersions() throws Exception {
     UpgradeUtilities.initialize();
     Configuration conf = UpgradeUtilities.initializeStorageStateConf(1, 
@@ -249,7 +252,7 @@ public class TestDFSStartupVersions extends TestCase {
                                               .startupOption(StartupOption.REGULAR)
                                               .build();
     StorageData nameNodeVersion = new StorageData(
-        UpgradeUtilities.getCurrentLayoutVersion(),
+        HdfsConstants.NAMENODE_LAYOUT_VERSION,
         UpgradeUtilities.getCurrentNamespaceID(cluster),
         UpgradeUtilities.getCurrentClusterID(cluster),
         UpgradeUtilities.getCurrentFsscTime(cluster),
@@ -276,7 +279,8 @@ public class TestDFSStartupVersions extends TestCase {
     }
   }
   
-  protected void tearDown() throws Exception {
+  @After
+  public void tearDown() throws Exception {
     LOG.info("Shutting down MiniDFSCluster");
     if (cluster != null) cluster.shutdown();
   }

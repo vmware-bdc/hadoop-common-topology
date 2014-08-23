@@ -40,7 +40,7 @@ public class BlockTokenIdentifier extends TokenIdentifier {
   private String userId;
   private String blockPoolId;
   private long blockId;
-  private EnumSet<AccessMode> modes;
+  private final EnumSet<AccessMode> modes;
 
   private byte [] cache;
   
@@ -118,7 +118,7 @@ public class BlockTokenIdentifier extends TokenIdentifier {
     return a == null ? b == null : a.equals(b);
   }
 
-  /** {@inheritDoc} */
+  @Override
   public boolean equals(Object obj) {
     if (obj == this) {
       return true;
@@ -134,13 +134,14 @@ public class BlockTokenIdentifier extends TokenIdentifier {
     return false;
   }
 
-  /** {@inheritDoc} */
+  @Override
   public int hashCode() {
     return (int) expiryDate ^ keyId ^ (int) blockId ^ modes.hashCode()
         ^ (userId == null ? 0 : userId.hashCode())
         ^ (blockPoolId == null ? 0 : blockPoolId.hashCode());
   }
 
+  @Override
   public void readFields(DataInput in) throws IOException {
     this.cache = null;
     expiryDate = WritableUtils.readVLong(in);
@@ -148,12 +149,14 @@ public class BlockTokenIdentifier extends TokenIdentifier {
     userId = WritableUtils.readString(in);
     blockPoolId = WritableUtils.readString(in);
     blockId = WritableUtils.readVLong(in);
-    int length = WritableUtils.readVInt(in);
+    int length = WritableUtils.readVIntInRange(in, 0,
+        AccessMode.class.getEnumConstants().length);
     for (int i = 0; i < length; i++) {
       modes.add(WritableUtils.readEnum(in, AccessMode.class));
     }
   }
 
+  @Override
   public void write(DataOutput out) throws IOException {
     WritableUtils.writeVLong(out, expiryDate);
     WritableUtils.writeVInt(out, keyId);

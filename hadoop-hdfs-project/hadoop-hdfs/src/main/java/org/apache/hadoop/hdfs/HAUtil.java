@@ -17,13 +17,18 @@
  */
 package org.apache.hadoop.hdfs;
 
-import static org.apache.hadoop.hdfs.DFSConfigKeys.*;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_FAILOVER_PROXY_PROVIDER_KEY_PREFIX;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HA_NAMENODE_ID_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SHARED_EDITS_DIR_KEY;
+import static org.apache.hadoop.hdfs.protocol.HdfsConstants.HA_DT_SERVICE_PREFIX;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.logging.Log;
@@ -32,16 +37,20 @@ import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.NameNodeProxies.ProxyAndInfo;
+import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSelector;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
+import org.apache.hadoop.hdfs.server.namenode.ha.AbstractNNFailoverProxyProvider;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.ipc.RPC;
+import org.apache.hadoop.ipc.RemoteException;
+import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
-import static org.apache.hadoop.hdfs.protocol.HdfsConstants.HA_DT_SERVICE_PREFIX;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
@@ -52,6 +61,9 @@ public class HAUtil {
   private static final Log LOG = 
     LogFactory.getLog(HAUtil.class);
   
+  private static final DelegationTokenSelector tokenSelector =
+      new DelegationTokenSelector();
+
   private HAUtil() { /* Hidden constructor */ }
 
   /**
@@ -124,25 +136,21 @@ public class HAUtil {
     }
     return null;
   }
-
+  
   /**
-   * Given the configuration for this node, return a Configuration object for
-   * the other node in an HA setup.
+   * Get the NN ID of the other node in an HA setup.
    * 
-   * @param myConf the configuration of this node
-   * @return the configuration of the other node in an HA setup
+   * @param conf the configuration of this node
+   * @return the NN ID of the other node in this nameservice
    */
-  public static Configuration getConfForOtherNode(
-      Configuration myConf) {
-    
-    String nsId = DFSUtil.getNamenodeNameServiceId(myConf);
+  public static String getNameNodeIdOfOtherNode(Configuration conf, String nsId) {
     Preconditions.checkArgument(nsId != null,
         "Could not determine namespace id. Please ensure that this " +
         "machine is one of the machines listed as a NN RPC address, " +
-        "or configure " + DFSConfigKeys.DFS_FEDERATION_NAMESERVICE_ID);
+        "or configure " + DFSConfigKeys.DFS_NAMESERVICE_ID);
     
-    Collection<String> nnIds = DFSUtil.getNameNodeIds(myConf, nsId);
-    String myNNId = myConf.get(DFSConfigKeys.DFS_HA_NAMENODE_ID_KEY);
+    Collection<String> nnIds = DFSUtil.getNameNodeIds(conf, nsId);
+    String myNNId = conf.get(DFSConfigKeys.DFS_HA_NAMENODE_ID_KEY);
     Preconditions.checkArgument(nnIds != null,
         "Could not determine namenode ids in namespace '%s'. " +
         "Please configure " +
@@ -162,11 +170,25 @@ public class HAUtil {
     ArrayList<String> nnSet = Lists.newArrayList(nnIds);
     nnSet.remove(myNNId);
     assert nnSet.size() == 1;
-    String activeNN = nnSet.get(0);
+    return nnSet.get(0);
+  }
+
+  /**
+   * Given the configuration for this node, return a Configuration object for
+   * the other node in an HA setup.
+   * 
+   * @param myConf the configuration of this node
+   * @return the configuration of the other node in an HA setup
+   */
+  public static Configuration getConfForOtherNode(
+      Configuration myConf) {
+    
+    String nsId = DFSUtil.getNamenodeNameServiceId(myConf);
+    String otherNn = getNameNodeIdOfOtherNode(myConf, nsId);
     
     // Look up the address of the active NN.
     Configuration confForOtherNode = new Configuration(myConf);
-    NameNode.initializeGenericKeys(confForOtherNode, nsId, activeNN);
+    NameNode.initializeGenericKeys(confForOtherNode, nsId, otherNn);
     return confForOtherNode;
   }
 
@@ -184,10 +206,23 @@ public class HAUtil {
  
   /**
    * @return true if the given nameNodeUri appears to be a logical URI.
-   * This is the case if there is a failover proxy provider configured
-   * for it in the given configuration.
    */
   public static boolean isLogicalUri(
+      Configuration conf, URI nameNodeUri) {
+    String host = nameNodeUri.getHost();
+    // A logical name must be one of the service IDs.
+    return DFSUtil.getNameServiceIds(conf).contains(host);
+  }
+
+  /**
+   * Check whether the client has a failover proxy provider configured
+   * for the namenode/nameservice.
+   *
+   * @param conf Configuration
+   * @param nameNodeUri The URI of namenode
+   * @return true if failover is configured.
+   */
+  public static boolean isClientFailoverConfigured(
       Configuration conf, URI nameNodeUri) {
     String host = nameNodeUri.getHost();
     String configKey = DFS_CLIENT_FAILOVER_PROXY_PROVIDER_KEY_PREFIX + "."
@@ -196,70 +231,101 @@ public class HAUtil {
   }
 
   /**
-   * Parse the HDFS URI out of the provided token.
-   * @throws IOException if the token is invalid
+   * Check whether logical URI is needed for the namenode and
+   * the corresponding failover proxy provider in the config.
+   *
+   * @param conf Configuration
+   * @param nameNodeUri The URI of namenode
+   * @return true if logical URI is needed. false, if not needed.
+   * @throws IOException most likely due to misconfiguration.
    */
-  public static URI getServiceUriFromToken(
-      Token<DelegationTokenIdentifier> token)
+  public static boolean useLogicalUri(Configuration conf, URI nameNodeUri) 
       throws IOException {
-    String tokStr = token.getService().toString();
+    // Create the proxy provider. Actual proxy is not created.
+    AbstractNNFailoverProxyProvider<ClientProtocol> provider = NameNodeProxies
+        .createFailoverProxyProvider(conf, nameNodeUri, ClientProtocol.class,
+        false);
 
-    if (tokStr.startsWith(HA_DT_SERVICE_PREFIX)) {
-      tokStr = tokStr.replaceFirst(HA_DT_SERVICE_PREFIX, "");
+    // No need to use logical URI since failover is not configured.
+    if (provider == null) {
+      return false;
     }
-    
-    try {
-      return new URI(HdfsConstants.HDFS_URI_SCHEME + "://" +
-          tokStr);
-    } catch (URISyntaxException e) {
-      throw new IOException("Invalid token contents: '" +
-          tokStr + "'");
+    // Check whether the failover proxy provider uses logical URI.
+    return provider.useLogicalURI();
+  }
+
+  /**
+   * Parse the file system URI out of the provided token.
+   */
+  public static URI getServiceUriFromToken(final String scheme, Token<?> token) {
+    String tokStr = token.getService().toString();
+    final String prefix = buildTokenServicePrefixForLogicalUri(scheme);
+    if (tokStr.startsWith(prefix)) {
+      tokStr = tokStr.replaceFirst(prefix, "");
     }
+    return URI.create(scheme + "://" + tokStr);
   }
   
   /**
    * Get the service name used in the delegation token for the given logical
    * HA service.
    * @param uri the logical URI of the cluster
+   * @param scheme the scheme of the corresponding FileSystem
    * @return the service name
    */
-  public static Text buildTokenServiceForLogicalUri(URI uri) {
-    return new Text(HA_DT_SERVICE_PREFIX + uri.getHost());
+  public static Text buildTokenServiceForLogicalUri(final URI uri,
+      final String scheme) {
+    return new Text(buildTokenServicePrefixForLogicalUri(scheme)
+        + uri.getHost());
   }
   
   /**
    * @return true if this token corresponds to a logical nameservice
    * rather than a specific namenode.
    */
-  public static boolean isTokenForLogicalUri(
-      Token<DelegationTokenIdentifier> token) {
+  public static boolean isTokenForLogicalUri(Token<?> token) {
     return token.getService().toString().startsWith(HA_DT_SERVICE_PREFIX);
   }
-  
+
+  public static String buildTokenServicePrefixForLogicalUri(String scheme) {
+    return HA_DT_SERVICE_PREFIX + scheme + ":";
+  }
+
   /**
    * Locate a delegation token associated with the given HA cluster URI, and if
    * one is found, clone it to also represent the underlying namenode address.
    * @param ugi the UGI to modify
    * @param haUri the logical URI for the cluster
-   * @param singleNNAddr one of the NNs in the cluster to which the token
+   * @param nnAddrs collection of NNs in the cluster to which the token
    * applies
    */
   public static void cloneDelegationTokenForLogicalUri(
       UserGroupInformation ugi, URI haUri,
-      InetSocketAddress singleNNAddr) {
-    Text haService = buildTokenServiceForLogicalUri(haUri);
+      Collection<InetSocketAddress> nnAddrs) {
+    // this cloning logic is only used by hdfs
+    Text haService = HAUtil.buildTokenServiceForLogicalUri(haUri,
+        HdfsConstants.HDFS_URI_SCHEME);
     Token<DelegationTokenIdentifier> haToken =
-        DelegationTokenSelector.selectHdfsDelegationToken(haService, ugi);
-    if (haToken == null) {
-      // no token
-      return;
+        tokenSelector.selectToken(haService, ugi.getTokens());
+    if (haToken != null) {
+      for (InetSocketAddress singleNNAddr : nnAddrs) {
+        // this is a minor hack to prevent physical HA tokens from being
+        // exposed to the user via UGI.getCredentials(), otherwise these
+        // cloned tokens may be inadvertently propagated to jobs
+        Token<DelegationTokenIdentifier> specificToken =
+            new Token.PrivateToken<DelegationTokenIdentifier>(haToken);
+        SecurityUtil.setTokenService(specificToken, singleNNAddr);
+        Text alias = new Text(
+            buildTokenServicePrefixForLogicalUri(HdfsConstants.HDFS_URI_SCHEME)
+                + "//" + specificToken.getService());
+        ugi.addToken(alias, specificToken);
+        LOG.debug("Mapped HA service delegation token for logical URI " +
+            haUri + " to namenode " + singleNNAddr);
+      }
+    } else {
+      LOG.debug("No HA service delegation token found for logical URI " +
+          haUri);
     }
-    Token<DelegationTokenIdentifier> specificToken =
-        new Token<DelegationTokenIdentifier>(haToken);
-    specificToken.setService(SecurityUtil.buildTokenService(singleNNAddr));
-    ugi.addToken(specificToken);
-    LOG.debug("Mapped HA service delegation token for logical URI " +
-        haUri + " to namenode " + singleNNAddr);
   }
 
   /**
@@ -272,7 +338,6 @@ public class HAUtil {
    * @return the internet address of the currently-active NN.
    * @throws IOException if an error occurs while resolving the active NN.
    */
-  @SuppressWarnings("deprecation")
   public static InetSocketAddress getAddressOfActive(FileSystem fs)
       throws IOException {
     if (!(fs instanceof DistributedFileSystem)) {
@@ -283,5 +348,80 @@ public class HAUtil {
     DistributedFileSystem dfs = (DistributedFileSystem) fs;
     DFSClient dfsClient = dfs.getClient();
     return RPC.getServerAddress(dfsClient.getNamenode());
+  }
+  
+  /**
+   * Get an RPC proxy for each NN in an HA nameservice. Used when a given RPC
+   * call should be made on every NN in an HA nameservice, not just the active.
+   * 
+   * @param conf configuration
+   * @param nsId the nameservice to get all of the proxies for.
+   * @return a list of RPC proxies for each NN in the nameservice.
+   * @throws IOException in the event of error.
+   */
+  public static List<ClientProtocol> getProxiesForAllNameNodesInNameservice(
+      Configuration conf, String nsId) throws IOException {
+    List<ProxyAndInfo<ClientProtocol>> proxies =
+        getProxiesForAllNameNodesInNameservice(conf, nsId, ClientProtocol.class);
+
+    List<ClientProtocol> namenodes = new ArrayList<ClientProtocol>(
+        proxies.size());
+    for (ProxyAndInfo<ClientProtocol> proxy : proxies) {
+      namenodes.add(proxy.getProxy());
+    }
+    return namenodes;
+  }
+
+  /**
+   * Get an RPC proxy for each NN in an HA nameservice. Used when a given RPC
+   * call should be made on every NN in an HA nameservice, not just the active.
+   *
+   * @param conf configuration
+   * @param nsId the nameservice to get all of the proxies for.
+   * @param xface the protocol class.
+   * @return a list of RPC proxies for each NN in the nameservice.
+   * @throws IOException in the event of error.
+   */
+  public static <T> List<ProxyAndInfo<T>> getProxiesForAllNameNodesInNameservice(
+      Configuration conf, String nsId, Class<T> xface) throws IOException {
+    Map<String, InetSocketAddress> nnAddresses =
+        DFSUtil.getRpcAddressesForNameserviceId(conf, nsId, null);
+    
+    List<ProxyAndInfo<T>> proxies = new ArrayList<ProxyAndInfo<T>>(
+        nnAddresses.size());
+    for (InetSocketAddress nnAddress : nnAddresses.values()) {
+      NameNodeProxies.ProxyAndInfo<T> proxyInfo = null;
+      proxyInfo = NameNodeProxies.createNonHAProxy(conf,
+          nnAddress, xface,
+          UserGroupInformation.getCurrentUser(), false);
+      proxies.add(proxyInfo);
+    }
+    return proxies;
+  }
+  
+  /**
+   * Used to ensure that at least one of the given HA NNs is currently in the
+   * active state..
+   * 
+   * @param namenodes list of RPC proxies for each NN to check.
+   * @return true if at least one NN is active, false if all are in the standby state.
+   * @throws IOException in the event of error.
+   */
+  public static boolean isAtLeastOneActive(List<ClientProtocol> namenodes)
+      throws IOException {
+    for (ClientProtocol namenode : namenodes) {
+      try {
+        namenode.getFileInfo("/");
+        return true;
+      } catch (RemoteException re) {
+        IOException cause = re.unwrapRemoteException();
+        if (cause instanceof StandbyException) {
+          // This is expected to happen for a standby NN.
+        } else {
+          throw re;
+        }
+      }
+    }
+    return false;
   }
 }

@@ -105,12 +105,33 @@ public class DataNodeTestUtils {
   }
 
   public static InterDatanodeProtocol createInterDatanodeProtocolProxy(
-      DataNode dn, DatanodeID datanodeid, final Configuration conf
-      ) throws IOException {
+      DataNode dn, DatanodeID datanodeid, final Configuration conf,
+      boolean connectToDnViaHostname) throws IOException {
+    if (connectToDnViaHostname != dn.getDnConf().connectToDnViaHostname) {
+      throw new AssertionError("Unexpected DN hostname configuration");
+    }
     return DataNode.createInterDataNodeProtocolProxy(datanodeid, conf,
-        dn.getDnConf().socketTimeout);
+        dn.getDnConf().socketTimeout, dn.getDnConf().connectToDnViaHostname);
   }
   
+  public static void runBlockScannerForBlock(DataNode dn, ExtendedBlock b) {
+    BlockPoolSliceScanner bpScanner = getBlockPoolScanner(dn, b);
+    bpScanner.verifyBlock(new ExtendedBlock(b.getBlockPoolId(),
+        new BlockPoolSliceScanner.BlockScanInfo(b.getLocalBlock())));
+  }
+
+  private static BlockPoolSliceScanner getBlockPoolScanner(DataNode dn,
+      ExtendedBlock b) {
+    DataBlockScanner scanner = dn.getBlockScanner();
+    BlockPoolSliceScanner bpScanner = scanner.getBPScanner(b.getBlockPoolId());
+    return bpScanner;
+  }
+
+  public static long getLatestScanTime(DataNode dn, ExtendedBlock b) {
+    BlockPoolSliceScanner scanner = getBlockPoolScanner(dn, b);
+    return scanner.getLastScanTime(b.getLocalBlock());
+  }
+
   public static void shutdownBlockScanner(DataNode dn) {
     if (dn.blockScanner != null) {
       dn.blockScanner.shutdown();
@@ -137,6 +158,11 @@ public class DataNodeTestUtils {
     return FsDatasetTestUtil.getBlockFile(dn.getFSDataset(), bpid, b);
   }
 
+  public static File getMetaFile(DataNode dn, String bpid, Block b)
+      throws IOException {
+    return FsDatasetTestUtil.getMetaFile(dn.getFSDataset(), bpid, b);
+  }
+  
   public static boolean unlinkBlock(DataNode dn, ExtendedBlock bk, int numLinks
       ) throws IOException {
     return FsDatasetTestUtil.unlinkBlock(dn.getFSDataset(), bk, numLinks);

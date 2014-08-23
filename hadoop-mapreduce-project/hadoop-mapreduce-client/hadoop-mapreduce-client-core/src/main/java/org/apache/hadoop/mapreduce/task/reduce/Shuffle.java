@@ -18,100 +18,111 @@
 package org.apache.hadoop.mapreduce.task.reduce;
 
 import java.io.IOException;
+import java.util.Map;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.LocalDirAllocator;
-import org.apache.hadoop.io.compress.CompressionCodec;
-import org.apache.hadoop.mapred.Counters;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.MapOutputFile;
 import org.apache.hadoop.mapred.RawKeyValueIterator;
-import org.apache.hadoop.mapred.Reducer;
 import org.apache.hadoop.mapred.Reporter;
 import org.apache.hadoop.mapred.Task;
-import org.apache.hadoop.mapred.Task.CombineOutputCollector;
 import org.apache.hadoop.mapred.TaskStatus;
 import org.apache.hadoop.mapred.TaskUmbilicalProtocol;
+import org.apache.hadoop.mapred.ShuffleConsumerPlugin;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TaskAttemptID;
 import org.apache.hadoop.util.Progress;
 
-@InterfaceAudience.Private
+@InterfaceAudience.LimitedPrivate({"MapReduce"})
 @InterfaceStability.Unstable
-@SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
-public class Shuffle<K, V> implements ExceptionReporter {
+@SuppressWarnings({"unchecked", "rawtypes"})
+public class Shuffle<K, V> implements ShuffleConsumerPlugin<K, V>, ExceptionReporter {
   private static final int PROGRESS_FREQUENCY = 2000;
+  private static final int MAX_EVENTS_TO_FETCH = 10000;
+  private static final int MIN_EVENTS_TO_FETCH = 100;
+  private static final int MAX_RPC_OUTSTANDING_EVENTS = 3000000;
   
-  private final TaskAttemptID reduceId;
-  private final JobConf jobConf;
-  private final Reporter reporter;
-  private final ShuffleClientMetrics metrics;
-  private final TaskUmbilicalProtocol umbilical;
+  private ShuffleConsumerPlugin.Context context;
+
+  private TaskAttemptID reduceId;
+  private JobConf jobConf;
+  private Reporter reporter;
+  private ShuffleClientMetrics metrics;
+  private TaskUmbilicalProtocol umbilical;
   
-  private final ShuffleScheduler<K,V> scheduler;
-  private final MergeManager<K, V> merger;
+  private ShuffleSchedulerImpl<K,V> scheduler;
+  private MergeManager<K, V> merger;
   private Throwable throwable = null;
   private String throwingThreadName = null;
-  private final Progress copyPhase;
-  private final TaskStatus taskStatus;
-  private final Task reduceTask; //Used for status updates
-  
-  public Shuffle(TaskAttemptID reduceId, JobConf jobConf, FileSystem localFS,
-                 TaskUmbilicalProtocol umbilical,
-                 LocalDirAllocator localDirAllocator,  
-                 Reporter reporter,
-                 CompressionCodec codec,
-                 Class<? extends Reducer> combinerClass,
-                 CombineOutputCollector<K,V> combineCollector,
-                 Counters.Counter spilledRecordsCounter,
-                 Counters.Counter reduceCombineInputCounter,
-                 Counters.Counter shuffledMapsCounter,
-                 Counters.Counter reduceShuffleBytes,
-                 Counters.Counter failedShuffleCounter,
-                 Counters.Counter mergedMapOutputsCounter,
-                 TaskStatus status,
-                 Progress copyPhase,
-                 Progress mergePhase,
-                 Task reduceTask,
-                 MapOutputFile mapOutputFile) {
-    this.reduceId = reduceId;
-    this.jobConf = jobConf;
-    this.umbilical = umbilical;
-    this.reporter = reporter;
+  private Progress copyPhase;
+  private TaskStatus taskStatus;
+  private Task reduceTask; //Used for status updates
+  private Map<TaskAttemptID, MapOutputFile> localMapFiles;
+
+  @Override
+  public void init(ShuffleConsumerPlugin.Context context) {
+    this.context = context;
+
+    this.reduceId = context.getReduceId();
+    this.jobConf = context.getJobConf();
+    this.umbilical = context.getUmbilical();
+    this.reporter = context.getReporter();
     this.metrics = new ShuffleClientMetrics(reduceId, jobConf);
-    this.copyPhase = copyPhase;
-    this.taskStatus = status;
-    this.reduceTask = reduceTask;
+    this.copyPhase = context.getCopyPhase();
+    this.taskStatus = context.getStatus();
+    this.reduceTask = context.getReduceTask();
+    this.localMapFiles = context.getLocalMapFiles();
     
-    scheduler = 
-      new ShuffleScheduler<K,V>(jobConf, status, this, copyPhase, 
-                                shuffledMapsCounter, 
-                                reduceShuffleBytes, failedShuffleCounter);
-    merger = new MergeManager<K, V>(reduceId, jobConf, localFS, 
-                                    localDirAllocator, reporter, codec, 
-                                    combinerClass, combineCollector, 
-                                    spilledRecordsCounter, 
-                                    reduceCombineInputCounter, 
-                                    mergedMapOutputsCounter, 
-                                    this, mergePhase, mapOutputFile);
+    scheduler = new ShuffleSchedulerImpl<K, V>(jobConf, taskStatus, reduceId,
+        this, copyPhase, context.getShuffledMapsCounter(),
+        context.getReduceShuffleBytes(), context.getFailedShuffleCounter());
+    merger = createMergeManager(context);
   }
 
+  protected MergeManager<K, V> createMergeManager(
+      ShuffleConsumerPlugin.Context context) {
+    return new MergeManagerImpl<K, V>(reduceId, jobConf, context.getLocalFS(),
+        context.getLocalDirAllocator(), reporter, context.getCodec(),
+        context.getCombinerClass(), context.getCombineCollector(), 
+        context.getSpilledRecordsCounter(),
+        context.getReduceCombineInputCounter(),
+        context.getMergedMapOutputsCounter(), this, context.getMergePhase(),
+        context.getMapOutputFile());
+  }
+
+  @Override
   public RawKeyValueIterator run() throws IOException, InterruptedException {
+    // Scale the maximum events we fetch per RPC call to mitigate OOM issues
+    // on the ApplicationMaster when a thundering herd of reducers fetch events
+    // TODO: This should not be necessary after HADOOP-8942
+    int eventsPerReducer = Math.max(MIN_EVENTS_TO_FETCH,
+        MAX_RPC_OUTSTANDING_EVENTS / jobConf.getNumReduceTasks());
+    int maxEventsToFetch = Math.min(MAX_EVENTS_TO_FETCH, eventsPerReducer);
+
     // Start the map-completion events fetcher thread
     final EventFetcher<K,V> eventFetcher = 
-      new EventFetcher<K,V>(reduceId, umbilical, scheduler, this);
+      new EventFetcher<K,V>(reduceId, umbilical, scheduler, this,
+          maxEventsToFetch);
     eventFetcher.start();
     
     // Start the map-output fetcher threads
-    final int numFetchers = jobConf.getInt(MRJobConfig.SHUFFLE_PARALLEL_COPIES, 5);
+    boolean isLocal = localMapFiles != null;
+    final int numFetchers = isLocal ? 1 :
+      jobConf.getInt(MRJobConfig.SHUFFLE_PARALLEL_COPIES, 5);
     Fetcher<K,V>[] fetchers = new Fetcher[numFetchers];
-    for (int i=0; i < numFetchers; ++i) {
-      fetchers[i] = new Fetcher<K,V>(jobConf, reduceId, scheduler, merger, 
-                                     reporter, metrics, this, 
-                                     reduceTask.getJobTokenSecret());
-      fetchers[i].start();
+    if (isLocal) {
+      fetchers[0] = new LocalFetcher<K, V>(jobConf, reduceId, scheduler,
+          merger, reporter, metrics, this, reduceTask.getShuffleSecret(),
+          localMapFiles);
+      fetchers[0].start();
+    } else {
+      for (int i=0; i < numFetchers; ++i) {
+        fetchers[i] = new Fetcher<K,V>(jobConf, reduceId, scheduler, merger, 
+                                       reporter, metrics, this, 
+                                       reduceTask.getShuffleSecret());
+        fetchers[i].start();
+      }
     }
     
     // Wait for shuffle to complete successfully
@@ -133,7 +144,6 @@ public class Shuffle<K, V> implements ExceptionReporter {
     for (Fetcher<K,V> fetcher : fetchers) {
       fetcher.shutDown();
     }
-    fetchers = null;
     
     // stop the scheduler
     scheduler.close();
@@ -159,6 +169,10 @@ public class Shuffle<K, V> implements ExceptionReporter {
     }
     
     return kvIter;
+  }
+
+  @Override
+  public void close(){
   }
 
   public synchronized void reportException(Throwable t) {

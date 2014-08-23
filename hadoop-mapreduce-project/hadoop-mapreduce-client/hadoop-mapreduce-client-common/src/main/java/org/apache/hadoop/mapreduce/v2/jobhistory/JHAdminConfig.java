@@ -20,6 +20,8 @@ package org.apache.hadoop.mapreduce.v2.jobhistory;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.http.HttpConfig;
 
 /**
  * Stores Job History configuration keys that can be set by administrators of
@@ -36,6 +38,19 @@ public class JHAdminConfig {
   public static final int DEFAULT_MR_HISTORY_PORT = 10020;
   public static final String DEFAULT_MR_HISTORY_ADDRESS = "0.0.0.0:" +
       DEFAULT_MR_HISTORY_PORT;
+  public static final String MR_HISTORY_BIND_HOST = MR_HISTORY_PREFIX
+      + "bind-host";
+
+  /** The address of the History server admin interface. */
+  public static final String JHS_ADMIN_ADDRESS = MR_HISTORY_PREFIX
+      + "admin.address";
+  public static final int DEFAULT_JHS_ADMIN_PORT = 10033;
+  public static final String DEFAULT_JHS_ADMIN_ADDRESS = "0.0.0.0:"
+      + DEFAULT_JHS_ADMIN_PORT;
+
+  /** ACL of who can be admin of Job history server. */
+  public static final String JHS_ADMIN_ACL = MR_HISTORY_PREFIX + "admin.acl";
+  public static final String DEFAULT_JHS_ADMIN_ACL = "*";
   
   /** If history cleaning should be enabled or not.*/
   public static final String MR_HISTORY_CLEANER_ENABLE = 
@@ -61,15 +76,17 @@ public class JHAdminConfig {
     MR_HISTORY_PREFIX + "datestring.cache.size";
   public static final int DEFAULT_MR_HISTORY_DATESTRING_CACHE_SIZE = 200000;
   
-  //TODO REMOVE debug-mode
-  /** Equivalent to 0.20 mapreduce.jobhistory.debug.mode */
-  public static final String MR_HISTORY_DEBUG_MODE = 
-    MR_HISTORY_PREFIX + "debug-mode";
-  
   /** Path where history files should be stored for DONE jobs. **/
   public static final String MR_HISTORY_DONE_DIR =
     MR_HISTORY_PREFIX + "done-dir";
 
+  /**
+   * Maximum time the History server will wait for the FileSystem for History
+   * files to become available. Default value is -1, forever.
+   */
+  public static final String MR_HISTORY_MAX_START_WAIT_TIME =
+      MR_HISTORY_PREFIX + "maximum-start-wait-time-millis";
+  public static final long DEFAULT_MR_HISTORY_MAX_START_WAIT_TIME = -1;
   /**
    *  Path where history files should be stored after a job finished and before
    *  they are pulled into the job history server.
@@ -117,12 +134,34 @@ public class JHAdminConfig {
   public static final String MR_HISTORY_PRINCIPAL = 
     MR_HISTORY_PREFIX + "principal";
   
+  /** To enable https in MR history server */
+  public static final String MR_HS_HTTP_POLICY = MR_HISTORY_PREFIX
+      + "http.policy";
+  public static String DEFAULT_MR_HS_HTTP_POLICY =
+          HttpConfig.Policy.HTTP_ONLY.name();
+  
   /**The address the history server webapp is on.*/
   public static final String MR_HISTORY_WEBAPP_ADDRESS =
     MR_HISTORY_PREFIX + "webapp.address";
   public static final int DEFAULT_MR_HISTORY_WEBAPP_PORT = 19888;
   public static final String DEFAULT_MR_HISTORY_WEBAPP_ADDRESS =
     "0.0.0.0:" + DEFAULT_MR_HISTORY_WEBAPP_PORT;
+  
+  /**The https address the history server webapp is on.*/
+  public static final String MR_HISTORY_WEBAPP_HTTPS_ADDRESS =
+      MR_HISTORY_PREFIX + "webapp.https.address";
+  public static final int DEFAULT_MR_HISTORY_WEBAPP_HTTPS_PORT = 19890;
+  public static final String DEFAULT_MR_HISTORY_WEBAPP_HTTPS_ADDRESS =
+      "0.0.0.0:" + DEFAULT_MR_HISTORY_WEBAPP_HTTPS_PORT;
+  
+  /**The kerberos principal to be used for spnego filter for history server*/
+  public static final String MR_WEBAPP_SPNEGO_USER_NAME_KEY =
+      MR_HISTORY_PREFIX + "webapp.spnego-principal";
+  
+  /** The kerberos keytab to be used for spnego filter for history server*/
+  public static final String MR_WEBAPP_SPNEGO_KEYTAB_FILE_KEY =
+      MR_HISTORY_PREFIX + "webapp.spnego-keytab-file";
+
   /*
    * HS Service Authorization
    */
@@ -133,5 +172,37 @@ public class JHAdminConfig {
    * The HistoryStorage class to use to cache history data.
    */
   public static final String MR_HISTORY_STORAGE =
-    MR_HISTORY_PREFIX + ".store.class";
+    MR_HISTORY_PREFIX + "store.class";
+
+  /**
+   * Enable the history server to store server state and recover server state
+   * upon startup.
+   */
+  public static final String MR_HS_RECOVERY_ENABLE =
+      MR_HISTORY_PREFIX + "recovery.enable";
+  public static final boolean DEFAULT_MR_HS_RECOVERY_ENABLE = false;
+
+  /**
+   * The HistoryServerStateStoreService class to store and recover server state
+   */
+  public static final String MR_HS_STATE_STORE =
+      MR_HISTORY_PREFIX + "recovery.store.class";
+
+  /**
+   * The URI where server state will be stored when
+   * HistoryServerFileSystemStateStoreService is configured as the state store
+   */
+  public static final String MR_HS_FS_STATE_STORE_URI =
+      MR_HISTORY_PREFIX + "recovery.store.fs.uri";
+
+  /** Whether to use fixed ports with the minicluster. */
+  public static final String MR_HISTORY_MINICLUSTER_FIXED_PORTS = MR_HISTORY_PREFIX
+       + "minicluster.fixed.ports";
+  
+  /**
+   * Default is false to be able to run tests concurrently without port
+   * conflicts.
+   */
+  public static boolean DEFAULT_MR_HISTORY_MINICLUSTER_FIXED_PORTS = false;
+
 }

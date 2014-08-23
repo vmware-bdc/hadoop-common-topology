@@ -42,6 +42,8 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
 
 /**
  * <code>GenericOptionsParser</code> is a utility to parse command line
@@ -268,7 +270,13 @@ public class GenericOptionsParser {
     }
 
     if (line.hasOption("jt")) {
-      conf.set("mapred.job.tracker", line.getOptionValue("jt"));
+      String optionValue = line.getOptionValue("jt");
+      if (optionValue.equalsIgnoreCase("local")) {
+        conf.set("mapreduce.framework.name", optionValue);
+      }
+
+      conf.set("yarn.resourcemanager.address", optionValue, 
+          "from -jt command line option");
     }
     if (line.hasOption("conf")) {
       String[] values = line.getOptionValues("conf");
@@ -278,7 +286,8 @@ public class GenericOptionsParser {
     }
     if (line.hasOption("libjars")) {
       conf.set("tmpjars", 
-               validateFiles(line.getOptionValue("libjars"), conf));
+               validateFiles(line.getOptionValue("libjars"), conf),
+               "from -libjars command line option");
       //setting libjars in client classpath
       URL[] libjars = getLibJars(conf);
       if(libjars!=null && libjars.length>0) {
@@ -290,18 +299,20 @@ public class GenericOptionsParser {
     }
     if (line.hasOption("files")) {
       conf.set("tmpfiles", 
-               validateFiles(line.getOptionValue("files"), conf));
+               validateFiles(line.getOptionValue("files"), conf),
+               "from -files command line option");
     }
     if (line.hasOption("archives")) {
       conf.set("tmparchives", 
-                validateFiles(line.getOptionValue("archives"), conf));
+                validateFiles(line.getOptionValue("archives"), conf),
+                "from -archives command line option");
     }
     if (line.hasOption('D')) {
       String[] property = line.getOptionValues('D');
       for(String prop : property) {
         String[] keyval = prop.split("=", 2);
         if (keyval.length == 2) {
-          conf.set(keyval[0], keyval[1]);
+          conf.set(keyval[0], keyval[1], "from command line");
         }
       }
     }
@@ -312,15 +323,17 @@ public class GenericOptionsParser {
       String fileName = line.getOptionValue("tokenCacheFile");
       // check if the local file exists
       FileSystem localFs = FileSystem.getLocal(conf);
-      Path p = new Path(fileName);
+      Path p = localFs.makeQualified(new Path(fileName));
       if (!localFs.exists(p)) {
           throw new FileNotFoundException("File "+fileName+" does not exist.");
       }
       if(LOG.isDebugEnabled()) {
         LOG.debug("setting conf tokensFile: " + fileName);
       }
-      conf.set("mapreduce.job.credentials.json", localFs.makeQualified(p)
-          .toString());
+      UserGroupInformation.getCurrentUser().addCredentials(
+          Credentials.readTokenStorageFile(p, conf));
+      conf.set("mapreduce.job.credentials.json", p.toString(),
+               "from -tokenCacheFile command line option");
 
     }
   }
@@ -365,9 +378,15 @@ public class GenericOptionsParser {
     if (files == null) 
       return null;
     String[] fileArr = files.split(",");
+    if (fileArr.length == 0) {
+      throw new IllegalArgumentException("File name can't be empty string");
+    }
     String[] finalArr = new String[fileArr.length];
     for (int i =0; i < fileArr.length; i++) {
       String tmp = fileArr[i];
+      if (tmp.isEmpty()) {
+        throw new IllegalArgumentException("File name can't be empty string");
+      }
       String finalPath;
       URI pathURI;
       try {
@@ -383,7 +402,8 @@ public class GenericOptionsParser {
         if (!localFs.exists(path)) {
           throw new FileNotFoundException("File " + tmp + " does not exist.");
         }
-        finalPath = path.makeQualified(localFs).toString();
+        finalPath = path.makeQualified(localFs.getUri(),
+            localFs.getWorkingDirectory()).toString();
       }
       else {
         // check if the file exists in this file system
@@ -394,13 +414,60 @@ public class GenericOptionsParser {
         if (!fs.exists(path)) {
           throw new FileNotFoundException("File " + tmp + " does not exist.");
         }
-        finalPath = path.makeQualified(fs).toString();
+        finalPath = path.makeQualified(fs.getUri(),
+            fs.getWorkingDirectory()).toString();
       }
       finalArr[i] = finalPath;
     }
     return StringUtils.arrayToString(finalArr);
   }
-  
+
+  /**
+   * Windows powershell and cmd can parse key=value themselves, because
+   * /pkey=value is same as /pkey value under windows. However this is not
+   * compatible with how we get arbitrary key values in -Dkey=value format.
+   * Under windows -D key=value or -Dkey=value might be passed as
+   * [-Dkey, value] or [-D key, value]. This method does undo these and
+   * return a modified args list by manually changing [-D, key, value]
+   * into [-D, key=value]
+   *
+   * @param args command line arguments
+   * @return fixed command line arguments that GnuParser can parse
+   */
+  private String[] preProcessForWindows(String[] args) {
+    if (!Shell.WINDOWS) {
+      return args;
+    }
+    if (args == null) {
+      return null;
+    }
+    List<String> newArgs = new ArrayList<String>(args.length);
+    for (int i=0; i < args.length; i++) {
+      String prop = null;
+      if (args[i].equals("-D")) {
+        newArgs.add(args[i]);
+        if (i < args.length - 1) {
+          prop = args[++i];
+        }
+      } else if (args[i].startsWith("-D")) {
+        prop = args[i];
+      } else {
+        newArgs.add(args[i]);
+      }
+      if (prop != null) {
+        if (prop.contains("=")) {
+          // everything good
+        } else {
+          if (i < args.length - 1) {
+            prop += "=" + args[++i];
+          }
+        }
+        newArgs.add(prop);
+      }
+    }
+
+    return newArgs.toArray(new String[newArgs.size()]);
+  }
 
   /**
    * Parse the user-specified options, get the generic options, and modify
@@ -414,7 +481,7 @@ public class GenericOptionsParser {
     opts = buildGeneralOptions(opts);
     CommandLineParser parser = new GnuParser();
     try {
-      commandLine = parser.parse(opts, args, true);
+      commandLine = parser.parse(opts, preProcessForWindows(args), true);
       processGeneralOptions(conf, commandLine);
     } catch(ParseException e) {
       LOG.warn("options parsing failed: "+e.getMessage());

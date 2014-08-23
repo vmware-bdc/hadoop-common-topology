@@ -35,23 +35,33 @@ import static org.mockito.Mockito.when;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSTestUtil;
+import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.MiniDFSNNTopology;
+import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.ReplicaState;
@@ -65,7 +75,6 @@ import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.HeartbeatResponse;
 import org.apache.hadoop.hdfs.server.protocol.InterDatanodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.NNHAStatusHeartbeat;
-import org.apache.hadoop.hdfs.server.protocol.NNHAStatusHeartbeat.State;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.ReplicaRecoveryInfo;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
@@ -90,6 +99,7 @@ public class TestBlockRecovery {
     MiniDFSCluster.getBaseDirectory() + "data";
   private DataNode dn;
   private Configuration conf;
+  private boolean tearDownDone;
   private final static long RECOVERY_ID = 3000L;
   private final static String CLUSTER_ID = "testClusterID";
   private final static String POOL_ID = "BP-TEST";
@@ -113,7 +123,8 @@ public class TestBlockRecovery {
    * @throws IOException
    */
   @Before
-  public void startUp() throws IOException {
+  public void startUp() throws IOException, URISyntaxException {
+    tearDownDone = false;
     conf = new HdfsConfiguration();
     conf.set(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY, DATA_DIR);
     conf.set(DFSConfigKeys.DFS_DATANODE_ADDRESS_KEY, "0.0.0.0:0");
@@ -122,11 +133,12 @@ public class TestBlockRecovery {
     conf.setInt(CommonConfigurationKeys.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY, 0);
     FileSystem.setDefaultUri(conf,
         "hdfs://" + NN_ADDR.getHostName() + ":" + NN_ADDR.getPort());
-    ArrayList<File> dirs = new ArrayList<File>();
+    ArrayList<StorageLocation> locations = new ArrayList<StorageLocation>();
     File dataDir = new File(DATA_DIR);
     FileUtil.fullyDelete(dataDir);
     dataDir.mkdirs();
-    dirs.add(dataDir);
+    StorageLocation location = StorageLocation.parse(dataDir.getPath());
+    locations.add(location);
     final DatanodeProtocolClientSideTranslatorPB namenode =
       mock(DatanodeProtocolClientSideTranslatorPB.class);
 
@@ -140,19 +152,22 @@ public class TestBlockRecovery {
         Mockito.any(DatanodeRegistration.class));
 
     when(namenode.versionRequest()).thenReturn(new NamespaceInfo
-        (1, CLUSTER_ID, POOL_ID, 1L, 1));
+        (1, CLUSTER_ID, POOL_ID, 1L));
 
     when(namenode.sendHeartbeat(
             Mockito.any(DatanodeRegistration.class),
             Mockito.any(StorageReport[].class),
+            Mockito.anyLong(),
+            Mockito.anyLong(),
             Mockito.anyInt(),
             Mockito.anyInt(),
             Mockito.anyInt()))
         .thenReturn(new HeartbeatResponse(
             new DatanodeCommand[0],
-            new NNHAStatusHeartbeat(State.ACTIVE, 1)));
+            new NNHAStatusHeartbeat(HAServiceState.ACTIVE, 1),
+            null));
 
-    dn = new DataNode(conf, dirs, null) {
+    dn = new DataNode(conf, locations, null) {
       @Override
       DatanodeProtocolClientSideTranslatorPB connectToNN(
           InetSocketAddress nnAddr) throws IOException {
@@ -170,7 +185,7 @@ public class TestBlockRecovery {
    */
   @After
   public void tearDown() throws IOException {
-    if (dn != null) {
+    if (!tearDownDone && dn != null) {
       try {
         dn.shutdown();
       } catch(Exception e) {
@@ -181,6 +196,7 @@ public class TestBlockRecovery {
           Assert.assertTrue(
               "Cannot delete data-node dirs", FileUtil.fullyDelete(dir));
       }
+      tearDownDone = true;
     }
   }
 
@@ -197,9 +213,9 @@ public class TestBlockRecovery {
         locs, RECOVERY_ID);
     ArrayList<BlockRecord> syncList = new ArrayList<BlockRecord>(2);
     BlockRecord record1 = new BlockRecord(
-        new DatanodeID("xx", "yy", "zz", 1, 2, 3), dn1, replica1);
+        DFSTestUtil.getDatanodeInfo("1.2.3.4", "bogus", 1234), dn1, replica1);
     BlockRecord record2 = new BlockRecord(
-        new DatanodeID("aa", "bb", "cc", 1, 2, 3), dn2, replica2);
+        DFSTestUtil.getDatanodeInfo("1.2.3.4", "bogus", 1234), dn2, replica2);
     syncList.add(record1);
     syncList.add(record2);
     
@@ -401,8 +417,7 @@ public class TestBlockRecovery {
 
   private Collection<RecoveringBlock> initRecoveringBlocks() throws IOException {
     Collection<RecoveringBlock> blocks = new ArrayList<RecoveringBlock>(1);
-    DatanodeInfo mockOtherDN = new DatanodeInfo(
-        new DatanodeID("127.0.0.1", "localhost", "storage-1234", 0, 0, 0));
+    DatanodeInfo mockOtherDN = DFSTestUtil.getLocalDatanodeInfo();
     DatanodeInfo[] locs = new DatanodeInfo[] {
         new DatanodeInfo(dn.getDNRegistrationForBP(block.getBlockPoolId())),
         mockOtherDN };
@@ -425,7 +440,7 @@ public class TestBlockRecovery {
     DataNode spyDN = spy(dn);
     doThrow(new RecoveryInProgressException("Replica recovery is in progress")).
        when(spyDN).initReplicaRecovery(any(RecoveringBlock.class));
-    Daemon d = spyDN.recoverBlocks(initRecoveringBlocks());
+    Daemon d = spyDN.recoverBlocks("fake NN", initRecoveringBlocks());
     d.join();
     verify(spyDN, never()).syncBlock(
         any(RecoveringBlock.class), anyListOf(BlockRecord.class));
@@ -445,7 +460,7 @@ public class TestBlockRecovery {
     DataNode spyDN = spy(dn);
     doThrow(new IOException()).
        when(spyDN).initReplicaRecovery(any(RecoveringBlock.class));
-    Daemon d = spyDN.recoverBlocks(initRecoveringBlocks());
+    Daemon d = spyDN.recoverBlocks("fake NN", initRecoveringBlocks());
     d.join();
     verify(spyDN, never()).syncBlock(
         any(RecoveringBlock.class), anyListOf(BlockRecord.class));
@@ -465,7 +480,7 @@ public class TestBlockRecovery {
     doReturn(new ReplicaRecoveryInfo(block.getBlockId(), 0,
         block.getGenerationStamp(), ReplicaState.FINALIZED)).when(spyDN).
         initReplicaRecovery(any(RecoveringBlock.class));
-    Daemon d = spyDN.recoverBlocks(initRecoveringBlocks());
+    Daemon d = spyDN.recoverBlocks("fake NN", initRecoveringBlocks());
     d.join();
     DatanodeProtocol dnP = dn.getActiveNamenodeForBP(POOL_ID);
     verify(dnP).commitBlockSynchronization(
@@ -517,7 +532,7 @@ public class TestBlockRecovery {
     if(LOG.isDebugEnabled()) {
       LOG.debug("Running " + GenericTestUtils.getMethodName());
     }
-    dn.data.createRbw(block);
+    dn.data.createRbw(StorageType.DEFAULT, block);
     try {
       dn.syncBlock(rBlock, initBlockRecords(dn));
       fail("Sync should fail");
@@ -540,11 +555,12 @@ public class TestBlockRecovery {
     if(LOG.isDebugEnabled()) {
       LOG.debug("Running " + GenericTestUtils.getMethodName());
     }
-    ReplicaInPipelineInterface replicaInfo = dn.data.createRbw(block);
+    ReplicaInPipelineInterface replicaInfo = dn.data.createRbw(
+        StorageType.DEFAULT, block);
     ReplicaOutputStreams streams = null;
     try {
       streams = replicaInfo.createStreams(true,
-          DataChecksum.newDataChecksum(DataChecksum.CHECKSUM_CRC32, 512));
+          DataChecksum.newDataChecksum(DataChecksum.Type.CRC32, 512));
       streams.getChecksumOut().write('a');
       dn.data.initReplicaRecovery(new RecoveringBlock(block, null, RECOVERY_ID+1));
       try {
@@ -559,6 +575,71 @@ public class TestBlockRecovery {
           anyBoolean(), any(DatanodeID[].class), any(String[].class));
     } finally {
       streams.close();
+    }
+  }
+  
+  /**
+   * Test to verify the race between finalizeBlock and Lease recovery
+   * 
+   * @throws Exception
+   */
+  @Test(timeout = 20000)
+  public void testRaceBetweenReplicaRecoveryAndFinalizeBlock() throws Exception {
+    tearDown();// Stop the Mocked DN started in startup()
+
+    Configuration conf = new HdfsConfiguration();
+    conf.set(DFSConfigKeys.DFS_DATANODE_XCEIVER_STOP_TIMEOUT_MILLIS_KEY, "1000");
+    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
+        .numDataNodes(1).build();
+    try {
+      cluster.waitClusterUp();
+      DistributedFileSystem fs = cluster.getFileSystem();
+      Path path = new Path("/test");
+      FSDataOutputStream out = fs.create(path);
+      out.writeBytes("data");
+      out.hsync();
+      
+      List<LocatedBlock> blocks = DFSTestUtil.getAllBlocks(fs.open(path));
+      final LocatedBlock block = blocks.get(0);
+      final DataNode dataNode = cluster.getDataNodes().get(0);
+      
+      final AtomicBoolean recoveryInitResult = new AtomicBoolean(true);
+      Thread recoveryThread = new Thread() {
+        @Override
+        public void run() {
+          try {
+            DatanodeInfo[] locations = block.getLocations();
+            final RecoveringBlock recoveringBlock = new RecoveringBlock(
+                block.getBlock(), locations, block.getBlock()
+                    .getGenerationStamp() + 1);
+            synchronized (dataNode.data) {
+              Thread.sleep(2000);
+              dataNode.initReplicaRecovery(recoveringBlock);
+            }
+          } catch (Exception e) {
+            recoveryInitResult.set(false);
+          }
+        }
+      };
+      recoveryThread.start();
+      try {
+        out.close();
+      } catch (IOException e) {
+        Assert.assertTrue("Writing should fail",
+            e.getMessage().contains("are bad. Aborting..."));
+      } finally {
+        recoveryThread.join();
+      }
+      Assert.assertTrue("Recovery should be initiated successfully",
+          recoveryInitResult.get());
+      
+      dataNode.updateReplicaUnderRecovery(block.getBlock(), block.getBlock()
+          .getGenerationStamp() + 1, block.getBlockSize());
+    } finally {
+      if (null != cluster) {
+        cluster.shutdown();
+        cluster = null;
+      }
     }
   }
 }

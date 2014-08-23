@@ -17,7 +17,7 @@
  */
 package org.apache.hadoop.security;
 
-import org.apache.hadoop.http.HttpServer;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.http.FilterContainer;
@@ -32,7 +32,7 @@ import java.util.Map;
 
 /**
  * Initializes hadoop-auth AuthenticationFilter which provides support for
- * Kerberos HTTP SPENGO authentication.
+ * Kerberos HTTP SPNEGO authentication.
  * <p/>
  * It enables anonymous access, simple/speudo and Kerberos HTTP SPNEGO
  * authentication  for Hadoop JobTracker, NameNode, DataNodes and
@@ -94,7 +94,7 @@ public class AuthenticationFilterInitializer extends FilterInitializer {
     }
 
     //Resolve _HOST into bind address
-    String bindAddress = conf.get(HttpServer.BIND_ADDRESS);
+    String bindAddress = conf.get(HttpServer2.BIND_ADDRESS);
     String principal = filterConfig.get(KerberosAuthenticationHandler.PRINCIPAL);
     if (principal != null) {
       try {

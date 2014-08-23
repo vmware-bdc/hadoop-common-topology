@@ -17,6 +17,12 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -37,32 +43,30 @@ import java.util.Set;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
+import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirType;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
-import org.apache.hadoop.hdfs.server.namenode.FileJournalManager.EditLogFile;
 import org.apache.hadoop.hdfs.server.namenode.FSImageStorageInspector.FSImageFile;
+import org.apache.hadoop.hdfs.server.namenode.FileJournalManager.EditLogFile;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
 import org.apache.hadoop.hdfs.util.Holder;
 import org.apache.hadoop.hdfs.util.MD5FileUtils;
 import org.apache.hadoop.io.IOUtils;
-import org.apache.hadoop.conf.Configuration;
-import org.mockito.Mockito;
 import org.mockito.Matchers;
+import org.mockito.Mockito;
 
 import com.google.common.base.Joiner;
-import com.google.common.collect.Lists;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.common.io.Files;
-
-import static org.junit.Assert.*;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.mock;
 
 /**
  * Utility functions for testing fsimage storage.
@@ -206,7 +210,7 @@ public abstract class FSImageTestUtil {
    * only a specified number of "mkdirs" operations.
    */
   public static void createAbortedLogWithMkdirs(File editsLogDir, int numDirs,
-      long firstTxId) throws IOException {
+      long firstTxId, long newInodeId) throws IOException {
     FSEditLog editLog = FSImageTestUtil.createStandaloneEditLog(editsLogDir);
     editLog.setNextTxId(firstTxId);
     editLog.openForWrite();
@@ -215,7 +219,8 @@ public abstract class FSImageTestUtil {
         FsPermission.createImmutable((short)0755));
     for (int i = 1; i <= numDirs; i++) {
       String dirName = "dir" + i;
-      INodeDirectory dir = new INodeDirectory(dirName, perms);
+      INodeDirectory dir = new INodeDirectory(newInodeId + i - 1,
+          DFSUtil.string2Bytes(dirName), perms, 0L);
       editLog.logMkDir("/" + dirName, dir);
     }
     editLog.logSync();
@@ -229,28 +234,34 @@ public abstract class FSImageTestUtil {
    */
   public static EnumMap<FSEditLogOpCodes,Holder<Integer>> countEditLogOpTypes(
       File editLog) throws Exception {
-    EnumMap<FSEditLogOpCodes, Holder<Integer>> opCounts =
-      new EnumMap<FSEditLogOpCodes, Holder<Integer>>(FSEditLogOpCodes.class);
-
     EditLogInputStream elis = new EditLogFileInputStream(editLog);
     try {
-      FSEditLogOp op;
-      while ((op = elis.readOp()) != null) {
-        Holder<Integer> i = opCounts.get(op.opCode);
-        if (i == null) {
-          i = new Holder<Integer>(0);
-          opCounts.put(op.opCode, i);
-        }
-        i.held++;
-      }
+      return countEditLogOpTypes(elis);
     } finally {
       IOUtils.closeStream(elis);
     }
+  }
+
+  /**
+   * @see #countEditLogOpTypes(File)
+   */
+  public static EnumMap<FSEditLogOpCodes, Holder<Integer>> countEditLogOpTypes(
+      EditLogInputStream elis) throws IOException {
+    EnumMap<FSEditLogOpCodes, Holder<Integer>> opCounts =
+        new EnumMap<FSEditLogOpCodes, Holder<Integer>>(FSEditLogOpCodes.class);
     
+    FSEditLogOp op;
+    while ((op = elis.readOp()) != null) {
+      Holder<Integer> i = opCounts.get(op.opCode);
+      if (i == null) {
+        i = new Holder<Integer>(0);
+        opCounts.put(op.opCode, i);
+      }
+      i.held++;
+    }
     return opCounts;
   }
 
-  
   /**
    * Assert that all of the given directories have the same newest filename
    * for fsimage that they hold the same data.
@@ -264,15 +275,15 @@ public abstract class FSImageTestUtil {
     for (File dir : dirs) {
       FSImageTransactionalStorageInspector inspector =
         inspectStorageDirectory(dir, NameNodeDirType.IMAGE);
-      FSImageFile latestImage = inspector.getLatestImage();
-      assertNotNull("No image in " + dir, latestImage);      
-      long thisTxId = latestImage.getCheckpointTxId();
+      List<FSImageFile> latestImages = inspector.getLatestImages();
+      assert(!latestImages.isEmpty());
+      long thisTxId = latestImages.get(0).getCheckpointTxId();
       if (imageTxId != -1 && thisTxId != imageTxId) {
         fail("Storage directory " + dir + " does not have the same " +
             "last image index " + imageTxId + " as another");
       }
       imageTxId = thisTxId;
-      imageFiles.add(inspector.getLatestImage().getFile());
+      imageFiles.add(inspector.getLatestImages().get(0).getFile());
     }
     
     assertFileContentsSame(imageFiles.toArray(new File[0]));
@@ -416,7 +427,7 @@ public abstract class FSImageTestUtil {
       new FSImageTransactionalStorageInspector();
     inspector.inspectDirectory(sd);
     
-    return inspector.getLatestImage().getFile();
+    return inspector.getLatestImages().get(0).getFile();
   }
 
   /**
@@ -431,8 +442,8 @@ public abstract class FSImageTestUtil {
       new FSImageTransactionalStorageInspector();
     inspector.inspectDirectory(sd);
 
-    FSImageFile latestImage = inspector.getLatestImage();
-    return (latestImage == null) ? null : latestImage.getFile();
+    List<FSImageFile> latestImages = inspector.getLatestImages();
+    return (latestImages.isEmpty()) ? null : latestImages.get(0).getFile();
   }
 
   /**
@@ -498,7 +509,11 @@ public abstract class FSImageTestUtil {
       props.load(fis);
       IOUtils.closeStream(fis);
   
-      props.setProperty(key, value);
+      if (value == null || value.isEmpty()) {
+        props.remove(key);
+      } else {
+        props.setProperty(key, value);
+      }
       
       out = new FileOutputStream(versionFile);
       props.store(out, null);
@@ -539,6 +554,18 @@ public abstract class FSImageTestUtil {
    * get NameSpace quota.
    */
   public static long getNSQuota(FSNamesystem ns) {
-    return ns.dir.rootDir.getNsQuota();
+    return ns.dir.rootDir.getQuotaCounts().get(Quota.NAMESPACE);
+  }
+  
+  public static void assertNNFilesMatch(MiniDFSCluster cluster) throws Exception {
+    List<File> curDirs = Lists.newArrayList();
+    curDirs.addAll(FSImageTestUtil.getNameNodeCurrentDirs(cluster, 0));
+    curDirs.addAll(FSImageTestUtil.getNameNodeCurrentDirs(cluster, 1));
+    
+    // Ignore seen_txid file, since the newly bootstrapped standby
+    // will have a higher seen_txid than the one it bootstrapped from.
+    Set<String> ignoredFiles = ImmutableSet.of("seen_txid");
+    FSImageTestUtil.assertParallelFilesAreIdentical(curDirs,
+        ignoredFiles);
   }
 }

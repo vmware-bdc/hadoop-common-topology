@@ -32,6 +32,8 @@ import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.GetBlocksReq
 import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.GetBlocksResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.GetEditLogManifestRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.GetEditLogManifestResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.GetMostRecentCheckpointTxIdRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.GetMostRecentCheckpointTxIdResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.GetTransactionIdRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.GetTransactionIdResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.NamenodeProtocolProtos.RegisterRequestProto;
@@ -61,6 +63,12 @@ public class NamenodeProtocolServerSideTranslatorPB implements
     NamenodeProtocolPB {
   private final NamenodeProtocol impl;
 
+  private final static ErrorReportResponseProto VOID_ERROR_REPORT_RESPONSE = 
+  ErrorReportResponseProto.newBuilder().build();
+
+  private final static EndCheckpointResponseProto VOID_END_CHECKPOINT_RESPONSE =
+  EndCheckpointResponseProto.newBuilder().build();
+
   public NamenodeProtocolServerSideTranslatorPB(NamenodeProtocol impl) {
     this.impl = impl;
   }
@@ -89,8 +97,12 @@ public class NamenodeProtocolServerSideTranslatorPB implements
     } catch (IOException e) {
       throw new ServiceException(e);
     }
-    return GetBlockKeysResponseProto.newBuilder()
-        .setKeys(PBHelper.convert(keys)).build();
+    GetBlockKeysResponseProto.Builder builder = 
+        GetBlockKeysResponseProto.newBuilder();
+    if (keys != null) {
+      builder.setKeys(PBHelper.convert(keys));
+    }
+    return builder.build();
   }
 
   @Override
@@ -104,6 +116,20 @@ public class NamenodeProtocolServerSideTranslatorPB implements
     }
     return GetTransactionIdResponseProto.newBuilder().setTxId(txid).build();
   }
+  
+  @Override
+  public GetMostRecentCheckpointTxIdResponseProto getMostRecentCheckpointTxId(
+      RpcController unused, GetMostRecentCheckpointTxIdRequestProto request)
+      throws ServiceException {
+    long txid;
+    try {
+      txid = impl.getMostRecentCheckpointTxId();
+    } catch (IOException e) {
+      throw new ServiceException(e);
+    }
+    return GetMostRecentCheckpointTxIdResponseProto.newBuilder().setTxId(txid).build();
+  }
+
 
   @Override
   public RollEditLogResponseProto rollEditLog(RpcController unused,
@@ -127,15 +153,17 @@ public class NamenodeProtocolServerSideTranslatorPB implements
     } catch (IOException e) {
       throw new ServiceException(e);
     }
-    return ErrorReportResponseProto.newBuilder().build();
+    return VOID_ERROR_REPORT_RESPONSE;
   }
 
   @Override
-  public RegisterResponseProto register(RpcController unused,
-      RegisterRequestProto request) throws ServiceException {
+  public RegisterResponseProto registerSubordinateNamenode(
+      RpcController unused, RegisterRequestProto request)
+      throws ServiceException {
     NamenodeRegistration reg;
     try {
-      reg = impl.register(PBHelper.convert(request.getRegistration()));
+      reg = impl.registerSubordinateNamenode(
+          PBHelper.convert(request.getRegistration()));
     } catch (IOException e) {
       throw new ServiceException(e);
     }
@@ -165,7 +193,7 @@ public class NamenodeProtocolServerSideTranslatorPB implements
     } catch (IOException e) {
       throw new ServiceException(e);
     }
-    return EndCheckpointResponseProto.newBuilder().build();
+    return VOID_END_CHECKPOINT_RESPONSE;
   }
 
   @Override

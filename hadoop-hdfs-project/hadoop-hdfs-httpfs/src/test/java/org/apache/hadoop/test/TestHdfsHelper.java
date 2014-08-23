@@ -17,20 +17,22 @@
  */
 package org.apache.hadoop.test;
 
+import java.io.File;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.junit.Test;
 import org.junit.runners.model.FrameworkMethod;
 import org.junit.runners.model.Statement;
 
-import java.io.File;
-import java.util.concurrent.atomic.AtomicInteger;
-
 public class TestHdfsHelper extends TestDirHelper {
 
+  @Override
   @Test
   public void dummy() {
   }
@@ -81,7 +83,8 @@ public class TestHdfsHelper extends TestDirHelper {
 
     private Path resetHdfsTestDir(Configuration conf) {
 
-      Path testDir = new Path("./" + TEST_DIR_ROOT, testName + "-" + counter.getAndIncrement());
+      Path testDir = new Path("/tmp/" + testName + "-" +
+        counter.getAndIncrement());
       try {
         // currentUser
         FileSystem fs = FileSystem.get(conf);
@@ -143,6 +146,8 @@ public class TestHdfsHelper extends TestDirHelper {
       conf.set("dfs.block.access.token.enable", "false");
       conf.set("dfs.permissions", "true");
       conf.set("hadoop.security.authentication", "simple");
+      conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_ACLS_ENABLED_KEY, true);
+      conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_XATTRS_ENABLED_KEY, true);
       MiniDFSCluster.Builder builder = new MiniDFSCluster.Builder(conf);
       builder.numDataNodes(2);
       MiniDFSCluster miniHdfs = builder.build();

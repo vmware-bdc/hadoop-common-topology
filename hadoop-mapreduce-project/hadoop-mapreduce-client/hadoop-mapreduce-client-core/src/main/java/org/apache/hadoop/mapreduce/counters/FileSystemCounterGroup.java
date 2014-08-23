@@ -23,6 +23,7 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
@@ -34,6 +35,7 @@ import com.google.common.collect.Iterators;
 import com.google.common.collect.Maps;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.io.WritableUtils;
 import org.apache.hadoop.mapreduce.Counter;
 import org.apache.hadoop.mapreduce.FileSystemCounter;
@@ -54,14 +56,15 @@ public abstract class FileSystemCounterGroup<C extends Counter>
 
   // C[] would need Array.newInstance which requires a Class<C> reference.
   // Just a few local casts probably worth not having to carry it around.
-  private final Map<String, Object[]> map = Maps.newTreeMap();
+  private final Map<String, Object[]> map =
+    new ConcurrentSkipListMap<String, Object[]>();
   private String displayName;
 
   private static final Joiner NAME_JOINER = Joiner.on('_');
   private static final Joiner DISP_JOINER = Joiner.on(": ");
 
   @InterfaceAudience.Private
-  public class FSCounter extends AbstractCounter {
+  public static class FSCounter extends AbstractCounter {
     final String scheme;
     final FileSystemCounter key;
     private long value;
@@ -69,6 +72,16 @@ public abstract class FileSystemCounterGroup<C extends Counter>
     public FSCounter(String scheme, FileSystemCounter ref) {
       this.scheme = scheme;
       key = ref;
+    }
+    
+    @Private
+    public String getScheme() {
+      return scheme;
+    }
+    
+    @Private
+    public FileSystemCounter getFileSystemCounter() {
+      return key;
     }
 
     @Override
@@ -139,8 +152,7 @@ public abstract class FileSystemCounterGroup<C extends Counter>
   @Override
   public void addCounter(C counter) {
     C ours;
-    if (counter instanceof FileSystemCounterGroup<?>.FSCounter) {
-      @SuppressWarnings("unchecked")
+    if (counter instanceof FileSystemCounterGroup.FSCounter) {
       FSCounter c = (FSCounter) counter;
       ours = findCounter(c.scheme, c.key);
     }

@@ -21,14 +21,16 @@ package org.apache.hadoop.fs.shell;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.LinkedList;
+import java.util.List;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.fs.PathIOException;
+import org.apache.hadoop.fs.PathIsDirectoryException;
+import org.apache.hadoop.fs.PathIsNotDirectoryException;
+import org.apache.hadoop.fs.PathIsNotEmptyDirectoryException;
+import org.apache.hadoop.fs.PathNotFoundException;
 import org.apache.hadoop.fs.Trash;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIOException;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIsDirectoryException;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIsNotDirectoryException;
-import org.apache.hadoop.fs.shell.PathExceptions.PathIsNotEmptyDirectoryException;
 
 /**
  * Classes that delete paths
@@ -49,13 +51,13 @@ class Delete {
     public static final String NAME = "rm";
     public static final String USAGE = "[-f] [-r|-R] [-skipTrash] <src> ...";
     public static final String DESCRIPTION =
-      "Delete all files that match the specified file pattern.\n" +
+      "Delete all files that match the specified file pattern. " +
       "Equivalent to the Unix command \"rm <src>\"\n" +
-      "-skipTrash option bypasses trash, if enabled, and immediately\n" +
+      "-skipTrash: option bypasses trash, if enabled, and immediately " +
       "deletes <src>\n" +
-      "  -f     If the file does not exist, do not display a diagnostic\n" +
-      "         message or modify the exit status to reflect an error.\n" +
-      "  -[rR]  Recursively deletes directories";
+      "-f: If the file does not exist, do not display a diagnostic " +
+      "message or modify the exit status to reflect an error.\n" +
+      "-[rR]:  Recursively deletes directories";
 
     private boolean skipTrash = false;
     private boolean deleteDirs = false;
@@ -69,6 +71,19 @@ class Delete {
       ignoreFNF = cf.getOpt("f");
       deleteDirs = cf.getOpt("r") || cf.getOpt("R");
       skipTrash = cf.getOpt("skipTrash");
+    }
+
+    @Override
+    protected List<PathData> expandArgument(String arg) throws IOException {
+      try {
+        return super.expandArgument(arg);
+      } catch (PathNotFoundException e) {
+        if (!ignoreFNF) {
+          throw e;
+        }
+        // prevent -f on a non-existent glob from failing
+        return new LinkedList<PathData>();
+      }
     }
 
     @Override
@@ -103,7 +118,11 @@ class Delete {
         } catch(FileNotFoundException fnfe) {
           throw fnfe;
         } catch (IOException ioe) {
-            throw new IOException(ioe.getMessage() + ". Consider using -skipTrash option", ioe);
+          String msg = ioe.getMessage();
+          if (ioe.getCause() != null) {
+            msg += ": " + ioe.getCause().getMessage();
+	  }
+          throw new IOException(msg + ". Consider using -skipTrash option", ioe);
         }
       }
       return success;
@@ -114,6 +133,7 @@ class Delete {
   static class Rmr extends Rm {
     public static final String NAME = "rmr";
     
+    @Override
     protected void processOptions(LinkedList<String> args) throws IOException {
       args.addFirst("-r");
       super.processOptions(args);
@@ -131,11 +151,12 @@ class Delete {
     public static final String USAGE =
       "[--ignore-fail-on-non-empty] <dir> ...";
     public static final String DESCRIPTION =
-      "Removes the directory entry specified by each directory argument,\n" +
+      "Removes the directory entry specified by each directory argument, " +
       "provided it is empty.\n"; 
     
     private boolean ignoreNonEmpty = false;
     
+    @Override
     protected void processOptions(LinkedList<String> args) throws IOException {
       CommandFormat cf = new CommandFormat(
           1, Integer.MAX_VALUE, "-ignore-fail-on-non-empty");

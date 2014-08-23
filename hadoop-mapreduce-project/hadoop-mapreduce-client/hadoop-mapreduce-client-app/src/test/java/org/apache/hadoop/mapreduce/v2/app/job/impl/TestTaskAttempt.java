@@ -20,6 +20,7 @@ package org.apache.hadoop.mapreduce.v2.app.job.impl;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -28,34 +29,28 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RawLocalFileSystem;
-import org.apache.hadoop.io.DataInputByteBuffer;
-import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.MapTaskAttemptImpl;
-import org.apache.hadoop.mapred.WrappedJvmID;
+import org.apache.hadoop.mapreduce.Counters;
 import org.apache.hadoop.mapreduce.JobCounter;
 import org.apache.hadoop.mapreduce.MRJobConfig;
-import org.apache.hadoop.mapreduce.OutputCommitter;
-import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryEvent;
 import org.apache.hadoop.mapreduce.jobhistory.TaskAttemptUnsuccessfulCompletion;
-import org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier;
 import org.apache.hadoop.mapreduce.split.JobSplit.TaskSplitMetaInfo;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.JobState;
+import org.apache.hadoop.mapreduce.v2.api.records.Locality;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptReport;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptState;
@@ -63,120 +58,42 @@ import org.apache.hadoop.mapreduce.v2.api.records.TaskId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskState;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskType;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
+import org.apache.hadoop.mapreduce.v2.app.ClusterInfo;
 import org.apache.hadoop.mapreduce.v2.app.ControlledClock;
 import org.apache.hadoop.mapreduce.v2.app.MRApp;
 import org.apache.hadoop.mapreduce.v2.app.TaskAttemptListener;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
 import org.apache.hadoop.mapreduce.v2.app.job.Task;
 import org.apache.hadoop.mapreduce.v2.app.job.TaskAttempt;
+import org.apache.hadoop.mapreduce.v2.app.job.TaskAttemptStateInternal;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobEventType;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptContainerAssignedEvent;
+import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptContainerLaunchedEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptDiagnosticsUpdateEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerRequestEvent;
 import org.apache.hadoop.mapreduce.v2.util.MRBuilderUtils;
 import org.apache.hadoop.security.Credentials;
-import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
-import org.apache.hadoop.security.token.TokenIdentifier;
-import org.apache.hadoop.yarn.Clock;
-import org.apache.hadoop.yarn.ClusterInfo;
-import org.apache.hadoop.yarn.SystemClock;
-import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
-import org.apache.hadoop.yarn.util.BuilderUtils;
+import org.apache.hadoop.yarn.util.Clock;
+import org.apache.hadoop.yarn.util.SystemClock;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
 @SuppressWarnings({"unchecked", "rawtypes"})
 public class TestTaskAttempt{
-  @Test
-  public void testAttemptContainerRequest() throws Exception {
-    //WARNING: This test must run first.  This is because there is an 
-    // optimization where the credentials passed in are cached statically so 
-    // they do not need to be recomputed when creating a new 
-    // ContainerLaunchContext. if other tests run first this code will cache
-    // their credentials and this test will fail trying to look for the
-    // credentials it inserted in.
-    final Text SECRET_KEY_ALIAS = new Text("secretkeyalias");
-    final byte[] SECRET_KEY = ("secretkey").getBytes();
-    Map<ApplicationAccessType, String> acls =
-        new HashMap<ApplicationAccessType, String>(1);
-    acls.put(ApplicationAccessType.VIEW_APP, "otheruser");
-    ApplicationId appId = BuilderUtils.newApplicationId(1, 1);
-    JobId jobId = MRBuilderUtils.newJobId(appId, 1);
-    TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
-    Path jobFile = mock(Path.class);
-
-    EventHandler eventHandler = mock(EventHandler.class);
-    TaskAttemptListener taListener = mock(TaskAttemptListener.class);
-    when(taListener.getAddress()).thenReturn(new InetSocketAddress("localhost", 0));
-
-    JobConf jobConf = new JobConf();
-    jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
-    jobConf.setBoolean("fs.file.impl.disable.cache", true);
-    jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
-
-    // setup UGI for security so tokens and keys are preserved
-    jobConf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION, "kerberos");
-    UserGroupInformation.setConfiguration(jobConf);
-
-    Credentials credentials = new Credentials();
-    credentials.addSecretKey(SECRET_KEY_ALIAS, SECRET_KEY);
-    Token<JobTokenIdentifier> jobToken = new Token<JobTokenIdentifier>(
-        ("tokenid").getBytes(), ("tokenpw").getBytes(),
-        new Text("tokenkind"), new Text("tokenservice"));
-    
-    TaskAttemptImpl taImpl =
-        new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
-            mock(TaskSplitMetaInfo.class), jobConf, taListener,
-            mock(OutputCommitter.class), jobToken, credentials,
-            new SystemClock(), null);
-
-    jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, taImpl.getID().toString());
-    ContainerId containerId = BuilderUtils.newContainerId(1, 1, 1, 1);
-    
-    ContainerLaunchContext launchCtx =
-        TaskAttemptImpl.createContainerLaunchContext(acls, containerId,
-            jobConf, jobToken, taImpl.createRemoteTask(),
-            TypeConverter.fromYarn(jobId), mock(Resource.class),
-            mock(WrappedJvmID.class), taListener,
-            credentials);
-
-    Assert.assertEquals("ACLs mismatch", acls, launchCtx.getApplicationACLs());
-    Credentials launchCredentials = new Credentials();
-
-    DataInputByteBuffer dibb = new DataInputByteBuffer();
-    dibb.reset(launchCtx.getContainerTokens());
-    launchCredentials.readTokenStorageStream(dibb);
-
-    // verify all tokens specified for the task attempt are in the launch context
-    for (Token<? extends TokenIdentifier> token : credentials.getAllTokens()) {
-      Token<? extends TokenIdentifier> launchToken =
-          launchCredentials.getToken(token.getService());
-      Assert.assertNotNull("Token " + token.getService() + " is missing",
-          launchToken);
-      Assert.assertEquals("Token " + token.getService() + " mismatch",
-          token, launchToken);
-    }
-
-    // verify the secret key is in the launch context
-    Assert.assertNotNull("Secret key missing",
-        launchCredentials.getSecretKey(SECRET_KEY_ALIAS));
-    Assert.assertTrue("Secret key mismatch", Arrays.equals(SECRET_KEY,
-        launchCredentials.getSecretKey(SECRET_KEY_ALIAS)));
-  }
-
+	
   static public class StubbedFS extends RawLocalFileSystem {
     @Override
     public FileStatus getFileStatus(Path f) throws IOException {
@@ -226,7 +143,7 @@ public class TestTaskAttempt{
     //Only a single occurrence of /DefaultRack
     assertEquals(1, requestedRacks.length);
   }
- 
+
   @Test
   public void testHostResolveAttempt() throws Exception {
     TaskAttemptImpl.RequestContainerTransition rct =
@@ -244,6 +161,7 @@ public class TestTaskAttempt{
         createMapTaskAttemptImplForTest(eventHandler, splitInfo);
     TaskAttemptImpl spyTa = spy(mockTaskAttempt);
     when(spyTa.resolveHost(hosts[0])).thenReturn("host1");
+    spyTa.dataLocalHosts = spyTa.resolveHosts(splitInfo.getLocations());
 
     TaskAttemptEvent mockTAEvent = mock(TaskAttemptEvent.class);
     rct.transition(spyTa, mockTAEvent);
@@ -265,15 +183,15 @@ public class TestTaskAttempt{
     }
     assertEquals(0, expected.size());
   }
-  
+
   @Test
-  public void testSlotMillisCounterUpdate() throws Exception {
-    verifySlotMillis(2048, 2048, 1024);
-    verifySlotMillis(2048, 1024, 1024);
-    verifySlotMillis(10240, 1024, 2048);
+  public void testMillisCountersUpdate() throws Exception {
+    verifyMillisCounters(2048, 2048, 1024);
+    verifyMillisCounters(2048, 1024, 1024);
+    verifyMillisCounters(10240, 1024, 2048);
   }
 
-  public void verifySlotMillis(int mapMemMb, int reduceMemMb,
+  public void verifyMillisCounters(int mapMemMb, int reduceMemMb,
       int minContainerSize) throws Exception {
     Clock actualClock = new SystemClock();
     ControlledClock clock = new ControlledClock(actualClock);
@@ -283,8 +201,9 @@ public class TestTaskAttempt{
     Configuration conf = new Configuration();
     conf.setInt(MRJobConfig.MAP_MEMORY_MB, mapMemMb);
     conf.setInt(MRJobConfig.REDUCE_MEMORY_MB, reduceMemMb);
-    app.setClusterInfo(new ClusterInfo(BuilderUtils
-        .newResource(minContainerSize), BuilderUtils.newResource(10240)));
+    conf.setInt(YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB, 
+      minContainerSize);
+    app.setClusterInfo(new ClusterInfo(Resource.newInstance(10240, 1)));
 
     Job job = app.submit(conf);
     app.waitForState(job, JobState.RUNNING);
@@ -316,33 +235,42 @@ public class TestTaskAttempt{
     Assert.assertEquals(mta.getLaunchTime(), 10);
     Assert.assertEquals(rta.getFinishTime(), 11);
     Assert.assertEquals(rta.getLaunchTime(), 10);
+    Counters counters = job.getAllCounters();
     Assert.assertEquals((int) Math.ceil((float) mapMemMb / minContainerSize),
-        job.getAllCounters().findCounter(JobCounter.SLOTS_MILLIS_MAPS)
-            .getValue());
-    Assert.assertEquals(
-        (int) Math.ceil((float) reduceMemMb / minContainerSize), job
-            .getAllCounters().findCounter(JobCounter.SLOTS_MILLIS_REDUCES)
-            .getValue());
+        counters.findCounter(JobCounter.SLOTS_MILLIS_MAPS).getValue());
+    Assert.assertEquals((int) Math.ceil((float) reduceMemMb / minContainerSize),
+        counters.findCounter(JobCounter.SLOTS_MILLIS_REDUCES).getValue());
+    Assert.assertEquals(1,
+        counters.findCounter(JobCounter.MILLIS_MAPS).getValue());
+    Assert.assertEquals(1,
+        counters.findCounter(JobCounter.MILLIS_REDUCES).getValue());
+    Assert.assertEquals(mapMemMb,
+        counters.findCounter(JobCounter.MB_MILLIS_MAPS).getValue());
+    Assert.assertEquals(reduceMemMb,
+        counters.findCounter(JobCounter.MB_MILLIS_REDUCES).getValue());
+    Assert.assertEquals(1,
+        counters.findCounter(JobCounter.VCORES_MILLIS_MAPS).getValue());
+    Assert.assertEquals(1,
+        counters.findCounter(JobCounter.VCORES_MILLIS_REDUCES).getValue());
   }
-  
+
   private TaskAttemptImpl createMapTaskAttemptImplForTest(
       EventHandler eventHandler, TaskSplitMetaInfo taskSplitMetaInfo) {
     Clock clock = new SystemClock();
     return createMapTaskAttemptImplForTest(eventHandler, taskSplitMetaInfo, clock);
   }
-  
+
   private TaskAttemptImpl createMapTaskAttemptImplForTest(
       EventHandler eventHandler, TaskSplitMetaInfo taskSplitMetaInfo, Clock clock) {
-    ApplicationId appId = BuilderUtils.newApplicationId(1, 1);
+    ApplicationId appId = ApplicationId.newInstance(1, 1);
     JobId jobId = MRBuilderUtils.newJobId(appId, 1);
     TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
     TaskAttemptListener taListener = mock(TaskAttemptListener.class);
     Path jobFile = mock(Path.class);
     JobConf jobConf = new JobConf();
-    OutputCommitter outputCommitter = mock(OutputCommitter.class);
     TaskAttemptImpl taImpl =
         new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
-            taskSplitMetaInfo, jobConf, taListener, outputCommitter, null,
+            taskSplitMetaInfo, jobConf, taListener, null,
             null, clock, null);
     return taImpl;
   }
@@ -401,42 +329,42 @@ public class TestTaskAttempt{
       };
     }
   }
-  
+
   @Test
   public void testLaunchFailedWhileKilling() throws Exception {
-    ApplicationId appId = BuilderUtils.newApplicationId(1, 2);
-    ApplicationAttemptId appAttemptId = 
-      BuilderUtils.newApplicationAttemptId(appId, 0);
+    ApplicationId appId = ApplicationId.newInstance(1, 2);
+    ApplicationAttemptId appAttemptId =
+      ApplicationAttemptId.newInstance(appId, 0);
     JobId jobId = MRBuilderUtils.newJobId(appId, 1);
     TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
     TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
     Path jobFile = mock(Path.class);
-    
+
     MockEventHandler eventHandler = new MockEventHandler();
     TaskAttemptListener taListener = mock(TaskAttemptListener.class);
     when(taListener.getAddress()).thenReturn(new InetSocketAddress("localhost", 0));
-    
+
     JobConf jobConf = new JobConf();
     jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
     jobConf.setBoolean("fs.file.impl.disable.cache", true);
     jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
     jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
-    
+
     TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
     when(splits.getLocations()).thenReturn(new String[] {"127.0.0.1"});
-    
+
     TaskAttemptImpl taImpl =
       new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
           splits, jobConf, taListener,
-          mock(OutputCommitter.class), mock(Token.class), new Credentials(),
+          new Token(), new Credentials(),
           new SystemClock(), null);
 
-    NodeId nid = BuilderUtils.newNodeId("127.0.0.1", 0);
-    ContainerId contId = BuilderUtils.newContainerId(appAttemptId, 3);
+    NodeId nid = NodeId.newInstance("127.0.0.1", 0);
+    ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
     Container container = mock(Container.class);
     when(container.getId()).thenReturn(contId);
     when(container.getNodeId()).thenReturn(nid);
-    
+
     taImpl.handle(new TaskAttemptEvent(attemptId,
         TaskAttemptEventType.TA_SCHEDULE));
     taImpl.handle(new TaskAttemptContainerAssignedEvent(attemptId,
@@ -448,11 +376,601 @@ public class TestTaskAttempt{
     taImpl.handle(new TaskAttemptEvent(attemptId,
         TaskAttemptEventType.TA_CONTAINER_LAUNCH_FAILED));
     assertFalse(eventHandler.internalError);
+    assertEquals("Task attempt is not assigned on the local node", 
+        Locality.NODE_LOCAL, taImpl.getLocality());
+  }
+
+  @Test
+  public void testContainerCleanedWhileRunning() throws Exception {
+    ApplicationId appId = ApplicationId.newInstance(1, 2);
+    ApplicationAttemptId appAttemptId =
+      ApplicationAttemptId.newInstance(appId, 0);
+    JobId jobId = MRBuilderUtils.newJobId(appId, 1);
+    TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
+    TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
+    Path jobFile = mock(Path.class);
+
+    MockEventHandler eventHandler = new MockEventHandler();
+    TaskAttemptListener taListener = mock(TaskAttemptListener.class);
+    when(taListener.getAddress()).thenReturn(new InetSocketAddress("localhost", 0));
+
+    JobConf jobConf = new JobConf();
+    jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
+    jobConf.setBoolean("fs.file.impl.disable.cache", true);
+    jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
+    jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
+
+    TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
+    when(splits.getLocations()).thenReturn(new String[] {"127.0.0.1"});
+
+    AppContext appCtx = mock(AppContext.class);
+    ClusterInfo clusterInfo = mock(ClusterInfo.class);
+    Resource resource = mock(Resource.class);
+    when(appCtx.getClusterInfo()).thenReturn(clusterInfo);
+    when(resource.getMemory()).thenReturn(1024);
+
+    TaskAttemptImpl taImpl =
+      new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
+          splits, jobConf, taListener,
+          new Token(), new Credentials(),
+          new SystemClock(), appCtx);
+
+    NodeId nid = NodeId.newInstance("127.0.0.2", 0);
+    ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
+    Container container = mock(Container.class);
+    when(container.getId()).thenReturn(contId);
+    when(container.getNodeId()).thenReturn(nid);
+    when(container.getNodeHttpAddress()).thenReturn("localhost:0");
+
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_SCHEDULE));
+    taImpl.handle(new TaskAttemptContainerAssignedEvent(attemptId,
+        container, mock(Map.class)));
+    taImpl.handle(new TaskAttemptContainerLaunchedEvent(attemptId, 0));
+    assertEquals("Task attempt is not in running state", taImpl.getState(),
+        TaskAttemptState.RUNNING);
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_CONTAINER_CLEANED));
+    assertFalse("InternalError occurred trying to handle TA_CONTAINER_CLEANED",
+        eventHandler.internalError);
+    assertEquals("Task attempt is not assigned on the local rack",
+        Locality.RACK_LOCAL, taImpl.getLocality());
+  }
+
+  @Test
+  public void testContainerCleanedWhileCommitting() throws Exception {
+    ApplicationId appId = ApplicationId.newInstance(1, 2);
+    ApplicationAttemptId appAttemptId =
+      ApplicationAttemptId.newInstance(appId, 0);
+    JobId jobId = MRBuilderUtils.newJobId(appId, 1);
+    TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
+    TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
+    Path jobFile = mock(Path.class);
+
+    MockEventHandler eventHandler = new MockEventHandler();
+    TaskAttemptListener taListener = mock(TaskAttemptListener.class);
+    when(taListener.getAddress()).thenReturn(new InetSocketAddress("localhost", 0));
+
+    JobConf jobConf = new JobConf();
+    jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
+    jobConf.setBoolean("fs.file.impl.disable.cache", true);
+    jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
+    jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
+
+    TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
+    when(splits.getLocations()).thenReturn(new String[] {});
+
+    AppContext appCtx = mock(AppContext.class);
+    ClusterInfo clusterInfo = mock(ClusterInfo.class);
+    Resource resource = mock(Resource.class);
+    when(appCtx.getClusterInfo()).thenReturn(clusterInfo);
+    when(resource.getMemory()).thenReturn(1024);
+
+    TaskAttemptImpl taImpl =
+      new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
+          splits, jobConf, taListener,
+          new Token(), new Credentials(),
+          new SystemClock(), appCtx);
+
+    NodeId nid = NodeId.newInstance("127.0.0.1", 0);
+    ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
+    Container container = mock(Container.class);
+    when(container.getId()).thenReturn(contId);
+    when(container.getNodeId()).thenReturn(nid);
+    when(container.getNodeHttpAddress()).thenReturn("localhost:0");
+
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_SCHEDULE));
+    taImpl.handle(new TaskAttemptContainerAssignedEvent(attemptId,
+        container, mock(Map.class)));
+    taImpl.handle(new TaskAttemptContainerLaunchedEvent(attemptId, 0));
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_COMMIT_PENDING));
+
+    assertEquals("Task attempt is not in commit pending state", taImpl.getState(),
+        TaskAttemptState.COMMIT_PENDING);
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_CONTAINER_CLEANED));
+    assertFalse("InternalError occurred trying to handle TA_CONTAINER_CLEANED",
+        eventHandler.internalError);
+    assertEquals("Task attempt is assigned locally", Locality.OFF_SWITCH,
+        taImpl.getLocality());
+  }
+
+  @Test
+  public void testDoubleTooManyFetchFailure() throws Exception {
+    ApplicationId appId = ApplicationId.newInstance(1, 2);
+    ApplicationAttemptId appAttemptId =
+      ApplicationAttemptId.newInstance(appId, 0);
+    JobId jobId = MRBuilderUtils.newJobId(appId, 1);
+    TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
+    TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
+    Path jobFile = mock(Path.class);
+
+    MockEventHandler eventHandler = new MockEventHandler();
+    TaskAttemptListener taListener = mock(TaskAttemptListener.class);
+    when(taListener.getAddress()).thenReturn(new InetSocketAddress("localhost", 0));
+
+    JobConf jobConf = new JobConf();
+    jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
+    jobConf.setBoolean("fs.file.impl.disable.cache", true);
+    jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
+    jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
+
+    TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
+    when(splits.getLocations()).thenReturn(new String[] {"127.0.0.1"});
+
+    AppContext appCtx = mock(AppContext.class);
+    ClusterInfo clusterInfo = mock(ClusterInfo.class);
+    Resource resource = mock(Resource.class);
+    when(appCtx.getClusterInfo()).thenReturn(clusterInfo);
+    when(resource.getMemory()).thenReturn(1024);
+
+    TaskAttemptImpl taImpl =
+      new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
+          splits, jobConf, taListener,
+          new Token(), new Credentials(),
+          new SystemClock(), appCtx);
+
+    NodeId nid = NodeId.newInstance("127.0.0.1", 0);
+    ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
+    Container container = mock(Container.class);
+    when(container.getId()).thenReturn(contId);
+    when(container.getNodeId()).thenReturn(nid);
+    when(container.getNodeHttpAddress()).thenReturn("localhost:0");
+
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_SCHEDULE));
+    taImpl.handle(new TaskAttemptContainerAssignedEvent(attemptId,
+        container, mock(Map.class)));
+    taImpl.handle(new TaskAttemptContainerLaunchedEvent(attemptId, 0));
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_DONE));
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_CONTAINER_CLEANED));
+
+    assertEquals("Task attempt is not in succeeded state", taImpl.getState(),
+        TaskAttemptState.SUCCEEDED);
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_TOO_MANY_FETCH_FAILURE));
+    assertEquals("Task attempt is not in FAILED state", taImpl.getState(),
+        TaskAttemptState.FAILED);
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_TOO_MANY_FETCH_FAILURE));
+    assertEquals("Task attempt is not in FAILED state, still", taImpl.getState(),
+        TaskAttemptState.FAILED);
+    assertFalse("InternalError occurred trying to handle TA_CONTAINER_CLEANED",
+        eventHandler.internalError);
+  }
+
+
+
+  @Test
+  public void testAppDiognosticEventOnUnassignedTask() throws Exception {
+    ApplicationId appId = ApplicationId.newInstance(1, 2);
+    ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(
+        appId, 0);
+    JobId jobId = MRBuilderUtils.newJobId(appId, 1);
+    TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
+    TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
+    Path jobFile = mock(Path.class);
+
+    MockEventHandler eventHandler = new MockEventHandler();
+    TaskAttemptListener taListener = mock(TaskAttemptListener.class);
+    when(taListener.getAddress()).thenReturn(
+        new InetSocketAddress("localhost", 0));
+
+    JobConf jobConf = new JobConf();
+    jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
+    jobConf.setBoolean("fs.file.impl.disable.cache", true);
+    jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
+    jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
+
+    TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
+    when(splits.getLocations()).thenReturn(new String[] { "127.0.0.1" });
+
+    AppContext appCtx = mock(AppContext.class);
+    ClusterInfo clusterInfo = mock(ClusterInfo.class);
+    Resource resource = mock(Resource.class);
+    when(appCtx.getClusterInfo()).thenReturn(clusterInfo);
+    when(resource.getMemory()).thenReturn(1024);
+
+    TaskAttemptImpl taImpl = new MapTaskAttemptImpl(taskId, 1, eventHandler,
+        jobFile, 1, splits, jobConf, taListener,
+        new Token(), new Credentials(), new SystemClock(), appCtx);
+
+    NodeId nid = NodeId.newInstance("127.0.0.1", 0);
+    ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
+    Container container = mock(Container.class);
+    when(container.getId()).thenReturn(contId);
+    when(container.getNodeId()).thenReturn(nid);
+    when(container.getNodeHttpAddress()).thenReturn("localhost:0");
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_SCHEDULE));
+    taImpl.handle(new TaskAttemptDiagnosticsUpdateEvent(attemptId,
+        "Task got killed"));
+    assertFalse(
+        "InternalError occurred trying to handle TA_DIAGNOSTICS_UPDATE on assigned task",
+        eventHandler.internalError);
+  }
+
+  @Test
+  public void testTooManyFetchFailureAfterKill() throws Exception {
+    ApplicationId appId = ApplicationId.newInstance(1, 2);
+    ApplicationAttemptId appAttemptId =
+      ApplicationAttemptId.newInstance(appId, 0);
+    JobId jobId = MRBuilderUtils.newJobId(appId, 1);
+    TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
+    TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
+    Path jobFile = mock(Path.class);
+
+    MockEventHandler eventHandler = new MockEventHandler();
+    TaskAttemptListener taListener = mock(TaskAttemptListener.class);
+    when(taListener.getAddress()).thenReturn(new InetSocketAddress("localhost", 0));
+
+    JobConf jobConf = new JobConf();
+    jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
+    jobConf.setBoolean("fs.file.impl.disable.cache", true);
+    jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
+    jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
+
+    TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
+    when(splits.getLocations()).thenReturn(new String[] {"127.0.0.1"});
+
+    AppContext appCtx = mock(AppContext.class);
+    ClusterInfo clusterInfo = mock(ClusterInfo.class);
+    Resource resource = mock(Resource.class);
+    when(appCtx.getClusterInfo()).thenReturn(clusterInfo);
+    when(resource.getMemory()).thenReturn(1024);
+
+    TaskAttemptImpl taImpl =
+      new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
+        splits, jobConf, taListener,
+        mock(Token.class), new Credentials(),
+        new SystemClock(), appCtx);
+
+    NodeId nid = NodeId.newInstance("127.0.0.1", 0);
+    ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
+    Container container = mock(Container.class);
+    when(container.getId()).thenReturn(contId);
+    when(container.getNodeId()).thenReturn(nid);
+    when(container.getNodeHttpAddress()).thenReturn("localhost:0");
+
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+      TaskAttemptEventType.TA_SCHEDULE));
+    taImpl.handle(new TaskAttemptContainerAssignedEvent(attemptId,
+      container, mock(Map.class)));
+    taImpl.handle(new TaskAttemptContainerLaunchedEvent(attemptId, 0));
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+      TaskAttemptEventType.TA_DONE));
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+      TaskAttemptEventType.TA_CONTAINER_CLEANED));
+
+    assertEquals("Task attempt is not in succeeded state", taImpl.getState(),
+      TaskAttemptState.SUCCEEDED);
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+      TaskAttemptEventType.TA_KILL));
+    assertEquals("Task attempt is not in KILLED state", taImpl.getState(),
+      TaskAttemptState.KILLED);
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+      TaskAttemptEventType.TA_TOO_MANY_FETCH_FAILURE));
+    assertEquals("Task attempt is not in KILLED state, still", taImpl.getState(),
+      TaskAttemptState.KILLED);
+    assertFalse("InternalError occurred trying to handle TA_CONTAINER_CLEANED",
+      eventHandler.internalError);
+  }
+
+  @Test
+  public void testAppDiognosticEventOnNewTask() throws Exception {
+    ApplicationId appId = ApplicationId.newInstance(1, 2);
+    ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(
+        appId, 0);
+    JobId jobId = MRBuilderUtils.newJobId(appId, 1);
+    TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
+    TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
+    Path jobFile = mock(Path.class);
+
+    MockEventHandler eventHandler = new MockEventHandler();
+    TaskAttemptListener taListener = mock(TaskAttemptListener.class);
+    when(taListener.getAddress()).thenReturn(
+        new InetSocketAddress("localhost", 0));
+
+    JobConf jobConf = new JobConf();
+    jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
+    jobConf.setBoolean("fs.file.impl.disable.cache", true);
+    jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
+    jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
+
+    TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
+    when(splits.getLocations()).thenReturn(new String[] { "127.0.0.1" });
+
+    AppContext appCtx = mock(AppContext.class);
+    ClusterInfo clusterInfo = mock(ClusterInfo.class);
+    Resource resource = mock(Resource.class);
+    when(appCtx.getClusterInfo()).thenReturn(clusterInfo);
+    when(resource.getMemory()).thenReturn(1024);
+
+    TaskAttemptImpl taImpl = new MapTaskAttemptImpl(taskId, 1, eventHandler,
+        jobFile, 1, splits, jobConf, taListener,
+        new Token(), new Credentials(), new SystemClock(), appCtx);
+
+    NodeId nid = NodeId.newInstance("127.0.0.1", 0);
+    ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
+    Container container = mock(Container.class);
+    when(container.getId()).thenReturn(contId);
+    when(container.getNodeId()).thenReturn(nid);
+    when(container.getNodeHttpAddress()).thenReturn("localhost:0");
+    taImpl.handle(new TaskAttemptDiagnosticsUpdateEvent(attemptId,
+        "Task got killed"));
+    assertFalse(
+        "InternalError occurred trying to handle TA_DIAGNOSTICS_UPDATE on assigned task",
+        eventHandler.internalError);
+  }
+    
+  @Test
+  public void testFetchFailureAttemptFinishTime() throws Exception{
+	ApplicationId appId = ApplicationId.newInstance(1, 2);
+	ApplicationAttemptId appAttemptId =
+	ApplicationAttemptId.newInstance(appId, 0);
+	JobId jobId = MRBuilderUtils.newJobId(appId, 1);
+	TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
+	TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
+	Path jobFile = mock(Path.class);
+
+	MockEventHandler eventHandler = new MockEventHandler();
+	TaskAttemptListener taListener = mock(TaskAttemptListener.class);
+	when(taListener.getAddress()).thenReturn(
+		new InetSocketAddress("localhost", 0));
+
+	JobConf jobConf = new JobConf();
+	jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
+	jobConf.setBoolean("fs.file.impl.disable.cache", true);
+	jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
+	jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
+
+	TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
+	when(splits.getLocations()).thenReturn(new String[] {"127.0.0.1"});
+
+	AppContext appCtx = mock(AppContext.class);
+	ClusterInfo clusterInfo = mock(ClusterInfo.class);
+	when(appCtx.getClusterInfo()).thenReturn(clusterInfo);
+
+	TaskAttemptImpl taImpl =
+	  new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
+	  splits, jobConf, taListener,mock(Token.class), new Credentials(),
+	  new SystemClock(), appCtx);
+
+	NodeId nid = NodeId.newInstance("127.0.0.1", 0);
+	ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
+	Container container = mock(Container.class);
+	when(container.getId()).thenReturn(contId);
+	when(container.getNodeId()).thenReturn(nid);
+	when(container.getNodeHttpAddress()).thenReturn("localhost:0"); 
+	    
+	taImpl.handle(new TaskAttemptEvent(attemptId,
+	 	TaskAttemptEventType.TA_SCHEDULE));
+	taImpl.handle(new TaskAttemptContainerAssignedEvent(attemptId,
+	    container, mock(Map.class)));
+	taImpl.handle(new TaskAttemptContainerLaunchedEvent(attemptId, 0));
+	taImpl.handle(new TaskAttemptEvent(attemptId,
+	    TaskAttemptEventType.TA_DONE));
+	taImpl.handle(new TaskAttemptEvent(attemptId,
+	    TaskAttemptEventType.TA_CONTAINER_CLEANED));
+	    
+	assertEquals("Task attempt is not in succeeded state", taImpl.getState(),
+		      TaskAttemptState.SUCCEEDED);
+	
+	assertTrue("Task Attempt finish time is not greater than 0", 
+			taImpl.getFinishTime() > 0);
+	
+	Long finishTime = taImpl.getFinishTime();
+	Thread.sleep(5);   
+	taImpl.handle(new TaskAttemptEvent(attemptId,
+	   TaskAttemptEventType.TA_TOO_MANY_FETCH_FAILURE));
+	
+	assertEquals("Task attempt is not in Too Many Fetch Failure state", 
+			taImpl.getState(), TaskAttemptState.FAILED);
+	
+	assertEquals("After TA_TOO_MANY_FETCH_FAILURE,"
+		+ " Task attempt finish time is not the same ",
+		finishTime, Long.valueOf(taImpl.getFinishTime()));  
   }
   
+  @Test
+  public void testContainerKillAfterAssigned() throws Exception {
+    ApplicationId appId = ApplicationId.newInstance(1, 2);
+    ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(appId,
+        0);
+    JobId jobId = MRBuilderUtils.newJobId(appId, 1);
+    TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
+    TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
+    Path jobFile = mock(Path.class);
+
+    MockEventHandler eventHandler = new MockEventHandler();
+    TaskAttemptListener taListener = mock(TaskAttemptListener.class);
+    when(taListener.getAddress()).thenReturn(
+        new InetSocketAddress("localhost", 0));
+
+    JobConf jobConf = new JobConf();
+    jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
+    jobConf.setBoolean("fs.file.impl.disable.cache", true);
+    jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
+    jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
+
+    TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
+    when(splits.getLocations()).thenReturn(new String[] { "127.0.0.1" });
+
+    AppContext appCtx = mock(AppContext.class);
+    ClusterInfo clusterInfo = mock(ClusterInfo.class);
+    Resource resource = mock(Resource.class);
+    when(appCtx.getClusterInfo()).thenReturn(clusterInfo);
+    when(resource.getMemory()).thenReturn(1024);
+
+    TaskAttemptImpl taImpl = new MapTaskAttemptImpl(taskId, 1, eventHandler,
+        jobFile, 1, splits, jobConf, taListener, new Token(),
+        new Credentials(), new SystemClock(), appCtx);
+
+    NodeId nid = NodeId.newInstance("127.0.0.2", 0);
+    ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
+    Container container = mock(Container.class);
+    when(container.getId()).thenReturn(contId);
+    when(container.getNodeId()).thenReturn(nid);
+    when(container.getNodeHttpAddress()).thenReturn("localhost:0");
+
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_SCHEDULE));
+    taImpl.handle(new TaskAttemptContainerAssignedEvent(attemptId, container,
+        mock(Map.class)));
+    assertEquals("Task attempt is not in assinged state",
+        taImpl.getInternalState(), TaskAttemptStateInternal.ASSIGNED);
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_KILL));
+    assertEquals("Task should be in KILLED state",
+        TaskAttemptStateInternal.KILL_CONTAINER_CLEANUP,
+        taImpl.getInternalState());
+  }
+
+  @Test
+  public void testContainerKillWhileRunning() throws Exception {
+    ApplicationId appId = ApplicationId.newInstance(1, 2);
+    ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(appId,
+        0);
+    JobId jobId = MRBuilderUtils.newJobId(appId, 1);
+    TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
+    TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
+    Path jobFile = mock(Path.class);
+
+    MockEventHandler eventHandler = new MockEventHandler();
+    TaskAttemptListener taListener = mock(TaskAttemptListener.class);
+    when(taListener.getAddress()).thenReturn(
+        new InetSocketAddress("localhost", 0));
+
+    JobConf jobConf = new JobConf();
+    jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
+    jobConf.setBoolean("fs.file.impl.disable.cache", true);
+    jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
+    jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
+
+    TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
+    when(splits.getLocations()).thenReturn(new String[] { "127.0.0.1" });
+
+    AppContext appCtx = mock(AppContext.class);
+    ClusterInfo clusterInfo = mock(ClusterInfo.class);
+    Resource resource = mock(Resource.class);
+    when(appCtx.getClusterInfo()).thenReturn(clusterInfo);
+    when(resource.getMemory()).thenReturn(1024);
+
+    TaskAttemptImpl taImpl = new MapTaskAttemptImpl(taskId, 1, eventHandler,
+        jobFile, 1, splits, jobConf, taListener, new Token(),
+        new Credentials(), new SystemClock(), appCtx);
+
+    NodeId nid = NodeId.newInstance("127.0.0.2", 0);
+    ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
+    Container container = mock(Container.class);
+    when(container.getId()).thenReturn(contId);
+    when(container.getNodeId()).thenReturn(nid);
+    when(container.getNodeHttpAddress()).thenReturn("localhost:0");
+
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_SCHEDULE));
+    taImpl.handle(new TaskAttemptContainerAssignedEvent(attemptId, container,
+        mock(Map.class)));
+    taImpl.handle(new TaskAttemptContainerLaunchedEvent(attemptId, 0));
+    assertEquals("Task attempt is not in running state", taImpl.getState(),
+        TaskAttemptState.RUNNING);
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_KILL));
+    assertFalse("InternalError occurred trying to handle TA_KILL",
+        eventHandler.internalError);
+    assertEquals("Task should be in KILLED state",
+        TaskAttemptStateInternal.KILL_CONTAINER_CLEANUP,
+        taImpl.getInternalState());
+  }
+
+  @Test
+  public void testContainerKillWhileCommitPending() throws Exception {
+    ApplicationId appId = ApplicationId.newInstance(1, 2);
+    ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(appId,
+        0);
+    JobId jobId = MRBuilderUtils.newJobId(appId, 1);
+    TaskId taskId = MRBuilderUtils.newTaskId(jobId, 1, TaskType.MAP);
+    TaskAttemptId attemptId = MRBuilderUtils.newTaskAttemptId(taskId, 0);
+    Path jobFile = mock(Path.class);
+
+    MockEventHandler eventHandler = new MockEventHandler();
+    TaskAttemptListener taListener = mock(TaskAttemptListener.class);
+    when(taListener.getAddress()).thenReturn(
+        new InetSocketAddress("localhost", 0));
+
+    JobConf jobConf = new JobConf();
+    jobConf.setClass("fs.file.impl", StubbedFS.class, FileSystem.class);
+    jobConf.setBoolean("fs.file.impl.disable.cache", true);
+    jobConf.set(JobConf.MAPRED_MAP_TASK_ENV, "");
+    jobConf.set(MRJobConfig.APPLICATION_ATTEMPT_ID, "10");
+
+    TaskSplitMetaInfo splits = mock(TaskSplitMetaInfo.class);
+    when(splits.getLocations()).thenReturn(new String[] { "127.0.0.1" });
+
+    AppContext appCtx = mock(AppContext.class);
+    ClusterInfo clusterInfo = mock(ClusterInfo.class);
+    Resource resource = mock(Resource.class);
+    when(appCtx.getClusterInfo()).thenReturn(clusterInfo);
+    when(resource.getMemory()).thenReturn(1024);
+
+    TaskAttemptImpl taImpl = new MapTaskAttemptImpl(taskId, 1, eventHandler,
+        jobFile, 1, splits, jobConf, taListener, new Token(),
+        new Credentials(), new SystemClock(), appCtx);
+
+    NodeId nid = NodeId.newInstance("127.0.0.2", 0);
+    ContainerId contId = ContainerId.newInstance(appAttemptId, 3);
+    Container container = mock(Container.class);
+    when(container.getId()).thenReturn(contId);
+    when(container.getNodeId()).thenReturn(nid);
+    when(container.getNodeHttpAddress()).thenReturn("localhost:0");
+
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_SCHEDULE));
+    taImpl.handle(new TaskAttemptContainerAssignedEvent(attemptId, container,
+        mock(Map.class)));
+    taImpl.handle(new TaskAttemptContainerLaunchedEvent(attemptId, 0));
+    assertEquals("Task attempt is not in running state", taImpl.getState(),
+        TaskAttemptState.RUNNING);
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_COMMIT_PENDING));
+    assertEquals("Task should be in COMMIT_PENDING state",
+        TaskAttemptStateInternal.COMMIT_PENDING, taImpl.getInternalState());
+    taImpl.handle(new TaskAttemptEvent(attemptId,
+        TaskAttemptEventType.TA_KILL));
+    assertFalse("InternalError occurred trying to handle TA_KILL",
+        eventHandler.internalError);
+    assertEquals("Task should be in KILLED state",
+        TaskAttemptStateInternal.KILL_CONTAINER_CLEANUP,
+        taImpl.getInternalState());
+  }
+
   public static class MockEventHandler implements EventHandler {
     public boolean internalError;
-    
+
     @Override
     public void handle(Event event) {
       if (event instanceof JobEvent) {
@@ -462,6 +980,6 @@ public class TestTaskAttempt{
         }
       }
     }
-    
+
   };
 }

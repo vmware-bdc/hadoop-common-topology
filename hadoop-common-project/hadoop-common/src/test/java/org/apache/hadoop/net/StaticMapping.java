@@ -21,10 +21,8 @@ import org.apache.hadoop.conf.Configuration;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Implements the {@link DNSToSwitchMapping} via static mappings. Used
@@ -148,5 +146,16 @@ public class StaticMapping extends AbstractDNSToSwitchMapping  {
     synchronized (nameToRackMap) {
       nameToRackMap.clear();
     }
+  }
+  
+  public void reloadCachedMappings() {
+    // reloadCachedMappings does nothing for StaticMapping; there is
+    // nowhere to reload from since all data is in memory.
+  }
+
+  @Override
+  public void reloadCachedMappings(List<String> names) {
+    // reloadCachedMappings does nothing for StaticMapping; there is
+    // nowhere to reload from since all data is in memory.
   }
 }

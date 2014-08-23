@@ -26,13 +26,13 @@ import java.security.PrivilegedExceptionAction;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
-import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.JobStatus;
 import org.apache.hadoop.mapreduce.MRJobConfig;
@@ -65,17 +65,19 @@ import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
-import org.apache.hadoop.yarn.YarnException;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
+import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
-import org.apache.hadoop.yarn.exceptions.YarnRemoteException;
+import org.apache.hadoop.yarn.exceptions.YarnException;
+import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
-import org.apache.hadoop.yarn.ipc.RPCUtil;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
-import org.apache.hadoop.yarn.security.ApplicationTokenIdentifier;
-import org.apache.hadoop.yarn.util.BuilderUtils;
+import org.apache.hadoop.yarn.security.client.ClientToAMTokenIdentifier;
+import org.apache.hadoop.yarn.util.ConverterUtils;
+
+import com.google.common.annotations.VisibleForTesting;
 
 public class ClientServiceDelegate {
   private static final Log LOG = LogFactory.getLog(ClientServiceDelegate.class);
@@ -93,7 +95,8 @@ public class ClientServiceDelegate {
   private RecordFactory recordFactory = RecordFactoryProvider.getRecordFactory(null);
   private static String UNKNOWN_USER = "Unknown User";
   private String trackingUrl;
-
+  private AtomicBoolean usingAMProxy = new AtomicBoolean(false);
+  private int maxClientRetry;
   private boolean amAclDisabledStatusLogged = false;
 
   public ClientServiceDelegate(Configuration conf, ResourceMgrDelegate rm,
@@ -104,6 +107,10 @@ public class ClientServiceDelegate {
         CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY,
         this.conf.getInt(MRJobConfig.MR_CLIENT_TO_AM_IPC_MAX_RETRIES,
             MRJobConfig.DEFAULT_MR_CLIENT_TO_AM_IPC_MAX_RETRIES));
+    this.conf.setInt(
+        CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_ON_SOCKET_TIMEOUTS_KEY,
+        this.conf.getInt(MRJobConfig.MR_CLIENT_TO_AM_IPC_MAX_RETRIES_ON_TIMEOUTS,
+            MRJobConfig.DEFAULT_MR_CLIENT_TO_AM_IPC_MAX_RETRIES_ON_TIMEOUTS));
     this.rm = rm;
     this.jobId = jobId;
     this.historyServerProxy = historyServerProxy;
@@ -133,18 +140,23 @@ public class ClientServiceDelegate {
     }
   }
 
-  private MRClientProtocol getProxy() throws YarnRemoteException {
+  private MRClientProtocol getProxy() throws IOException {
     if (realProxy != null) {
       return realProxy;
     }
     
     // Possibly allow nulls through the PB tunnel, otherwise deal with an exception
     // and redirect to the history server.
-    ApplicationReport application = rm.getApplicationReport(appId);
+    ApplicationReport application = null;
+    try {
+      application = rm.getApplicationReport(appId);
+    } catch (YarnException e2) {
+      throw new IOException(e2);
+    }
     if (application != null) {
       trackingUrl = application.getTrackingUrl();
     }
-    String serviceAddr = null;
+    InetSocketAddress serviceAddr = null;
     while (application == null
         || YarnApplicationState.RUNNING == application
             .getYarnApplicationState()) {
@@ -172,25 +184,21 @@ public class ClientServiceDelegate {
         if(!conf.getBoolean(MRJobConfig.JOB_AM_ACCESS_DISABLED, false)) {
           UserGroupInformation newUgi = UserGroupInformation.createRemoteUser(
               UserGroupInformation.getCurrentUser().getUserName());
-          serviceAddr = application.getHost() + ":" + application.getRpcPort();
+          serviceAddr = NetUtils.createSocketAddrForHost(
+              application.getHost(), application.getRpcPort());
           if (UserGroupInformation.isSecurityEnabled()) {
-            String clientTokenEncoded = application.getClientToken();
-            Token<ApplicationTokenIdentifier> clientToken =
-              new Token<ApplicationTokenIdentifier>();
-            clientToken.decodeFromUrlString(clientTokenEncoded);
-            // RPC layer client expects ip:port as service for tokens
-            InetSocketAddress addr = NetUtils.createSocketAddr(application
-                .getHost(), application.getRpcPort());
-            clientToken.setService(new Text(addr.getAddress().getHostAddress()
-                + ":" + addr.getPort()));
-            newUgi.addToken(clientToken);
+            org.apache.hadoop.yarn.api.records.Token clientToAMToken =
+                application.getClientToAMToken();
+            Token<ClientToAMTokenIdentifier> token =
+                ConverterUtils.convertFromYarn(clientToAMToken, serviceAddr);
+            newUgi.addToken(token);
           }
           LOG.debug("Connecting to " + serviceAddr);
-          final String tempStr = serviceAddr;
+          final InetSocketAddress finalServiceAddr = serviceAddr;
           realProxy = newUgi.doAs(new PrivilegedExceptionAction<MRClientProtocol>() {
             @Override
             public MRClientProtocol run() throws IOException {
-              return instantiateAMProxy(tempStr);
+              return instantiateAMProxy(finalServiceAddr);
             }
           });
         } else {
@@ -212,9 +220,13 @@ public class ClientServiceDelegate {
           Thread.sleep(2000);
         } catch (InterruptedException e1) {
           LOG.warn("getProxy() call interruped", e1);
-          throw new YarnException(e1);
+          throw new YarnRuntimeException(e1);
         }
-        application = rm.getApplicationReport(appId);
+        try {
+          application = rm.getApplicationReport(appId);
+        } catch (YarnException e1) {
+          throw new IOException(e1);
+        }
         if (application == null) {
           LOG.info("Could not get Job info from RM for job " + jobId
               + ". Redirecting to job history server.");
@@ -222,7 +234,9 @@ public class ClientServiceDelegate {
         }
       } catch (InterruptedException e) {
         LOG.warn("getProxy() call interruped", e);
-        throw new YarnException(e);
+        throw new YarnRuntimeException(e);
+      } catch (YarnException e) {
+        throw new IOException(e);
       }
     }
 
@@ -232,10 +246,13 @@ public class ClientServiceDelegate {
      */
     String user = application.getUser();
     if (user == null) {
-      throw RPCUtil.getRemoteException("User is not set in the application report");
+      throw new IOException("User is not set in the application report");
     }
-    if (application.getYarnApplicationState() == YarnApplicationState.NEW ||
-        application.getYarnApplicationState() == YarnApplicationState.SUBMITTED) {
+    if (application.getYarnApplicationState() == YarnApplicationState.NEW
+        || application.getYarnApplicationState() ==
+            YarnApplicationState.NEW_SAVING
+        || application.getYarnApplicationState() == YarnApplicationState.SUBMITTED
+        || application.getYarnApplicationState() == YarnApplicationState.ACCEPTED) {
       realProxy = null;
       return getNotRunningJob(application, JobState.NEW);
     }
@@ -270,51 +287,80 @@ public class ClientServiceDelegate {
     return historyServerProxy;
   }
 
-  MRClientProtocol instantiateAMProxy(final String serviceAddr)
+  MRClientProtocol instantiateAMProxy(final InetSocketAddress serviceAddr)
       throws IOException {
     LOG.trace("Connecting to ApplicationMaster at: " + serviceAddr);
     YarnRPC rpc = YarnRPC.create(conf);
     MRClientProtocol proxy = 
          (MRClientProtocol) rpc.getProxy(MRClientProtocol.class,
-            NetUtils.createSocketAddr(serviceAddr), conf);
+            serviceAddr, conf);
+    usingAMProxy.set(true);
     LOG.trace("Connected to ApplicationMaster at: " + serviceAddr);
     return proxy;
   }
 
   private synchronized Object invoke(String method, Class argClass,
-      Object args) throws YarnRemoteException {
+      Object args) throws IOException {
     Method methodOb = null;
     try {
       methodOb = MRClientProtocol.class.getMethod(method, argClass);
     } catch (SecurityException e) {
-      throw new YarnException(e);
+      throw new YarnRuntimeException(e);
     } catch (NoSuchMethodException e) {
-      throw new YarnException("Method name mismatch", e);
+      throw new YarnRuntimeException("Method name mismatch", e);
     }
-    while (true) {
+    maxClientRetry = this.conf.getInt(
+        MRJobConfig.MR_CLIENT_MAX_RETRIES,
+        MRJobConfig.DEFAULT_MR_CLIENT_MAX_RETRIES);
+    IOException lastException = null;
+    while (maxClientRetry > 0) {
+      MRClientProtocol MRClientProxy = null;
       try {
-        return methodOb.invoke(getProxy(), args);
-      } catch (YarnRemoteException yre) {
-        LOG.warn("Exception thrown by remote end.", yre);
-        throw yre;
+        MRClientProxy = getProxy();
+        return methodOb.invoke(MRClientProxy, args);
       } catch (InvocationTargetException e) {
-        if (e.getTargetException() instanceof YarnRemoteException) {
-          LOG.warn("Error from remote end: " + e
-              .getTargetException().getLocalizedMessage());
-          LOG.debug("Tracing remote error ", e.getTargetException());
-          throw (YarnRemoteException) e.getTargetException();
-        }
+        // Will not throw out YarnException anymore
         LOG.debug("Failed to contact AM/History for job " + jobId + 
             " retrying..", e.getTargetException());
         // Force reconnection by setting the proxy to null.
         realProxy = null;
+        // HS/AMS shut down
+        // if it's AM shut down, do not decrement maxClientRetry as we wait for
+        // AM to be restarted.
+        if (!usingAMProxy.get()) {
+          maxClientRetry--;
+        }
+        usingAMProxy.set(false);
+        lastException = new IOException(e.getTargetException());
+        try {
+          Thread.sleep(100);
+        } catch (InterruptedException ie) {
+          LOG.warn("ClientServiceDelegate invoke call interrupted", ie);
+          throw new YarnRuntimeException(ie);
+        }
       } catch (Exception e) {
         LOG.debug("Failed to contact AM/History for job " + jobId
             + "  Will retry..", e);
         // Force reconnection by setting the proxy to null.
         realProxy = null;
+        // RM shutdown
+        maxClientRetry--;
+        lastException = new IOException(e.getMessage());
+        try {
+          Thread.sleep(100);
+        } catch (InterruptedException ie) {
+          LOG.warn("ClientServiceDelegate invoke call interrupted", ie);
+          throw new YarnRuntimeException(ie);
+        }
       }
     }
+    throw lastException;
+  }
+
+  // Only for testing
+  @VisibleForTesting
+  public int getMaxClientRetry() {
+    return this.maxClientRetry;
   }
 
   public org.apache.hadoop.mapreduce.Counters getJobCounters(JobID arg0) throws IOException,
@@ -364,7 +410,7 @@ public class ClientServiceDelegate {
     return result;
   }
   
-  public JobStatus getJobStatus(JobID oldJobID) throws YarnRemoteException {
+  public JobStatus getJobStatus(JobID oldJobID) throws IOException {
     org.apache.hadoop.mapreduce.v2.api.records.JobId jobId =
       TypeConverter.toYarn(oldJobID);
     GetJobReportRequest request =
@@ -381,16 +427,13 @@ public class ClientServiceDelegate {
       String historyTrackingUrl = report.getTrackingUrl();
       String url = StringUtils.isNotEmpty(historyTrackingUrl)
           ? historyTrackingUrl : trackingUrl;
-      if (!UNAVAILABLE.equals(url)) {
-        url = "http://" + url;
-      }
       jobStatus = TypeConverter.fromYarn(report, url);
     }
     return jobStatus;
   }
 
   public org.apache.hadoop.mapreduce.TaskReport[] getTaskReports(JobID oldJobID, TaskType taskType)
-       throws YarnRemoteException, YarnRemoteException {
+       throws IOException{
     org.apache.hadoop.mapreduce.v2.api.records.JobId jobId =
       TypeConverter.toYarn(oldJobID);
     GetTaskReportsRequest request =
@@ -407,7 +450,7 @@ public class ClientServiceDelegate {
   }
 
   public boolean killTask(TaskAttemptID taskAttemptID, boolean fail)
-       throws YarnRemoteException {
+       throws IOException {
     org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId attemptID
       = TypeConverter.toYarn(taskAttemptID);
     if (fail) {
@@ -423,7 +466,7 @@ public class ClientServiceDelegate {
   }
 
   public boolean killJob(JobID oldJobID)
-       throws YarnRemoteException {
+       throws IOException {
     org.apache.hadoop.mapreduce.v2.api.records.JobId jobId
     = TypeConverter.toYarn(oldJobID);
     KillJobRequest killRequest = recordFactory.newRecordInstance(KillJobRequest.class);
@@ -433,7 +476,7 @@ public class ClientServiceDelegate {
   }
 
   public LogParams getLogFilePath(JobID oldJobID, TaskAttemptID oldTaskAttemptID)
-      throws YarnRemoteException, IOException {
+      throws IOException {
     org.apache.hadoop.mapreduce.v2.api.records.JobId jobId =
         TypeConverter.toYarn(oldJobID);
     GetJobReportRequest request =
@@ -462,7 +505,7 @@ public class ClientServiceDelegate {
             taReport.getContainerId().toString(),
             taReport.getContainerId().getApplicationAttemptId()
                 .getApplicationId().toString(),
-            BuilderUtils.newNodeId(taReport.getNodeManagerHost(),
+            NodeId.newInstance(taReport.getNodeManagerHost(),
                 taReport.getNodeManagerPort()).toString(), report.getUser());
       } else {
         if (report.getAMInfos() == null || report.getAMInfos().size() == 0) {
@@ -473,7 +516,7 @@ public class ClientServiceDelegate {
         return new LogParams(
             amInfo.getContainerId().toString(),
             amInfo.getAppAttemptId().getApplicationId().toString(),
-            BuilderUtils.newNodeId(amInfo.getNodeManagerHost(),
+            NodeId.newInstance(amInfo.getNodeManagerHost(),
                 amInfo.getNodeManagerPort()).toString(), report.getUser());
       }
     } else {

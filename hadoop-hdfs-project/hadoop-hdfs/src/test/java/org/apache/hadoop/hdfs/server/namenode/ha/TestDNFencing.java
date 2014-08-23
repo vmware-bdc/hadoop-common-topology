@@ -41,14 +41,14 @@ import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockCollection;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicy;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyDefault;
-import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
-import org.apache.hadoop.hdfs.server.namenode.FSInodeInfo;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
@@ -96,8 +96,8 @@ public class TestDNFencing {
     // Increase max streams so that we re-replicate quickly.
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_MAX_STREAMS_KEY, 1000);
     // See RandomDeleterPolicy javadoc.
-    conf.setClass("dfs.block.replicator.classname", RandomDeleterPolicy.class,
-        BlockPlacementPolicy.class); 
+    conf.setClass(DFSConfigKeys.DFS_BLOCK_REPLICATOR_CLASSNAME_KEY,
+        RandomDeleterPolicy.class, BlockPlacementPolicy.class); 
     conf.setInt(DFSConfigKeys.DFS_HA_TAILEDITS_PERIOD_KEY, 1);
     cluster = new MiniDFSCluster.Builder(conf)
       .nnTopology(MiniDFSNNTopology.simpleHATopology())
@@ -585,15 +585,14 @@ public class TestDNFencing {
     }
 
     @Override
-    public DatanodeDescriptor chooseReplicaToDelete(FSInodeInfo inode,
+    public DatanodeStorageInfo chooseReplicaToDelete(BlockCollection inode,
         Block block, short replicationFactor,
-        Collection<DatanodeDescriptor> first,
-        Collection<DatanodeDescriptor> second) {
+        Collection<DatanodeStorageInfo> first,
+        Collection<DatanodeStorageInfo> second) {
       
-      Collection<DatanodeDescriptor> chooseFrom =
-        !first.isEmpty() ? first : second;
+      Collection<DatanodeStorageInfo> chooseFrom = !first.isEmpty() ? first : second;
 
-      List<DatanodeDescriptor> l = Lists.newArrayList(chooseFrom);
+      List<DatanodeStorageInfo> l = Lists.newArrayList(chooseFrom);
       return l.get(DFSUtil.getRandom().nextInt(l.size()));
     }
   }

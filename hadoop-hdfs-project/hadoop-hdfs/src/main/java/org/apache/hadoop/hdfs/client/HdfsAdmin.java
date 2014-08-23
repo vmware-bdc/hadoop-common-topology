@@ -17,16 +17,26 @@
  */
 package org.apache.hadoop.hdfs.client;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
+import java.util.EnumSet;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CacheFlag;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
+import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
+import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
+import org.apache.hadoop.hdfs.protocol.EncryptionZone;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
 
 /**
@@ -104,5 +114,165 @@ public class HdfsAdmin {
    */
   public void clearSpaceQuota(Path src) throws IOException {
     dfs.setQuota(src, HdfsConstants.QUOTA_DONT_SET, HdfsConstants.QUOTA_RESET);
+  }
+  
+  /**
+   * Allow snapshot on a directory.
+   * @param path The path of the directory where snapshots will be taken.
+   */
+  public void allowSnapshot(Path path) throws IOException {
+    dfs.allowSnapshot(path);
+  }
+  
+  /**
+   * Disallow snapshot on a directory.
+   * @param path The path of the snapshottable directory.
+   */
+  public void disallowSnapshot(Path path) throws IOException {
+    dfs.disallowSnapshot(path);
+  }
+
+  /**
+   * Add a new CacheDirectiveInfo.
+   * 
+   * @param info Information about a directive to add.
+   * @param flags {@link CacheFlag}s to use for this operation.
+   * @return the ID of the directive that was created.
+   * @throws IOException if the directive could not be added
+   */
+  public long addCacheDirective(CacheDirectiveInfo info,
+      EnumSet<CacheFlag> flags) throws IOException {
+  return dfs.addCacheDirective(info, flags);
+  }
+  
+  /**
+   * Modify a CacheDirective.
+   * 
+   * @param info Information about the directive to modify. You must set the ID
+   *          to indicate which CacheDirective you want to modify.
+   * @param flags {@link CacheFlag}s to use for this operation.
+   * @throws IOException if the directive could not be modified
+   */
+  public void modifyCacheDirective(CacheDirectiveInfo info,
+      EnumSet<CacheFlag> flags) throws IOException {
+    dfs.modifyCacheDirective(info, flags);
+  }
+
+  /**
+   * Remove a CacheDirective.
+   * 
+   * @param id identifier of the CacheDirectiveInfo to remove
+   * @throws IOException if the directive could not be removed
+   */
+  public void removeCacheDirective(long id)
+      throws IOException {
+    dfs.removeCacheDirective(id);
+  }
+
+  /**
+   * List cache directives. Incrementally fetches results from the server.
+   * 
+   * @param filter Filter parameters to use when listing the directives, null to
+   *               list all directives visible to us.
+   * @return A RemoteIterator which returns CacheDirectiveInfo objects.
+   */
+  public RemoteIterator<CacheDirectiveEntry> listCacheDirectives(
+      CacheDirectiveInfo filter) throws IOException {
+    return dfs.listCacheDirectives(filter);
+  }
+
+  /**
+   * Add a cache pool.
+   *
+   * @param info
+   *          The request to add a cache pool.
+   * @throws IOException 
+   *          If the request could not be completed.
+   */
+  public void addCachePool(CachePoolInfo info) throws IOException {
+    dfs.addCachePool(info);
+  }
+
+  /**
+   * Modify an existing cache pool.
+   *
+   * @param info
+   *          The request to modify a cache pool.
+   * @throws IOException 
+   *          If the request could not be completed.
+   */
+  public void modifyCachePool(CachePoolInfo info) throws IOException {
+    dfs.modifyCachePool(info);
+  }
+    
+  /**
+   * Remove a cache pool.
+   *
+   * @param poolName
+   *          Name of the cache pool to remove.
+   * @throws IOException 
+   *          if the cache pool did not exist, or could not be removed.
+   */
+  public void removeCachePool(String poolName) throws IOException {
+    dfs.removeCachePool(poolName);
+  }
+
+  /**
+   * List all cache pools.
+   *
+   * @return A remote iterator from which you can get CachePoolEntry objects.
+   *          Requests will be made as needed.
+   * @throws IOException
+   *          If there was an error listing cache pools.
+   */
+  public RemoteIterator<CachePoolEntry> listCachePools() throws IOException {
+    return dfs.listCachePools();
+  }
+
+  /**
+   * Create an encryption zone rooted at an empty existing directory, using the
+   * specified encryption key. An encryption zone has an associated encryption
+   * key used when reading and writing files within the zone.
+   *
+   * @param path    The path of the root of the encryption zone. Must refer to
+   *                an empty, existing directory.
+   * @param keyName Name of key available at the KeyProvider.
+   * @throws IOException            if there was a general IO exception
+   * @throws AccessControlException if the caller does not have access to path
+   * @throws FileNotFoundException  if the path does not exist
+   */
+  public void createEncryptionZone(Path path, String keyName)
+    throws IOException, AccessControlException, FileNotFoundException {
+    dfs.createEncryptionZone(path, keyName);
+  }
+
+  /**
+   * Get the path of the encryption zone for a given file or directory.
+   *
+   * @param path The path to get the ez for.
+   *
+   * @return The EncryptionZone of the ez, or null if path is not in an ez.
+   * @throws IOException            if there was a general IO exception
+   * @throws AccessControlException if the caller does not have access to path
+   * @throws FileNotFoundException  if the path does not exist
+   */
+  public EncryptionZone getEncryptionZoneForPath(Path path)
+    throws IOException, AccessControlException, FileNotFoundException {
+    return dfs.getEZForPath(path);
+  }
+
+  /**
+   * Returns a RemoteIterator which can be used to list the encryption zones
+   * in HDFS. For large numbers of encryption zones, the iterator will fetch
+   * the list of zones in a number of small batches.
+   * <p/>
+   * Since the list is fetched in batches, it does not represent a
+   * consistent snapshot of the entire list of encryption zones.
+   * <p/>
+   * This method can only be called by HDFS superusers.
+   */
+  public RemoteIterator<EncryptionZone> listEncryptionZones()
+      throws IOException {
+    return dfs.listEncryptionZones();
   }
 }

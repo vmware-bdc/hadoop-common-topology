@@ -17,8 +17,11 @@
  */
 package org.apache.hadoop.hdfs.tools.offlineImageViewer;
 
-import java.io.FileWriter;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
+
+import com.google.common.base.Charsets;
 
 /**
  * TextWriterImageProcessor mixes in the ability for ImageVisitor
@@ -34,7 +37,7 @@ import java.io.IOException;
 abstract class TextWriterImageVisitor extends ImageVisitor {
   private boolean printToScreen = false;
   private boolean okToWrite = false;
-  final private FileWriter fw;
+  final private OutputStreamWriter fw;
 
   /**
    * Create a processor that writes to the file named.
@@ -56,7 +59,7 @@ abstract class TextWriterImageVisitor extends ImageVisitor {
          throws IOException {
     super();
     this.printToScreen = printToScreen;
-    fw = new FileWriter(filename);
+    fw = new OutputStreamWriter(new FileOutputStream(filename), Charsets.UTF_8);
     okToWrite = true;
   }
   

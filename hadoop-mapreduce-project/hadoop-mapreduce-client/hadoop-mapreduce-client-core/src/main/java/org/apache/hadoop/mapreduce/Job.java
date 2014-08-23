@@ -18,30 +18,19 @@
 
 package org.apache.hadoop.mapreduce;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.io.OutputStreamWriter;
-import java.net.URL;
-import java.net.URLConnection;
 import java.net.URI;
 import java.security.PrivilegedExceptionAction;
-import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configuration.IntegerRanges;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.RawComparator;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapreduce.filecache.DistributedCache;
@@ -65,7 +54,7 @@ import org.apache.hadoop.util.StringUtils;
  * <p>Here is an example on how to submit a job:</p>
  * <p><blockquote><pre>
  *     // Create a new Job
- *     Job job = new Job(new Configuration());
+ *     Job job = Job.getInstance();
  *     job.setJarByClass(MyJob.class);
  *     
  *     // Specify various job-specific parameters     
@@ -124,16 +113,25 @@ public class Job extends JobContextImpl implements JobContext {
   private long statustime;
   private Cluster cluster;
 
+  /**
+   * @deprecated Use {@link #getInstance()}
+   */
   @Deprecated
   public Job() throws IOException {
     this(new Configuration());
   }
 
+  /**
+   * @deprecated Use {@link #getInstance(Configuration)}
+   */
   @Deprecated
   public Job(Configuration conf) throws IOException {
     this(new JobConf(conf));
   }
 
+  /**
+   * @deprecated Use {@link #getInstance(Configuration, String)}
+   */
   @Deprecated
   public Job(Configuration conf, String jobName) throws IOException {
     this(conf);
@@ -142,6 +140,8 @@ public class Job extends JobContextImpl implements JobContext {
 
   Job(JobConf conf) throws IOException {
     super(conf, null);
+    // propagate existing user credentials to job
+    this.credentials.mergeAll(this.ugi.getCredentials());
     this.cluster = null;
   }
 
@@ -305,7 +305,7 @@ public class Job extends JobContextImpl implements JobContext {
    * it, if necessary
    */
   synchronized void ensureFreshStatus() 
-      throws IOException, InterruptedException {
+      throws IOException {
     if (System.currentTimeMillis() - statustime > MAX_JOBSTATUS_AGE) {
       updateStatus();
     }
@@ -315,13 +315,18 @@ public class Job extends JobContextImpl implements JobContext {
    * immediately
    * @throws IOException
    */
-  synchronized void updateStatus() throws IOException, InterruptedException {
-    this.status = ugi.doAs(new PrivilegedExceptionAction<JobStatus>() {
-      @Override
-      public JobStatus run() throws IOException, InterruptedException {
-        return cluster.getClient().getJobStatus(status.getJobID());
-      }
-    });
+  synchronized void updateStatus() throws IOException {
+    try {
+      this.status = ugi.doAs(new PrivilegedExceptionAction<JobStatus>() {
+        @Override
+        public JobStatus run() throws IOException, InterruptedException {
+          return cluster.getClient().getJobStatus(status.getJobID());
+        }
+      });
+    }
+    catch (InterruptedException ie) {
+      throw new IOException(ie);
+    }
     if (this.status == null) {
       throw new IOException("Job status not available ");
     }
@@ -546,7 +551,7 @@ public class Job extends JobContextImpl implements JobContext {
    * @return the progress of the job's map-tasks.
    * @throws IOException
    */
-  public float mapProgress() throws IOException, InterruptedException {
+  public float mapProgress() throws IOException {
     ensureState(JobState.RUNNING);
     ensureFreshStatus();
     return status.getMapProgress();
@@ -559,7 +564,7 @@ public class Job extends JobContextImpl implements JobContext {
    * @return the progress of the job's reduce-tasks.
    * @throws IOException
    */
-  public float reduceProgress() throws IOException, InterruptedException {
+  public float reduceProgress() throws IOException {
     ensureState(JobState.RUNNING);
     ensureFreshStatus();
     return status.getReduceProgress();
@@ -585,7 +590,7 @@ public class Job extends JobContextImpl implements JobContext {
    * @return the progress of the job's setup-tasks.
    * @throws IOException
    */
-  public float setupProgress() throws IOException, InterruptedException {
+  public float setupProgress() throws IOException {
     ensureState(JobState.RUNNING);
     ensureFreshStatus();
     return status.getSetupProgress();
@@ -598,7 +603,7 @@ public class Job extends JobContextImpl implements JobContext {
    * @return <code>true</code> if the job is complete, else <code>false</code>.
    * @throws IOException
    */
-  public boolean isComplete() throws IOException, InterruptedException {
+  public boolean isComplete() throws IOException {
     ensureState(JobState.RUNNING);
     updateStatus();
     return status.isJobComplete();
@@ -610,7 +615,7 @@ public class Job extends JobContextImpl implements JobContext {
    * @return <code>true</code> if the job succeeded, else <code>false</code>.
    * @throws IOException
    */
-  public boolean isSuccessful() throws IOException, InterruptedException {
+  public boolean isSuccessful() throws IOException {
     ensureState(JobState.RUNNING);
     updateStatus();
     return status.getState() == JobStatus.State.SUCCEEDED;
@@ -622,9 +627,14 @@ public class Job extends JobContextImpl implements JobContext {
    * 
    * @throws IOException
    */
-  public void killJob() throws IOException, InterruptedException {
+  public void killJob() throws IOException {
     ensureState(JobState.RUNNING);
-    cluster.getClient().killJob(getJobID());
+    try {
+      cluster.getClient().killJob(getJobID());
+    }
+    catch (InterruptedException ie) {
+      throw new IOException(ie);
+    }
   }
 
   /**
@@ -668,22 +678,63 @@ public class Job extends JobContextImpl implements JobContext {
             startFrom, numEvents); 
       }
     });
+  }
+
+  /**
+   * Get events indicating completion (success/failure) of component tasks.
+   *  
+   * @param startFrom index to start fetching events from
+   * @return an array of {@link org.apache.hadoop.mapred.TaskCompletionEvent}s
+   * @throws IOException
+   */
+  public org.apache.hadoop.mapred.TaskCompletionEvent[]
+    getTaskCompletionEvents(final int startFrom) throws IOException {
+    try {
+      TaskCompletionEvent[] events = getTaskCompletionEvents(startFrom, 10);
+      org.apache.hadoop.mapred.TaskCompletionEvent[] retEvents =
+          new org.apache.hadoop.mapred.TaskCompletionEvent[events.length];
+      for (int i = 0; i < events.length; i++) {
+        retEvents[i] = org.apache.hadoop.mapred.TaskCompletionEvent.downgrade
+            (events[i]);
+      }
+      return retEvents;
+    } catch (InterruptedException ie) {
+      throw new IOException(ie);
     }
-  
+  }
+
+  /**
+   * Kill indicated task attempt.
+   * @param taskId the id of the task to kill.
+   * @param shouldFail if <code>true</code> the task is failed and added
+   *                   to failed tasks list, otherwise it is just killed,
+   *                   w/o affecting job failure status.
+   */
+  @Private
+  public boolean killTask(final TaskAttemptID taskId,
+                          final boolean shouldFail) throws IOException {
+    ensureState(JobState.RUNNING);
+    try {
+      return ugi.doAs(new PrivilegedExceptionAction<Boolean>() {
+        public Boolean run() throws IOException, InterruptedException {
+          return cluster.getClient().killTask(taskId, shouldFail);
+        }
+      });
+    }
+    catch (InterruptedException ie) {
+      throw new IOException(ie);
+    }
+  }
+
   /**
    * Kill indicated task attempt.
    * 
    * @param taskId the id of the task to be terminated.
    * @throws IOException
    */
-  public boolean killTask(final TaskAttemptID taskId) 
-      throws IOException, InterruptedException {
-    ensureState(JobState.RUNNING);
-    return ugi.doAs(new PrivilegedExceptionAction<Boolean>() {
-      public Boolean run() throws IOException, InterruptedException {
-        return cluster.getClient().killTask(taskId, false);
-      }
-    });
+  public void killTask(final TaskAttemptID taskId)
+      throws IOException {
+    killTask(taskId, false);
   }
 
   /**
@@ -692,15 +743,9 @@ public class Job extends JobContextImpl implements JobContext {
    * @param taskId the id of the task to be terminated.
    * @throws IOException
    */
-  public boolean failTask(final TaskAttemptID taskId) 
-      throws IOException, InterruptedException {
-    ensureState(JobState.RUNNING);
-    return ugi.doAs(new PrivilegedExceptionAction<Boolean>() {
-      @Override
-      public Boolean run() throws IOException, InterruptedException {
-        return cluster.getClient().killTask(taskId, true);
-      }
-    });
+  public void failTask(final TaskAttemptID taskId)
+      throws IOException {
+    killTask(taskId, true);
   }
 
   /**
@@ -711,14 +756,19 @@ public class Job extends JobContextImpl implements JobContext {
    * @throws IOException
    */
   public Counters getCounters() 
-      throws IOException, InterruptedException {
+      throws IOException {
     ensureState(JobState.RUNNING);
-    return ugi.doAs(new PrivilegedExceptionAction<Counters>() {
-      @Override
-      public Counters run() throws IOException, InterruptedException {
-        return cluster.getClient().getJobCounters(getJobID());
-      }
-    });
+    try {
+      return ugi.doAs(new PrivilegedExceptionAction<Counters>() {
+        @Override
+        public Counters run() throws IOException, InterruptedException {
+          return cluster.getClient().getJobCounters(getJobID());
+        }
+      });
+    }
+    catch (InterruptedException ie) {
+      throw new IOException(ie);
+    }
   }
 
   /**
@@ -908,10 +958,26 @@ public class Job extends JobContextImpl implements JobContext {
   }
 
   /**
+   * Define the comparator that controls which keys are grouped together
+   * for a single call to combiner,
+   * {@link Reducer#reduce(Object, Iterable,
+   * org.apache.hadoop.mapreduce.Reducer.Context)}
+   *
+   * @param cls the raw comparator to use
+   * @throws IllegalStateException if the job is submitted
+   */
+  public void setCombinerKeyGroupingComparatorClass(
+      Class<? extends RawComparator> cls) throws IllegalStateException {
+    ensureState(JobState.DEFINE);
+    conf.setCombinerKeyGroupingComparator(cls);
+  }
+
+  /**
    * Define the comparator that controls how the keys are sorted before they
    * are passed to the {@link Reducer}.
    * @param cls the raw comparator
    * @throws IllegalStateException if the job is submitted
+   * @see #setCombinerKeyGroupingComparatorClass(Class)
    */
   public void setSortComparatorClass(Class<? extends RawComparator> cls
                                      ) throws IllegalStateException {
@@ -926,6 +992,7 @@ public class Job extends JobContextImpl implements JobContext {
    *                       org.apache.hadoop.mapreduce.Reducer.Context)}
    * @param cls the raw comparator to use
    * @throws IllegalStateException if the job is submitted
+   * @see #setCombinerKeyGroupingComparatorClass(Class)
    */
   public void setGroupingComparatorClass(Class<? extends RawComparator> cls
                                          ) throws IllegalStateException {
@@ -1060,9 +1127,10 @@ public class Job extends JobContextImpl implements JobContext {
   }
 
   /**
-   * This method allows you to create symlinks in the current working directory
-   * of the task to all the cache files/archives
+   * Originally intended to enable symlinks, but currently symlinks cannot be
+   * disabled.
    */
+  @Deprecated
   public void createSymlink() {
     ensureState(JobState.DEFINE);
     DistributedCache.createSymlink(conf);
@@ -1367,14 +1435,6 @@ public class Job extends JobContextImpl implements JobContext {
       Job.TaskStatusFilter filter, boolean profiling, IntegerRanges mapRanges,
       IntegerRanges reduceRanges) throws IOException, InterruptedException {
     for (TaskCompletionEvent event : events) {
-      TaskCompletionEvent.Status status = event.getStatus();
-      if (profiling && shouldDownloadProfile() &&
-         (status == TaskCompletionEvent.Status.SUCCEEDED ||
-            status == TaskCompletionEvent.Status.FAILED) &&
-            (event.isMapTask() ? mapRanges : reduceRanges).
-              isIncluded(event.idWithinJob())) {
-        downloadProfile(event);
-      }
       switch (filter) {
       case NONE:
         break;
@@ -1382,7 +1442,6 @@ public class Job extends JobContextImpl implements JobContext {
         if (event.getStatus() == 
           TaskCompletionEvent.Status.SUCCEEDED) {
           LOG.info(event.toString());
-          displayTaskLogs(event.getTaskAttemptId(), event.getTaskTrackerHttp());
         }
         break; 
       case FAILED:
@@ -1397,8 +1456,6 @@ public class Job extends JobContextImpl implements JobContext {
               System.err.println(diagnostics);
             }
           }
-          // Displaying the task logs
-          displayTaskLogs(event.getTaskAttemptId(), event.getTaskTrackerHttp());
         }
         break; 
       case KILLED:
@@ -1408,66 +1465,9 @@ public class Job extends JobContextImpl implements JobContext {
         break; 
       case ALL:
         LOG.info(event.toString());
-        displayTaskLogs(event.getTaskAttemptId(), event.getTaskTrackerHttp());
         break;
       }
     }
-  }
-  
-  private void downloadProfile(TaskCompletionEvent e) throws IOException  {
-    URLConnection connection = new URL(
-      getTaskLogURL(e.getTaskAttemptId(), e.getTaskTrackerHttp()) + 
-      "&filter=profile").openConnection();
-    InputStream in = connection.getInputStream();
-    OutputStream out = new FileOutputStream(e.getTaskAttemptId() + ".profile");
-    IOUtils.copyBytes(in, out, 64 * 1024, true);
-  }
-  
-  private void displayTaskLogs(TaskAttemptID taskId, String baseUrl)
-      throws IOException {
-    // The tasktracker for a 'failed/killed' job might not be around...
-    if (baseUrl != null) {
-      // Construct the url for the tasklogs
-      String taskLogUrl = getTaskLogURL(taskId, baseUrl);
-      
-      // Copy tasks's stdout of the JobClient
-      getTaskLogs(taskId, new URL(taskLogUrl+"&filter=stdout"), System.out);
-        
-      // Copy task's stderr to stderr of the JobClient 
-      getTaskLogs(taskId, new URL(taskLogUrl+"&filter=stderr"), System.err);
-    }
-  }
-    
-  private void getTaskLogs(TaskAttemptID taskId, URL taskLogUrl, 
-                           OutputStream out) {
-    try {
-      int tasklogtimeout = cluster.getConf().getInt(
-        TASKLOG_PULL_TIMEOUT_KEY, DEFAULT_TASKLOG_TIMEOUT);
-      URLConnection connection = taskLogUrl.openConnection();
-      connection.setReadTimeout(tasklogtimeout);
-      connection.setConnectTimeout(tasklogtimeout);
-      BufferedReader input = 
-        new BufferedReader(new InputStreamReader(connection.getInputStream()));
-      BufferedWriter output = 
-        new BufferedWriter(new OutputStreamWriter(out));
-      try {
-        String logData = null;
-        while ((logData = input.readLine()) != null) {
-          if (logData.length() > 0) {
-            output.write(taskId + ": " + logData + "\n");
-            output.flush();
-          }
-        }
-      } finally {
-        input.close();
-      }
-    } catch(IOException ioe) {
-      LOG.warn("Error reading task output " + ioe.getMessage()); 
-    }
-  }
-  
-  private String getTaskLogURL(TaskAttemptID taskId, String baseUrl) {
-    return (baseUrl + "/tasklog?plaintext=true&attemptid=" + taskId); 
   }
 
   /** The interval at which monitorAndPrintJob() prints status */

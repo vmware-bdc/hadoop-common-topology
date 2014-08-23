@@ -23,7 +23,6 @@ import static org.apache.hadoop.yarn.webapp.view.JQueryUI._TH;
 
 import java.io.IOException;
 
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
@@ -44,11 +43,9 @@ import com.google.inject.Inject;
  */
 public class ConfBlock extends HtmlBlock {
   final AppContext appContext;
-  final Configuration conf;
 
-  @Inject ConfBlock(AppContext appctx, Configuration conf) {
+  @Inject ConfBlock(AppContext appctx) {
     appContext = appctx;
-    this.conf = conf;
   }
 
   /*
@@ -71,7 +68,7 @@ public class ConfBlock extends HtmlBlock {
     }
     Path confPath = job.getConfFile();
     try {
-      ConfInfo info = new ConfInfo(job, this.conf);
+      ConfInfo info = new ConfInfo(job);
 
       html.div().h3(confPath.toString())._();
       TBODY<TABLE<Hamlet>> tbody = html.
@@ -81,14 +78,29 @@ public class ConfBlock extends HtmlBlock {
           tr().
             th(_TH, "key").
             th(_TH, "value").
+            th(_TH, "source chain").
           _().
         _().
       tbody();
       for (ConfEntryInfo entry : info.getProperties()) {
+        StringBuffer buffer = new StringBuffer();
+        String[] sources = entry.getSource();
+        //Skip the last entry, because it is always the same HDFS file, and
+        // output them in reverse order so most recent is output first
+        boolean first = true;
+        for(int i = (sources.length  - 2); i >= 0; i--) {
+          if(!first) {
+            // \u2B05 is an arrow <--
+            buffer.append(" \u2B05 ");
+          }
+          first = false;
+          buffer.append(sources[i]);
+        }
         tbody.
           tr().
             td(entry.getName()).
             td(entry.getValue()).
+            td(buffer.toString()).
           _();
       }
       tbody._().
@@ -96,6 +108,7 @@ public class ConfBlock extends HtmlBlock {
         tr().
           th().input("search_init").$type(InputType.text).$name("key").$value("key")._()._().
           th().input("search_init").$type(InputType.text).$name("value").$value("value")._()._().
+          th().input("search_init").$type(InputType.text).$name("source chain").$value("source chain")._()._().
           _().
         _().
       _();

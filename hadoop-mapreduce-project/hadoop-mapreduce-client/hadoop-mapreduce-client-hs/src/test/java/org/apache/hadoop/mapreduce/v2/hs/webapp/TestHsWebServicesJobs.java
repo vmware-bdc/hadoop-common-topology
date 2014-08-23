@@ -27,7 +27,6 @@ import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import java.io.IOException;
 import java.io.StringReader;
 import java.util.Map;
 
@@ -38,23 +37,12 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.mapreduce.v2.api.records.AMInfo;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
-import org.apache.hadoop.mapreduce.v2.api.records.JobState;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
-import org.apache.hadoop.mapreduce.v2.app.MockJobs;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
-import org.apache.hadoop.mapreduce.v2.hs.CachedHistoryStorage;
 import org.apache.hadoop.mapreduce.v2.hs.HistoryContext;
-import org.apache.hadoop.mapreduce.v2.hs.MockHistoryJobs;
-import org.apache.hadoop.mapreduce.v2.hs.MockHistoryJobs.JobsPair;
-import org.apache.hadoop.mapreduce.v2.hs.webapp.dao.JobsInfo;
+import org.apache.hadoop.mapreduce.v2.hs.MockHistoryContext;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
-import org.apache.hadoop.yarn.Clock;
-import org.apache.hadoop.yarn.ClusterInfo;
-import org.apache.hadoop.yarn.YarnException;
-import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
-import org.apache.hadoop.yarn.api.records.ApplicationId;
-import org.apache.hadoop.yarn.event.EventHandler;
-import org.apache.hadoop.yarn.util.BuilderUtils;
+import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.webapp.GenericExceptionHandler;
 import org.apache.hadoop.yarn.webapp.WebApp;
 import org.apache.hadoop.yarn.webapp.WebServicesTestUtils;
@@ -91,109 +79,14 @@ import com.sun.jersey.test.framework.WebAppDescriptor;
 public class TestHsWebServicesJobs extends JerseyTest {
 
   private static Configuration conf = new Configuration();
-  private static TestAppContext appContext;
+  private static MockHistoryContext appContext;
   private static HsWebApp webApp;
-
-  static class TestAppContext implements HistoryContext {
-    final ApplicationAttemptId appAttemptID;
-    final ApplicationId appID;
-    final String user = MockJobs.newUserName();
-    final Map<JobId, Job> partialJobs;
-    final Map<JobId, Job> fullJobs;
-    final long startTime = System.currentTimeMillis();
-
-    TestAppContext(int appid, int numJobs, int numTasks, int numAttempts) {
-      appID = MockJobs.newAppID(appid);
-      appAttemptID = MockJobs.newAppAttemptID(appID, 0);
-      JobsPair jobs;
-      try {
-        jobs = MockHistoryJobs.newHistoryJobs(appID, numJobs, numTasks, numAttempts);
-      } catch (IOException e) {
-        throw new YarnException(e);
-      }
-      partialJobs = jobs.partial;
-      fullJobs = jobs.full;
-    }
-
-    TestAppContext() {
-      this(0, 1, 2, 1);
-    }
-
-    @Override
-    public ApplicationAttemptId getApplicationAttemptId() {
-      return appAttemptID;
-    }
-
-    @Override
-    public ApplicationId getApplicationID() {
-      return appID;
-    }
-
-    @Override
-    public CharSequence getUser() {
-      return user;
-    }
-
-    @Override
-    public Job getJob(JobId jobID) {
-      return fullJobs.get(jobID);
-    }
-
-    public Job getPartialJob(JobId jobID) {
-      return partialJobs.get(jobID);
-    }
-    
-    @Override
-    public Map<JobId, Job> getAllJobs() {
-      return partialJobs; // OK
-    }
-
-    @SuppressWarnings("rawtypes")
-    @Override
-    public EventHandler getEventHandler() {
-      return null;
-    }
-
-    @Override
-    public Clock getClock() {
-      return null;
-    }
-
-    @Override
-    public String getApplicationName() {
-      return "TestApp";
-    }
-
-    @Override
-    public long getStartTime() {
-      return startTime;
-    }
-
-    @Override
-    public ClusterInfo getClusterInfo() {
-      return null;
-    }
-
-    @Override
-    public Map<JobId, Job> getAllJobs(ApplicationId appID) {
-      // TODO Auto-generated method stub
-      return null;
-    }
-
-    @Override
-    public JobsInfo getPartialJobs(Long offset, Long count, String user,
-        String queue, Long sBegin, Long sEnd, Long fBegin, Long fEnd,
-        JobState jobState) {
-      return CachedHistoryStorage.getPartialJobs(this.partialJobs.values(), 
-          offset, count, user, queue, sBegin, sEnd, fBegin, fEnd, jobState);
-    }
-  }
 
   private Injector injector = Guice.createInjector(new ServletModule() {
     @Override
     protected void configureServlets() {
 
-      appContext = new TestAppContext();
+      appContext = new MockHistoryContext(0, 1, 2, 1, false);
       webApp = mock(HsWebApp.class);
       when(webApp.name()).thenReturn("hsmockwebapp");
 
@@ -305,7 +198,7 @@ public class TestHsWebServicesJobs extends JerseyTest {
     verifyHsJobPartialXML(job, appContext);
   }
 
-  public void verifyHsJobPartialXML(NodeList nodes, TestAppContext appContext) {
+  public void verifyHsJobPartialXML(NodeList nodes, MockHistoryContext appContext) {
 
     assertEquals("incorrect number of elements", 1, nodes.getLength());
 
@@ -331,7 +224,7 @@ public class TestHsWebServicesJobs extends JerseyTest {
     }
   }
   
-  public void verifyHsJobXML(NodeList nodes, TestAppContext appContext) {
+  public void verifyHsJobXML(NodeList nodes, AppContext appContext) {
 
     assertEquals("incorrect number of elements", 1, nodes.getLength());
 
@@ -405,7 +298,8 @@ public class TestHsWebServicesJobs extends JerseyTest {
       JSONObject json = response.getEntity(JSONObject.class);
       assertEquals("incorrect number of elements", 1, json.length());
       JSONObject info = json.getJSONObject("job");
-      VerifyJobsUtils.verifyHsJob(info, jobsMap.get(id));
+
+      VerifyJobsUtils.verifyHsJob(info, appContext.getJob(id));
     }
   }
 
@@ -607,7 +501,7 @@ public class TestHsWebServicesJobs extends JerseyTest {
       JSONObject json = response.getEntity(JSONObject.class);
       assertEquals("incorrect number of elements", 1, json.length());
       JSONObject info = json.getJSONObject("jobCounters");
-      verifyHsJobCounters(info, jobsMap.get(id));
+      verifyHsJobCounters(info, appContext.getJob(id));
     }
   }
 
@@ -625,7 +519,47 @@ public class TestHsWebServicesJobs extends JerseyTest {
       JSONObject json = response.getEntity(JSONObject.class);
       assertEquals("incorrect number of elements", 1, json.length());
       JSONObject info = json.getJSONObject("jobCounters");
-      verifyHsJobCounters(info, jobsMap.get(id));
+      verifyHsJobCounters(info, appContext.getJob(id));
+    }
+  }
+  
+  @Test
+  public void testJobCountersForKilledJob() throws Exception {
+    WebResource r = resource();
+    appContext = new MockHistoryContext(0, 1, 1, 1, true);
+    injector = Guice.createInjector(new ServletModule() {
+      @Override
+      protected void configureServlets() {
+
+        webApp = mock(HsWebApp.class);
+        when(webApp.name()).thenReturn("hsmockwebapp");
+
+        bind(JAXBContextResolver.class);
+        bind(HsWebServices.class);
+        bind(GenericExceptionHandler.class);
+        bind(WebApp.class).toInstance(webApp);
+        bind(AppContext.class).toInstance(appContext);
+        bind(HistoryContext.class).toInstance(appContext);
+        bind(Configuration.class).toInstance(conf);
+
+        serve("/*").with(GuiceContainer.class);
+      }
+    });
+    
+    Map<JobId, Job> jobsMap = appContext.getAllJobs();
+    for (JobId id : jobsMap.keySet()) {
+      String jobId = MRApps.toString(id);
+
+      ClientResponse response = r.path("ws").path("v1").path("history")
+          .path("mapreduce").path("jobs").path(jobId).path("counters/")
+          .accept(MediaType.APPLICATION_JSON).get(ClientResponse.class);
+      assertEquals(MediaType.APPLICATION_JSON_TYPE, response.getType());
+      JSONObject json = response.getEntity(JSONObject.class);
+      assertEquals("incorrect number of elements", 1, json.length());
+      JSONObject info = json.getJSONObject("jobCounters");
+      WebServicesTestUtils.checkStringMatch("id", MRApps.toString(id),
+          info.getString("id"));
+      assertTrue("Job shouldn't contain any counters", info.length() == 1);
     }
   }
 
@@ -643,7 +577,7 @@ public class TestHsWebServicesJobs extends JerseyTest {
       JSONObject json = response.getEntity(JSONObject.class);
       assertEquals("incorrect number of elements", 1, json.length());
       JSONObject info = json.getJSONObject("jobCounters");
-      verifyHsJobCounters(info, jobsMap.get(id));
+      verifyHsJobCounters(info, appContext.getJob(id));
     }
   }
 
@@ -665,7 +599,7 @@ public class TestHsWebServicesJobs extends JerseyTest {
       is.setCharacterStream(new StringReader(xml));
       Document dom = db.parse(is);
       NodeList info = dom.getElementsByTagName("jobCounters");
-      verifyHsJobCountersXML(info, jobsMap.get(id));
+      verifyHsJobCountersXML(info, appContext.getJob(id));
     }
   }
 
@@ -865,7 +799,7 @@ public class TestHsWebServicesJobs extends JerseyTest {
         WebServicesTestUtils.checkStringMatch("nodeHttpAddress", nmHost + ":"
             + nmHttpPort, nodeHttpAddress);
         WebServicesTestUtils.checkStringMatch("nodeId",
-            BuilderUtils.newNodeId(nmHost, nmPort).toString(), nodeId);
+            NodeId.newInstance(nmHost, nmPort).toString(), nodeId);
         assertTrue("startime not greater than 0", startTime > 0);
         WebServicesTestUtils.checkStringMatch("containerId", amInfo
             .getContainerId().toString(), containerId);

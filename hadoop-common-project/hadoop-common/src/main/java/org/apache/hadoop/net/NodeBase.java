@@ -110,7 +110,7 @@ public class NodeBase implements Node {
    * @return the path of a node
    */
   public static String getPath(Node node) {
-    return node.getNetworkLocation()+PATH_SEPARATOR_STR+node.getName();
+    return node.getNetworkLocation() + PATH_SEPARATOR_STR + node.getName();
   }
   
   /** @return this node's path as its string representation */
@@ -166,5 +166,17 @@ public class NodeBase implements Node {
   @Override
   public void setLevel(int level) {
     this.level = level;
+  }
+  
+  public static int locationToDepth(String location) {
+    String normalizedLocation = normalize(location);
+    int length = normalizedLocation.length();
+    int depth = 0;
+    for (int i = 0; i < length; i++) {
+      if (normalizedLocation.charAt(i) == PATH_SEPARATOR) {
+        depth++;
+      }
+    }
+    return depth;
   }
 }

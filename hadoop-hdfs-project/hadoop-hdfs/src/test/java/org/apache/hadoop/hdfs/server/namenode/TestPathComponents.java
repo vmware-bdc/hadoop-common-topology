@@ -17,15 +17,15 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import org.apache.hadoop.hdfs.server.namenode.INode;
-import org.apache.hadoop.hdfs.DFSUtil;
-import org.apache.hadoop.fs.Path;
-
-import org.junit.Test;
+import static org.junit.Assert.assertTrue;
 
 import java.util.Arrays;
 
-import static org.junit.Assert.*;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.DFSUtil;
+import org.junit.Test;
+
+import com.google.common.base.Charsets;
 
 
 /**
@@ -47,7 +47,7 @@ public class TestPathComponents {
     String pathString = str;
     byte[][] oldPathComponents = INode.getPathComponents(pathString);
     byte[][] newPathComponents = 
-                DFSUtil.bytes2byteArray(pathString.getBytes("UTF-8"),
+                DFSUtil.bytes2byteArray(pathString.getBytes(Charsets.UTF_8),
                                         (byte) Path.SEPARATOR_CHAR);
     if (oldPathComponents[0] == null) {
       assertTrue(oldPathComponents[0] == newPathComponents[0]);

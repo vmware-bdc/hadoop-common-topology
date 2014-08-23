@@ -17,6 +17,9 @@
  */
 package org.apache.hadoop.fs;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,20 +28,19 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
 
-import junit.framework.TestCase;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.FsUrlStreamHandlerFactory;
-import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.test.PathUtils;
+import org.junit.Test;
 
 /**
- * Test of the URL stream handler factory.
+ * Test of the URL stream handler.
  */
-public class TestUrlStreamHandler extends TestCase {
+public class TestUrlStreamHandler {
 
+  private static final File TEST_ROOT_DIR = PathUtils.getTestDir(TestUrlStreamHandler.class);
+    
   /**
    * Test opening and reading from an InputStream through a hdfs:// URL.
    * <p>
@@ -47,6 +49,7 @@ public class TestUrlStreamHandler extends TestCase {
    * 
    * @throws IOException
    */
+  @Test
   public void testDfsUrls() throws IOException {
 
     Configuration conf = new HdfsConfiguration();
@@ -105,18 +108,18 @@ public class TestUrlStreamHandler extends TestCase {
    * @throws IOException
    * @throws URISyntaxException
    */
+  @Test
   public void testFileUrls() throws IOException, URISyntaxException {
     // URLStreamHandler is already set in JVM by testDfsUrls() 
     Configuration conf = new HdfsConfiguration();
 
     // Locate the test temporary directory.
-    File tmpDir = new File(conf.get("hadoop.tmp.dir"));
-    if (!tmpDir.exists()) {
-      if (!tmpDir.mkdirs())
-        throw new IOException("Cannot create temporary directory: " + tmpDir);
+    if (!TEST_ROOT_DIR.exists()) {
+      if (!TEST_ROOT_DIR.mkdirs())
+        throw new IOException("Cannot create temporary directory: " + TEST_ROOT_DIR);
     }
 
-    File tmpFile = new File(tmpDir, "thefile");
+    File tmpFile = new File(TEST_ROOT_DIR, "thefile");
     URI uri = tmpFile.toURI();
 
     FileSystem fs = FileSystem.get(uri, conf);

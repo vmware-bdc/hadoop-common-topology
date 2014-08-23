@@ -34,11 +34,13 @@ import org.apache.hadoop.mapreduce.v2.api.records.JobReport;
 import org.apache.hadoop.mapreduce.v2.api.records.JobState;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
 import org.apache.hadoop.mapreduce.v2.hs.webapp.dao.JobsInfo;
-import org.apache.hadoop.mapreduce.v2.hs.HistoryFileManager.MetaInfo;
+import org.apache.hadoop.mapreduce.v2.hs.HistoryFileManager.HistoryFileInfo;
 import org.apache.hadoop.mapreduce.v2.hs.webapp.dao.JobInfo;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JHAdminConfig;
-import org.apache.hadoop.yarn.YarnException;
-import org.apache.hadoop.yarn.service.AbstractService;
+import org.apache.hadoop.service.AbstractService;
+import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Manages an in memory cache of parsed Job History files.
@@ -58,11 +60,16 @@ public class CachedHistoryStorage extends AbstractService implements
     this.hsManager = hsManager;
   }
 
-  @SuppressWarnings("serial")
   @Override
-  public void init(Configuration conf) throws YarnException {
+  public void serviceInit(Configuration conf) throws Exception {
+    super.serviceInit(conf);
     LOG.info("CachedHistoryStorage Init");
 
+    createLoadedJobCache(conf);
+  }
+
+  @SuppressWarnings("serial")
+  private void createLoadedJobCache(Configuration conf) {
     loadedJobCacheSize = conf.getInt(
         JHAdminConfig.MR_HISTORY_LOADED_JOB_CACHE_SIZE,
         JHAdminConfig.DEFAULT_MR_HISTORY_LOADED_JOB_CACHE_SIZE);
@@ -74,44 +81,70 @@ public class CachedHistoryStorage extends AbstractService implements
         return super.size() > loadedJobCacheSize;
       }
     });
-
-    super.init(conf);
   }
-
+  
+  public void refreshLoadedJobCache() {
+    if (getServiceState() == STATE.STARTED) {
+      setConfig(createConf());
+      createLoadedJobCache(getConfig());
+    } else {
+      LOG.warn("Failed to execute refreshLoadedJobCache: CachedHistoryStorage is not started");
+    }
+  }
+  
+  @VisibleForTesting
+  Configuration createConf() {
+    return new Configuration();
+  }
+  
   public CachedHistoryStorage() {
     super(CachedHistoryStorage.class.getName());
   }
-
-  private Job loadJob(MetaInfo metaInfo) {
+  
+  private Job loadJob(HistoryFileInfo fileInfo) {
     try {
-      Job job = hsManager.loadJob(metaInfo);
+      Job job = fileInfo.loadJob();
       if (LOG.isDebugEnabled()) {
         LOG.debug("Adding " + job.getID() + " to loaded job cache");
       }
+      // We can clobber results here, but that should be OK, because it only
+      // means that we may have two identical copies of the same job floating
+      // around for a while.
       loadedJobCache.put(job.getID(), job);
       return job;
     } catch (IOException e) {
-      throw new YarnException(
-          "Could not find/load job: " + metaInfo.getJobId(), e);
+      throw new YarnRuntimeException(
+          "Could not find/load job: " + fileInfo.getJobId(), e);
     }
   }
 
+  @VisibleForTesting
+  Map<JobId, Job> getLoadedJobCache() {
+    return loadedJobCache;
+  }
+  
   @Override
-  public synchronized Job getFullJob(JobId jobId) {
+  public Job getFullJob(JobId jobId) {
     if (LOG.isDebugEnabled()) {
       LOG.debug("Looking for Job " + jobId);
     }
     try {
-      Job result = loadedJobCache.get(jobId);
-      if (result == null) {
-        MetaInfo metaInfo = hsManager.getMetaInfo(jobId);
-        if (metaInfo != null) {
-          result = loadJob(metaInfo);
+      HistoryFileInfo fileInfo = hsManager.getFileInfo(jobId);
+      Job result = null;
+      if (fileInfo != null) {
+        result = loadedJobCache.get(jobId);
+        if (result == null) {
+          result = loadJob(fileInfo);
+        } else if(fileInfo.isDeleted()) {
+          loadedJobCache.remove(jobId);
+          result = null;
         }
+      } else {
+        loadedJobCache.remove(jobId);
       }
       return result;
     } catch (IOException e) {
-      throw new YarnException(e);
+      throw new YarnRuntimeException(e);
     }
   }
 
@@ -120,22 +153,17 @@ public class CachedHistoryStorage extends AbstractService implements
     LOG.debug("Called getAllPartialJobs()");
     SortedMap<JobId, Job> result = new TreeMap<JobId, Job>();
     try {
-      for (MetaInfo mi : hsManager.getAllMetaInfo()) {
+      for (HistoryFileInfo mi : hsManager.getAllFileInfo()) {
         if (mi != null) {
           JobId id = mi.getJobId();
           result.put(id, new PartialJob(mi.getJobIndexInfo(), id));
         }
       }
     } catch (IOException e) {
-      LOG.warn("Error trying to scan for all MetaInfos", e);
-      throw new YarnException(e);
+      LOG.warn("Error trying to scan for all FileInfos", e);
+      throw new YarnRuntimeException(e);
     }
     return result;
-  }
-
-  @Override
-  public void jobRemovedFromHDFS(JobId jobId) {
-    loadedJobCache.remove(jobId);
   }
 
   @Override
@@ -173,6 +201,7 @@ public class CachedHistoryStorage extends AbstractService implements
     if (end < 0) { // due to overflow
       end = Long.MAX_VALUE;
     }
+
     for (Job job : jobs) {
       if (at > end) {
         break;

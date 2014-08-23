@@ -17,22 +17,22 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.DataInput;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.io.compress.CompressionCodecFactory;
-
-import org.apache.hadoop.io.Text;
 
 /**
  * Simple container class that handles support for compressed fsimage files.
@@ -55,6 +55,10 @@ class FSImageCompression {
    */
   private FSImageCompression(CompressionCodec codec) {
     imageCodec = codec;
+  }
+
+  public CompressionCodec getImageCodec() {
+    return imageCodec;
   }
 
   /**
@@ -89,7 +93,7 @@ class FSImageCompression {
    * Create a compression instance using the codec specified by
    * <code>codecClassName</code>
    */
-  private static FSImageCompression createCompression(Configuration conf,
+  static FSImageCompression createCompression(Configuration conf,
                                                       String codecClassName)
     throws IOException {
 
@@ -108,15 +112,14 @@ class FSImageCompression {
    * underlying IO fails.
    */
   static FSImageCompression readCompressionHeader(
-    Configuration conf,
-    DataInputStream dis) throws IOException
+    Configuration conf, DataInput in) throws IOException
   {
-    boolean isCompressed = dis.readBoolean();
+    boolean isCompressed = in.readBoolean();
 
     if (!isCompressed) {
       return createNoopCompression();
     } else {
-      String codecClassName = Text.readString(dis);
+      String codecClassName = Text.readString(in);
       return createCompression(conf, codecClassName);
     }
   }

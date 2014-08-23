@@ -19,12 +19,15 @@
 package org.apache.hadoop.mapreduce.v2.app.job.impl;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -34,8 +37,8 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapreduce.Counters;
+import org.apache.hadoop.mapreduce.MRConfig;
 import org.apache.hadoop.mapreduce.OutputCommitter;
-import org.apache.hadoop.mapreduce.TaskAttemptID;
 import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryEvent;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryParser.TaskAttemptInfo;
@@ -44,6 +47,7 @@ import org.apache.hadoop.mapreduce.jobhistory.TaskFailedEvent;
 import org.apache.hadoop.mapreduce.jobhistory.TaskFinishedEvent;
 import org.apache.hadoop.mapreduce.jobhistory.TaskStartedEvent;
 import org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier;
+import org.apache.hadoop.mapreduce.v2.api.records.Avataar;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptCompletionEvent;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptCompletionEventStatus;
@@ -57,6 +61,7 @@ import org.apache.hadoop.mapreduce.v2.app.AppContext;
 import org.apache.hadoop.mapreduce.v2.app.TaskAttemptListener;
 import org.apache.hadoop.mapreduce.v2.app.job.Task;
 import org.apache.hadoop.mapreduce.v2.app.job.TaskAttempt;
+import org.apache.hadoop.mapreduce.v2.app.job.TaskStateInternal;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobDiagnosticsUpdateEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobEventType;
@@ -64,16 +69,19 @@ import org.apache.hadoop.mapreduce.v2.app.job.event.JobMapTaskRescheduledEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobTaskAttemptCompletedEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobTaskEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEvent;
+import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptKillEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
+import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptRecoverEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskEventType;
+import org.apache.hadoop.mapreduce.v2.app.job.event.TaskRecoverEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskTAttemptEvent;
 import org.apache.hadoop.mapreduce.v2.app.metrics.MRAppMetrics;
 import org.apache.hadoop.mapreduce.v2.app.rm.ContainerFailedEvent;
 import org.apache.hadoop.mapreduce.v2.util.MRBuilderUtils;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.token.Token;
-import org.apache.hadoop.yarn.Clock;
+import org.apache.hadoop.util.StringInterner;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
@@ -82,6 +90,9 @@ import org.apache.hadoop.yarn.state.MultipleArcTransition;
 import org.apache.hadoop.yarn.state.SingleArcTransition;
 import org.apache.hadoop.yarn.state.StateMachine;
 import org.apache.hadoop.yarn.state.StateMachineFactory;
+import org.apache.hadoop.yarn.util.Clock;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Implementation of Task interface.
@@ -90,10 +101,10 @@ import org.apache.hadoop.yarn.state.StateMachineFactory;
 public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
 
   private static final Log LOG = LogFactory.getLog(TaskImpl.class);
+  private static final String SPECULATION = "Speculation: ";
 
   protected final JobConf conf;
   protected final Path jobFile;
-  protected final OutputCommitter committer;
   protected final int partition;
   protected final TaskAttemptListener taskAttemptListener;
   protected final EventHandler eventHandler;
@@ -108,13 +119,23 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
   private long scheduledTime;
   
   private final RecordFactory recordFactory = RecordFactoryProvider.getRecordFactory(null);
-  
+
+  protected boolean encryptedShuffle;
   protected Credentials credentials;
   protected Token<JobTokenIdentifier> jobToken;
   
+  //should be set to one which comes first
+  //saying COMMIT_PENDING
+  private TaskAttemptId commitAttempt;
+
+  private TaskAttemptId successfulAttempt;
+
+  private final Set<TaskAttemptId> failedAttempts;
+  // Track the finished attempts - successful, failed and killed
+  private final Set<TaskAttemptId> finishedAttempts;
   // counts the number of attempts that are either running or in a state where
   //  they will come to be running when they get a Container
-  private int numberUncompletedAttempts = 0;
+  private final Set<TaskAttemptId> inProgressAttempts;
 
   private boolean historyTaskStartGenerated = false;
   
@@ -124,135 +145,157 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
      KILL_TRANSITION = new KillTransition();
 
   private static final StateMachineFactory
-               <TaskImpl, TaskState, TaskEventType, TaskEvent> 
+               <TaskImpl, TaskStateInternal, TaskEventType, TaskEvent> 
             stateMachineFactory 
-           = new StateMachineFactory<TaskImpl, TaskState, TaskEventType, TaskEvent>
-               (TaskState.NEW)
+           = new StateMachineFactory<TaskImpl, TaskStateInternal, TaskEventType, TaskEvent>
+               (TaskStateInternal.NEW)
 
     // define the state machine of Task
 
     // Transitions from NEW state
-    .addTransition(TaskState.NEW, TaskState.SCHEDULED, 
+    .addTransition(TaskStateInternal.NEW, TaskStateInternal.SCHEDULED, 
         TaskEventType.T_SCHEDULE, new InitialScheduleTransition())
-    .addTransition(TaskState.NEW, TaskState.KILLED, 
+    .addTransition(TaskStateInternal.NEW, TaskStateInternal.KILLED, 
         TaskEventType.T_KILL, new KillNewTransition())
+    .addTransition(TaskStateInternal.NEW,
+        EnumSet.of(TaskStateInternal.FAILED,
+                   TaskStateInternal.KILLED,
+                   TaskStateInternal.RUNNING,
+                   TaskStateInternal.SUCCEEDED),
+        TaskEventType.T_RECOVER, new RecoverTransition())
 
     // Transitions from SCHEDULED state
       //when the first attempt is launched, the task state is set to RUNNING
-     .addTransition(TaskState.SCHEDULED, TaskState.RUNNING, 
+     .addTransition(TaskStateInternal.SCHEDULED, TaskStateInternal.RUNNING, 
          TaskEventType.T_ATTEMPT_LAUNCHED, new LaunchTransition())
-     .addTransition(TaskState.SCHEDULED, TaskState.KILL_WAIT, 
+     .addTransition(TaskStateInternal.SCHEDULED, TaskStateInternal.KILL_WAIT, 
          TaskEventType.T_KILL, KILL_TRANSITION)
-     .addTransition(TaskState.SCHEDULED, TaskState.SCHEDULED, 
+     .addTransition(TaskStateInternal.SCHEDULED, TaskStateInternal.SCHEDULED, 
          TaskEventType.T_ATTEMPT_KILLED, ATTEMPT_KILLED_TRANSITION)
-     .addTransition(TaskState.SCHEDULED, 
-        EnumSet.of(TaskState.SCHEDULED, TaskState.FAILED), 
+     .addTransition(TaskStateInternal.SCHEDULED, 
+        EnumSet.of(TaskStateInternal.SCHEDULED, TaskStateInternal.FAILED), 
         TaskEventType.T_ATTEMPT_FAILED, 
         new AttemptFailedTransition())
  
     // Transitions from RUNNING state
-    .addTransition(TaskState.RUNNING, TaskState.RUNNING, 
+    .addTransition(TaskStateInternal.RUNNING, TaskStateInternal.RUNNING, 
         TaskEventType.T_ATTEMPT_LAUNCHED) //more attempts may start later
-    .addTransition(TaskState.RUNNING, TaskState.RUNNING, 
+    .addTransition(TaskStateInternal.RUNNING, TaskStateInternal.RUNNING, 
         TaskEventType.T_ATTEMPT_COMMIT_PENDING,
         new AttemptCommitPendingTransition())
-    .addTransition(TaskState.RUNNING, TaskState.RUNNING,
+    .addTransition(TaskStateInternal.RUNNING, TaskStateInternal.RUNNING,
         TaskEventType.T_ADD_SPEC_ATTEMPT, new RedundantScheduleTransition())
-    .addTransition(TaskState.RUNNING, TaskState.SUCCEEDED, 
+    .addTransition(TaskStateInternal.RUNNING, TaskStateInternal.SUCCEEDED, 
         TaskEventType.T_ATTEMPT_SUCCEEDED,
         new AttemptSucceededTransition())
-    .addTransition(TaskState.RUNNING, TaskState.RUNNING, 
+    .addTransition(TaskStateInternal.RUNNING, TaskStateInternal.RUNNING, 
         TaskEventType.T_ATTEMPT_KILLED,
         ATTEMPT_KILLED_TRANSITION)
-    .addTransition(TaskState.RUNNING, 
-        EnumSet.of(TaskState.RUNNING, TaskState.FAILED), 
+    .addTransition(TaskStateInternal.RUNNING, 
+        EnumSet.of(TaskStateInternal.RUNNING, TaskStateInternal.FAILED), 
         TaskEventType.T_ATTEMPT_FAILED,
         new AttemptFailedTransition())
-    .addTransition(TaskState.RUNNING, TaskState.KILL_WAIT, 
+    .addTransition(TaskStateInternal.RUNNING, TaskStateInternal.KILL_WAIT, 
         TaskEventType.T_KILL, KILL_TRANSITION)
 
     // Transitions from KILL_WAIT state
-    .addTransition(TaskState.KILL_WAIT,
-        EnumSet.of(TaskState.KILL_WAIT, TaskState.KILLED),
+    .addTransition(TaskStateInternal.KILL_WAIT,
+        EnumSet.of(TaskStateInternal.KILL_WAIT, TaskStateInternal.KILLED),
         TaskEventType.T_ATTEMPT_KILLED,
         new KillWaitAttemptKilledTransition())
+    .addTransition(TaskStateInternal.KILL_WAIT,
+        EnumSet.of(TaskStateInternal.KILL_WAIT, TaskStateInternal.KILLED),
+        TaskEventType.T_ATTEMPT_SUCCEEDED,
+        new KillWaitAttemptSucceededTransition())
+    .addTransition(TaskStateInternal.KILL_WAIT,
+        EnumSet.of(TaskStateInternal.KILL_WAIT, TaskStateInternal.KILLED),
+        TaskEventType.T_ATTEMPT_FAILED,
+        new KillWaitAttemptFailedTransition())
     // Ignore-able transitions.
     .addTransition(
-        TaskState.KILL_WAIT,
-        TaskState.KILL_WAIT,
+        TaskStateInternal.KILL_WAIT,
+        TaskStateInternal.KILL_WAIT,
         EnumSet.of(TaskEventType.T_KILL,
             TaskEventType.T_ATTEMPT_LAUNCHED,
             TaskEventType.T_ATTEMPT_COMMIT_PENDING,
-            TaskEventType.T_ATTEMPT_FAILED,
-            TaskEventType.T_ATTEMPT_SUCCEEDED,
             TaskEventType.T_ADD_SPEC_ATTEMPT))
 
     // Transitions from SUCCEEDED state
-    .addTransition(TaskState.SUCCEEDED, //only possible for map tasks
-        EnumSet.of(TaskState.SCHEDULED, TaskState.FAILED),
-        TaskEventType.T_ATTEMPT_FAILED, new MapRetroactiveFailureTransition())
+    .addTransition(TaskStateInternal.SUCCEEDED,
+        EnumSet.of(TaskStateInternal.SCHEDULED, TaskStateInternal.SUCCEEDED, TaskStateInternal.FAILED),
+        TaskEventType.T_ATTEMPT_FAILED, new RetroactiveFailureTransition())
+    .addTransition(TaskStateInternal.SUCCEEDED,
+        EnumSet.of(TaskStateInternal.SCHEDULED, TaskStateInternal.SUCCEEDED),
+        TaskEventType.T_ATTEMPT_KILLED, new RetroactiveKilledTransition())
+    .addTransition(TaskStateInternal.SUCCEEDED, TaskStateInternal.SUCCEEDED,
+        TaskEventType.T_ATTEMPT_SUCCEEDED,
+        new AttemptSucceededAtSucceededTransition())
     // Ignore-able transitions.
     .addTransition(
-        TaskState.SUCCEEDED, TaskState.SUCCEEDED,
-        EnumSet.of(TaskEventType.T_KILL,
-            TaskEventType.T_ADD_SPEC_ATTEMPT,
+        TaskStateInternal.SUCCEEDED, TaskStateInternal.SUCCEEDED,
+        EnumSet.of(TaskEventType.T_ADD_SPEC_ATTEMPT,
+            TaskEventType.T_ATTEMPT_COMMIT_PENDING,
             TaskEventType.T_ATTEMPT_LAUNCHED,
-            TaskEventType.T_ATTEMPT_KILLED))
+            TaskEventType.T_KILL))
 
     // Transitions from FAILED state        
-    .addTransition(TaskState.FAILED, TaskState.FAILED,
+    .addTransition(TaskStateInternal.FAILED, TaskStateInternal.FAILED,
         EnumSet.of(TaskEventType.T_KILL,
-                   TaskEventType.T_ADD_SPEC_ATTEMPT))
+                   TaskEventType.T_ADD_SPEC_ATTEMPT,
+                   TaskEventType.T_ATTEMPT_COMMIT_PENDING,
+                   TaskEventType.T_ATTEMPT_FAILED,
+                   TaskEventType.T_ATTEMPT_KILLED,
+                   TaskEventType.T_ATTEMPT_LAUNCHED,
+                   TaskEventType.T_ATTEMPT_SUCCEEDED))
 
     // Transitions from KILLED state
-    .addTransition(TaskState.KILLED, TaskState.KILLED,
+    // There could be a race condition where TaskImpl might receive
+    // T_ATTEMPT_SUCCEEDED followed by T_ATTEMPTED_KILLED for the same attempt.
+    // a. The task is in KILL_WAIT.
+    // b. Before TA transitions to SUCCEEDED state, Task sends TA_KILL event.
+    // c. TA transitions to SUCCEEDED state and thus send T_ATTEMPT_SUCCEEDED
+    //    to the task. The task transitions to KILLED state.
+    // d. TA processes TA_KILL event and sends T_ATTEMPT_KILLED to the task.
+    .addTransition(TaskStateInternal.KILLED, TaskStateInternal.KILLED,
         EnumSet.of(TaskEventType.T_KILL,
+                   TaskEventType.T_ATTEMPT_KILLED,
                    TaskEventType.T_ADD_SPEC_ATTEMPT))
 
     // create the topology tables
     .installTopology();
 
-  private final StateMachine<TaskState, TaskEventType, TaskEvent>
+  private final StateMachine<TaskStateInternal, TaskEventType, TaskEvent>
     stateMachine;
 
   // By default, the next TaskAttempt number is zero. Changes during recovery  
   protected int nextAttemptNumber = 0;
-  private List<TaskAttemptInfo> taskAttemptsFromPreviousGeneration =
-      new ArrayList<TaskAttemptInfo>();
 
-  private static final class RecoverdAttemptsComparator implements
-      Comparator<TaskAttemptInfo> {
-    @Override
-    public int compare(TaskAttemptInfo attempt1, TaskAttemptInfo attempt2) {
-      long diff = attempt1.getStartTime() - attempt2.getStartTime();
-      return diff == 0 ? 0 : (diff < 0 ? -1 : 1);
-    }
-  }
-
-  private static final RecoverdAttemptsComparator RECOVERED_ATTEMPTS_COMPARATOR =
-      new RecoverdAttemptsComparator();
-
-  //should be set to one which comes first
-  //saying COMMIT_PENDING
-  private TaskAttemptId commitAttempt;
-
-  private TaskAttemptId successfulAttempt;
-
-  private int failedAttempts;
-  private int finishedAttempts;//finish are total of success, failed and killed
+  // For sorting task attempts by completion time
+  private static final Comparator<TaskAttemptInfo> TA_INFO_COMPARATOR =
+      new Comparator<TaskAttemptInfo>() {
+        @Override
+        public int compare(TaskAttemptInfo a, TaskAttemptInfo b) {
+          long diff = a.getFinishTime() - b.getFinishTime();
+          return diff == 0 ? 0 : (diff < 0 ? -1 : 1);
+        }
+      };
 
   @Override
   public TaskState getState() {
-    return stateMachine.getCurrentState();
+    readLock.lock();
+    try {
+      return getExternalState(getInternalState());
+    } finally {
+      readLock.unlock();
+    }
   }
 
   public TaskImpl(JobId jobId, TaskType taskType, int partition,
       EventHandler eventHandler, Path remoteJobConfFile, JobConf conf,
-      TaskAttemptListener taskAttemptListener, OutputCommitter committer,
+      TaskAttemptListener taskAttemptListener,
       Token<JobTokenIdentifier> jobToken,
       Credentials credentials, Clock clock,
-      Map<TaskId, TaskInfo> completedTasksFromPreviousRun, int startCount,
-      MRAppMetrics metrics, AppContext appContext) {
+      int appAttemptId, MRAppMetrics metrics, AppContext appContext) {
     this.conf = conf;
     this.clock = clock;
     this.jobFile = remoteJobConfFile;
@@ -260,6 +303,9 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     readLock = readWriteLock.readLock();
     writeLock = readWriteLock.writeLock();
     this.attempts = Collections.emptyMap();
+    this.finishedAttempts = new HashSet<TaskAttemptId>(2);
+    this.failedAttempts = new HashSet<TaskAttemptId>(2);
+    this.inProgressAttempts = new HashSet<TaskAttemptId>(2);
     // This overridable method call is okay in a constructor because we
     //  have a convention that none of the overrides depends on any
     //  fields that need initialization.
@@ -268,47 +314,22 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     this.partition = partition;
     this.taskAttemptListener = taskAttemptListener;
     this.eventHandler = eventHandler;
-    this.committer = committer;
     this.credentials = credentials;
     this.jobToken = jobToken;
     this.metrics = metrics;
     this.appContext = appContext;
-
-    // See if this is from a previous generation.
-    if (completedTasksFromPreviousRun != null
-        && completedTasksFromPreviousRun.containsKey(taskId)) {
-      // This task has TaskAttempts from previous generation. We have to replay
-      // them.
-      LOG.info("Task is from previous run " + taskId);
-      TaskInfo taskInfo = completedTasksFromPreviousRun.get(taskId);
-      Map<TaskAttemptID, TaskAttemptInfo> allAttempts =
-          taskInfo.getAllTaskAttempts();
-      taskAttemptsFromPreviousGeneration = new ArrayList<TaskAttemptInfo>();
-      taskAttemptsFromPreviousGeneration.addAll(allAttempts.values());
-      Collections.sort(taskAttemptsFromPreviousGeneration,
-        RECOVERED_ATTEMPTS_COMPARATOR);
-    }
-
-    if (taskAttemptsFromPreviousGeneration.isEmpty()) {
-      // All the previous attempts are exhausted, now start with a new
-      // generation.
-
-      // All the new TaskAttemptIDs are generated based on MR
-      // ApplicationAttemptID so that attempts from previous lives don't
-      // over-step the current one. This assumes that a task won't have more
-      // than 1000 attempts in its single generation, which is very reasonable.
-      // Someone is nuts if he/she thinks he/she can live with 1000 TaskAttempts
-      // and requires serious medical attention.
-      nextAttemptNumber = (startCount - 1) * 1000;
-    } else {
-      // There are still some TaskAttempts from previous generation, use them
-      nextAttemptNumber =
-          taskAttemptsFromPreviousGeneration.remove(0).getAttemptId().getId();
-    }
+    this.encryptedShuffle = conf.getBoolean(MRConfig.SHUFFLE_SSL_ENABLED_KEY,
+                                            MRConfig.SHUFFLE_SSL_ENABLED_DEFAULT);
 
     // This "this leak" is okay because the retained pointer is in an
     //  instance variable.
     stateMachine = stateMachineFactory.make(this);
+
+    // All the new TaskAttemptIDs are generated based on MR
+    // ApplicationAttemptID so that attempts from previous lives don't
+    // over-step the current one. This assumes that a task won't have more
+    // than 1000 attempts in its single generation, which is very reasonable.
+    nextAttemptNumber = (appAttemptId - 1) * 1000;
   }
 
   @Override
@@ -350,9 +371,9 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     readLock.lock();
     try {
      // TODO: Use stateMachine level method?
-      return (getState() == TaskState.SUCCEEDED ||
-          getState() == TaskState.FAILED ||
-          getState() == TaskState.KILLED);
+      return (getInternalState() == TaskStateInternal.SUCCEEDED ||
+              getInternalState() == TaskStateInternal.FAILED ||
+              getInternalState() == TaskStateInternal.KILLED);
     } finally {
       readLock.unlock();
     }
@@ -363,11 +384,15 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     TaskReport report = recordFactory.newRecordInstance(TaskReport.class);
     readLock.lock();
     try {
+      TaskAttempt bestAttempt = selectBestAttempt();
       report.setTaskId(taskId);
       report.setStartTime(getLaunchTime());
       report.setFinishTime(getFinishTime());
       report.setTaskState(getState());
-      report.setProgress(getProgress());
+      report.setProgress(bestAttempt == null ? 0f : bestAttempt.getProgress());
+      report.setStatus(bestAttempt == null
+          ? ""
+          : bestAttempt.getReport().getStateString());
 
       for (TaskAttempt attempt : attempts.values()) {
         if (TaskAttemptState.RUNNING.equals(attempt.getState())) {
@@ -387,7 +412,9 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
 
       // Add a copy of counters as the last step so that their lifetime on heap
       // is as small as possible.
-      report.setCounters(TypeConverter.toYarn(getCounters()));
+      report.setCounters(TypeConverter.toYarn(bestAttempt == null
+          ? TaskAttemptImpl.EMPTY_COUNTERS
+          : bestAttempt.getCounters()));
 
       return report;
     } finally {
@@ -424,6 +451,24 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
       return bestAttempt.getProgress();
     } finally {
       readLock.unlock();
+    }
+  }
+
+  @VisibleForTesting
+  public TaskStateInternal getInternalState() {
+    readLock.lock();
+    try {
+      return stateMachine.getCurrentState();
+    } finally {
+      readLock.unlock();
+    }
+  }
+
+  private static TaskState getExternalState(TaskStateInternal smState) {
+    if (smState == TaskStateInternal.KILL_WAIT) {
+      return TaskState.KILLED;
+    } else {
+      return TaskState.valueOf(smState.name());
     }
   }
 
@@ -478,8 +523,8 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     return finishTime;
   }
   
-  private TaskState finished(TaskState finalState) {
-    if (getState() == TaskState.RUNNING) {
+  private TaskStateInternal finished(TaskStateInternal finalState) {
+    if (getInternalState() == TaskStateInternal.RUNNING) {
       metrics.endRunningTask(this);
     }
     return finalState;
@@ -488,17 +533,17 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
   //select the nextAttemptNumber with best progress
   // always called inside the Read Lock
   private TaskAttempt selectBestAttempt() {
+    if (successfulAttempt != null) {
+      return attempts.get(successfulAttempt);
+    }
+
     float progress = 0f;
     TaskAttempt result = null;
     for (TaskAttempt at : attempts.values()) {
       switch (at.getState()) {
       
       // ignore all failed task attempts
-      case FAIL_CONTAINER_CLEANUP: 
-      case FAIL_TASK_CLEANUP: 
       case FAILED: 
-      case KILL_CONTAINER_CLEANUP: 
-      case KILL_TASK_CLEANUP: 
       case KILLED:
         continue;      
       }      
@@ -548,14 +593,29 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
   }
 
   // This is always called in the Write Lock
-  private void addAndScheduleAttempt() {
-    TaskAttempt attempt = createAttempt();
+  private void addAndScheduleAttempt(Avataar avataar) {
+    TaskAttempt attempt = addAttempt(avataar);
+    inProgressAttempts.add(attempt.getID());
+    //schedule the nextAttemptNumber
+    if (failedAttempts.size() > 0) {
+      eventHandler.handle(new TaskAttemptEvent(attempt.getID(),
+          TaskAttemptEventType.TA_RESCHEDULE));
+    } else {
+      eventHandler.handle(new TaskAttemptEvent(attempt.getID(),
+          TaskAttemptEventType.TA_SCHEDULE));
+    }
+  }
+
+  private TaskAttemptImpl addAttempt(Avataar avataar) {
+    TaskAttemptImpl attempt = createAttempt();
+    attempt.setAvataar(avataar);
     if (LOG.isDebugEnabled()) {
       LOG.debug("Created attempt " + attempt.getID());
     }
     switch (attempts.size()) {
       case 0:
-        attempts = Collections.singletonMap(attempt.getID(), attempt);
+        attempts = Collections.singletonMap(attempt.getID(),
+            (TaskAttempt) attempt);
         break;
         
       case 1:
@@ -571,24 +631,8 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
         break;
     }
 
-    // Update nextATtemptNumber
-    if (taskAttemptsFromPreviousGeneration.isEmpty()) {
-      ++nextAttemptNumber;
-    } else {
-      // There are still some TaskAttempts from previous generation, use them
-      nextAttemptNumber =
-          taskAttemptsFromPreviousGeneration.remove(0).getAttemptId().getId();
-    }
-
-    ++numberUncompletedAttempts;
-    //schedule the nextAttemptNumber
-    if (failedAttempts > 0) {
-      eventHandler.handle(new TaskAttemptEvent(attempt.getID(),
-        TaskAttemptEventType.TA_RESCHEDULE));
-    } else {
-      eventHandler.handle(new TaskAttemptEvent(attempt.getID(),
-          TaskAttemptEventType.TA_SCHEDULE));
-    }
+    ++nextAttemptNumber;
+    return attempt;
   }
 
   @Override
@@ -599,7 +643,7 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     }
     try {
       writeLock.lock();
-      TaskState oldState = getState();
+      TaskStateInternal oldState = getInternalState();
       try {
         stateMachine.doTransition(event.getType(), event);
       } catch (InvalidStateTransitonException e) {
@@ -607,9 +651,9 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
             + this.taskId, e);
         internalError(event.getType());
       }
-      if (oldState != getState()) {
+      if (oldState != getInternalState()) {
         LOG.info(taskId + " Task Transitioned from " + oldState + " to "
-            + getState());
+            + getInternalState());
       }
 
     } finally {
@@ -617,7 +661,7 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     }
   }
 
-  private void internalError(TaskEventType type) {
+  protected void internalError(TaskEventType type) {
     LOG.error("Invalid event " + type + " on Task " + this.taskId);
     eventHandler.handle(new JobDiagnosticsUpdateEvent(
         this.taskId.getJobId(), "Invalid event " + type + 
@@ -629,7 +673,6 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
   // always called inside a transition, in turn inside the Write Lock
   private void handleTaskAttemptCompletion(TaskAttemptId attemptId,
       TaskAttemptCompletionEventStatus status) {
-    finishedAttempts++;
     TaskAttempt attempt = attempts.get(attemptId);
     //raise the completion event only if the container is assigned
     // to nextAttemptNumber
@@ -637,9 +680,10 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
       TaskAttemptCompletionEvent tce = recordFactory
           .newRecordInstance(TaskAttemptCompletionEvent.class);
       tce.setEventId(-1);
-      tce.setMapOutputServerAddress("http://"
-          + attempt.getNodeHttpAddress().split(":")[0] + ":"
-          + attempt.getShufflePort());
+      String scheme = (encryptedShuffle) ? "https://" : "http://";
+      tce.setMapOutputServerAddress(StringInterner.weakIntern(scheme
+         + attempt.getNodeHttpAddress().split(":")[0] + ":"
+         + attempt.getShufflePort()));
       tce.setStatus(status);
       tce.setAttemptId(attempt.getID());
       int runTime = 0;
@@ -653,9 +697,20 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     }
   }
 
-  private static TaskFinishedEvent createTaskFinishedEvent(TaskImpl task, TaskState taskState) {
+  private void sendTaskStartedEvent() {
+    TaskStartedEvent tse = new TaskStartedEvent(
+        TypeConverter.fromYarn(taskId), getLaunchTime(),
+        TypeConverter.fromYarn(taskId.getTaskType()),
+        getSplitsAsString());
+    eventHandler
+        .handle(new JobHistoryEvent(taskId.getJobId(), tse));
+    historyTaskStartGenerated = true;
+  }
+
+  private static TaskFinishedEvent createTaskFinishedEvent(TaskImpl task, TaskStateInternal taskState) {
     TaskFinishedEvent tfe =
       new TaskFinishedEvent(TypeConverter.fromYarn(task.taskId),
+        TypeConverter.fromYarn(task.successfulAttempt),
         task.getFinishTime(task.successfulAttempt),
         TypeConverter.fromYarn(task.taskId.getTaskType()),
         taskState.toString(),
@@ -663,7 +718,7 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     return tfe;
   }
   
-  private static TaskFailedEvent createTaskFailedEvent(TaskImpl task, List<String> diag, TaskState taskState, TaskAttemptId taId) {
+  private static TaskFailedEvent createTaskFailedEvent(TaskImpl task, List<String> diag, TaskStateInternal taskState, TaskAttemptId taId) {
     StringBuilder errorSb = new StringBuilder();
     if (diag != null) {
       for (String d : diag) {
@@ -677,8 +732,24 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
         TypeConverter.fromYarn(task.getType()),
         errorSb.toString(),
         taskState.toString(),
-        taId == null ? null : TypeConverter.fromYarn(taId));
+        taId == null ? null : TypeConverter.fromYarn(taId),
+        task.getCounters());
     return taskFailedEvent;
+  }
+  
+  private static void unSucceed(TaskImpl task) {
+    task.commitAttempt = null;
+    task.successfulAttempt = null;
+  }
+
+  private void sendTaskSucceededEvents() {
+    eventHandler.handle(new JobTaskEvent(taskId, TaskState.SUCCEEDED));
+    LOG.info("Task succeeded with attempt " + successfulAttempt);
+    if (historyTaskStartGenerated) {
+      TaskFinishedEvent tfe = createTaskFinishedEvent(this,
+          TaskStateInternal.SUCCEEDED);
+      eventHandler.handle(new JobHistoryEvent(taskId.getJobId(), tfe));
+    }
   }
 
   /**
@@ -692,20 +763,130 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
 	  return "";
   }
 
+  /**
+   * Recover a completed task from a previous application attempt
+   * @param taskInfo recovered info about the task
+   * @param recoverTaskOutput whether to recover task outputs
+   * @return state of the task after recovery
+   */
+  private TaskStateInternal recover(TaskInfo taskInfo,
+      OutputCommitter committer, boolean recoverTaskOutput) {
+    LOG.info("Recovering task " + taskId
+        + " from prior app attempt, status was " + taskInfo.getTaskStatus());
+
+    scheduledTime = taskInfo.getStartTime();
+    sendTaskStartedEvent();
+    Collection<TaskAttemptInfo> attemptInfos =
+        taskInfo.getAllTaskAttempts().values();
+
+    if (attemptInfos.size() > 0) {
+      metrics.launchedTask(this);
+    }
+
+    // recover the attempts for this task in the order they finished
+    // so task attempt completion events are ordered properly
+    int savedNextAttemptNumber = nextAttemptNumber;
+    ArrayList<TaskAttemptInfo> taInfos =
+        new ArrayList<TaskAttemptInfo>(taskInfo.getAllTaskAttempts().values());
+    Collections.sort(taInfos, TA_INFO_COMPARATOR);
+    for (TaskAttemptInfo taInfo : taInfos) {
+      nextAttemptNumber = taInfo.getAttemptId().getId();
+      TaskAttemptImpl attempt = addAttempt(Avataar.VIRGIN);
+      // handle the recovery inline so attempts complete before task does
+      attempt.handle(new TaskAttemptRecoverEvent(attempt.getID(), taInfo,
+          committer, recoverTaskOutput));
+      finishedAttempts.add(attempt.getID());
+      TaskAttemptCompletionEventStatus taces = null;
+      TaskAttemptState attemptState = attempt.getState();
+      switch (attemptState) {
+      case FAILED:
+        taces = TaskAttemptCompletionEventStatus.FAILED;
+        break;
+      case KILLED:
+        taces = TaskAttemptCompletionEventStatus.KILLED;
+        break;
+      case SUCCEEDED:
+        taces = TaskAttemptCompletionEventStatus.SUCCEEDED;
+        break;
+      default:
+        throw new IllegalStateException(
+            "Unexpected attempt state during recovery: " + attemptState);
+      }
+      if (attemptState == TaskAttemptState.FAILED) {
+        failedAttempts.add(attempt.getID());
+        if (failedAttempts.size() >= maxAttempts) {
+          taces = TaskAttemptCompletionEventStatus.TIPFAILED;
+        }
+      }
+
+      // don't clobber the successful attempt completion event
+      // TODO: this shouldn't be necessary after MAPREDUCE-4330
+      if (successfulAttempt == null) {
+        handleTaskAttemptCompletion(attempt.getID(), taces);
+        if (attemptState == TaskAttemptState.SUCCEEDED) {
+          successfulAttempt = attempt.getID();
+        }
+      }
+    }
+    nextAttemptNumber = savedNextAttemptNumber;
+
+    TaskStateInternal taskState = TaskStateInternal.valueOf(
+        taskInfo.getTaskStatus());
+    switch (taskState) {
+    case SUCCEEDED:
+      if (successfulAttempt != null) {
+        sendTaskSucceededEvents();
+      } else {
+        LOG.info("Missing successful attempt for task " + taskId
+            + ", recovering as RUNNING");
+        // there must have been a fetch failure and the retry wasn't complete
+        taskState = TaskStateInternal.RUNNING;
+        metrics.runningTask(this);
+        addAndScheduleAttempt(Avataar.VIRGIN);
+      }
+      break;
+    case FAILED:
+    case KILLED:
+    {
+      if (taskState == TaskStateInternal.KILLED && attemptInfos.size() == 0) {
+        metrics.endWaitingTask(this);
+      }
+      TaskFailedEvent tfe = new TaskFailedEvent(taskInfo.getTaskId(),
+          taskInfo.getFinishTime(), taskInfo.getTaskType(),
+          taskInfo.getError(), taskInfo.getTaskStatus(),
+          taskInfo.getFailedDueToAttemptId(), taskInfo.getCounters());
+      eventHandler.handle(new JobHistoryEvent(taskId.getJobId(), tfe));
+      eventHandler.handle(
+          new JobTaskEvent(taskId, getExternalState(taskState)));
+      break;
+    }
+    default:
+      throw new java.lang.AssertionError("Unexpected recovered task state: "
+          + taskState);
+    }
+
+    return taskState;
+  }
+
+  private static class RecoverTransition
+    implements MultipleArcTransition<TaskImpl, TaskEvent, TaskStateInternal> {
+
+    @Override
+    public TaskStateInternal transition(TaskImpl task, TaskEvent event) {
+      TaskRecoverEvent tre = (TaskRecoverEvent) event;
+      return task.recover(tre.getTaskInfo(), tre.getOutputCommitter(),
+          tre.getRecoverTaskOutput());
+    }
+  }
+
   private static class InitialScheduleTransition
     implements SingleArcTransition<TaskImpl, TaskEvent> {
 
     @Override
     public void transition(TaskImpl task, TaskEvent event) {
-      task.addAndScheduleAttempt();
+      task.addAndScheduleAttempt(Avataar.VIRGIN);
       task.scheduledTime = task.clock.getTime();
-      TaskStartedEvent tse = new TaskStartedEvent(
-          TypeConverter.fromYarn(task.taskId), task.getLaunchTime(),
-          TypeConverter.fromYarn(task.taskId.getTaskType()),
-          task.getSplitsAsString());
-      task.eventHandler
-          .handle(new JobHistoryEvent(task.taskId.getJobId(), tse));
-      task.historyTaskStartGenerated = true;
+      task.sendTaskStartedEvent();
     }
   }
 
@@ -720,7 +901,7 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     @Override
     public void transition(TaskImpl task, TaskEvent event) {
       LOG.info("Scheduling a redundant attempt for task " + task.taskId);
-      task.addAndScheduleAttempt();
+      task.addAndScheduleAttempt(Avataar.SPECULATIVE);
     }
   }
 
@@ -741,8 +922,8 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
         LOG.info(task.commitAttempt
             + " already given a go for committing the task output, so killing "
             + attemptID);
-        task.eventHandler.handle(new TaskAttemptEvent(
-            attemptID, TaskAttemptEventType.TA_KILL));
+        task.eventHandler.handle(new TaskAttemptKillEvent(attemptID,
+            SPECULATION + task.commitAttempt + " committed first!"));
       }
     }
   }
@@ -751,21 +932,15 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
       implements SingleArcTransition<TaskImpl, TaskEvent> {
     @Override
     public void transition(TaskImpl task, TaskEvent event) {
+      TaskTAttemptEvent taskTAttemptEvent = (TaskTAttemptEvent) event;
+      TaskAttemptId taskAttemptId = taskTAttemptEvent.getTaskAttemptID();
       task.handleTaskAttemptCompletion(
-          ((TaskTAttemptEvent) event).getTaskAttemptID(), 
+          taskAttemptId, 
           TaskAttemptCompletionEventStatus.SUCCEEDED);
-      --task.numberUncompletedAttempts;
-      task.successfulAttempt = ((TaskTAttemptEvent) event).getTaskAttemptID();
-      task.eventHandler.handle(new JobTaskEvent(
-          task.taskId, TaskState.SUCCEEDED));
-      LOG.info("Task succeeded with attempt " + task.successfulAttempt);
-      // issue kill to all other attempts
-      if (task.historyTaskStartGenerated) {
-        TaskFinishedEvent tfe = createTaskFinishedEvent(task,
-            TaskState.SUCCEEDED);
-        task.eventHandler.handle(new JobHistoryEvent(task.taskId.getJobId(),
-            tfe));
-      }
+      task.finishedAttempts.add(taskAttemptId);
+      task.inProgressAttempts.remove(taskAttemptId);
+      task.successfulAttempt = taskAttemptId;
+      task.sendTaskSucceededEvents();
       for (TaskAttempt attempt : task.attempts.values()) {
         if (attempt.getID() != task.successfulAttempt &&
             // This is okay because it can only talk us out of sending a
@@ -773,12 +948,11 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
             //  other reasons.
             !attempt.isFinished()) {
           LOG.info("Issuing kill to other attempt " + attempt.getID());
-          task.eventHandler.handle(
-              new TaskAttemptEvent(attempt.getID(), 
-                  TaskAttemptEventType.TA_KILL));
+          task.eventHandler.handle(new TaskAttemptKillEvent(attempt.getID(),
+              SPECULATION + task.successfulAttempt + " succeeded first!"));
         }
       }
-      task.finished(TaskState.SUCCEEDED);
+      task.finished(TaskStateInternal.SUCCEEDED);
     }
   }
 
@@ -786,29 +960,46 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
       SingleArcTransition<TaskImpl, TaskEvent> {
     @Override
     public void transition(TaskImpl task, TaskEvent event) {
+      TaskAttemptId taskAttemptId =
+          ((TaskTAttemptEvent) event).getTaskAttemptID();
       task.handleTaskAttemptCompletion(
-          ((TaskTAttemptEvent) event).getTaskAttemptID(), 
+          taskAttemptId, 
           TaskAttemptCompletionEventStatus.KILLED);
-      --task.numberUncompletedAttempts;
+      task.finishedAttempts.add(taskAttemptId);
+      task.inProgressAttempts.remove(taskAttemptId);
       if (task.successfulAttempt == null) {
-        task.addAndScheduleAttempt();
+        task.addAndScheduleAttempt(Avataar.VIRGIN);
+      }
+      if ((task.commitAttempt != null) && (task.commitAttempt == taskAttemptId)) {
+    	task.commitAttempt = null;
       }
     }
   }
 
 
   private static class KillWaitAttemptKilledTransition implements
-      MultipleArcTransition<TaskImpl, TaskEvent, TaskState> {
+      MultipleArcTransition<TaskImpl, TaskEvent, TaskStateInternal> {
 
-    protected TaskState finalState = TaskState.KILLED;
+    protected TaskStateInternal finalState = TaskStateInternal.KILLED;
+    protected final TaskAttemptCompletionEventStatus taCompletionEventStatus;
+
+    public KillWaitAttemptKilledTransition() {
+      this(TaskAttemptCompletionEventStatus.KILLED);
+    }
+
+    public KillWaitAttemptKilledTransition(
+        TaskAttemptCompletionEventStatus taCompletionEventStatus) {
+      this.taCompletionEventStatus = taCompletionEventStatus;
+    }
 
     @Override
-    public TaskState transition(TaskImpl task, TaskEvent event) {
-      task.handleTaskAttemptCompletion(
-          ((TaskTAttemptEvent) event).getTaskAttemptID(), 
-          TaskAttemptCompletionEventStatus.KILLED);
+    public TaskStateInternal transition(TaskImpl task, TaskEvent event) {
+      TaskAttemptId taskAttemptId =
+          ((TaskTAttemptEvent) event).getTaskAttemptID();
+      task.handleTaskAttemptCompletion(taskAttemptId, taCompletionEventStatus);
+      task.finishedAttempts.add(taskAttemptId);
       // check whether all attempts are finished
-      if (task.finishedAttempts == task.attempts.size()) {
+      if (task.finishedAttempts.size() == task.attempts.size()) {
         if (task.historyTaskStartGenerated) {
         TaskFailedEvent taskFailedEvent = createTaskFailedEvent(task, null,
               finalState, null); // TODO JH verify failedAttempt null
@@ -820,49 +1011,71 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
         }
 
         task.eventHandler.handle(
-            new JobTaskEvent(task.taskId, finalState));
+            new JobTaskEvent(task.taskId, getExternalState(finalState)));
         return finalState;
       }
-      return task.getState();
+      return task.getInternalState();
+    }
+  }
+
+  private static class KillWaitAttemptSucceededTransition extends
+      KillWaitAttemptKilledTransition {
+    public KillWaitAttemptSucceededTransition() {
+      super(TaskAttemptCompletionEventStatus.SUCCEEDED);
+    }
+  }
+
+  private static class KillWaitAttemptFailedTransition extends
+      KillWaitAttemptKilledTransition {
+    public KillWaitAttemptFailedTransition() {
+      super(TaskAttemptCompletionEventStatus.FAILED);
     }
   }
 
   private static class AttemptFailedTransition implements
-    MultipleArcTransition<TaskImpl, TaskEvent, TaskState> {
+    MultipleArcTransition<TaskImpl, TaskEvent, TaskStateInternal> {
 
     @Override
-    public TaskState transition(TaskImpl task, TaskEvent event) {
-      task.failedAttempts++;
+    public TaskStateInternal transition(TaskImpl task, TaskEvent event) {
       TaskTAttemptEvent castEvent = (TaskTAttemptEvent) event;
-      if (castEvent.getTaskAttemptID().equals(task.commitAttempt)) {
+      TaskAttemptId taskAttemptId = castEvent.getTaskAttemptID();
+      task.failedAttempts.add(taskAttemptId); 
+      if (taskAttemptId.equals(task.commitAttempt)) {
         task.commitAttempt = null;
       }
-      TaskAttempt attempt = task.attempts.get(castEvent.getTaskAttemptID());
+      TaskAttempt attempt = task.attempts.get(taskAttemptId);
       if (attempt.getAssignedContainerMgrAddress() != null) {
         //container was assigned
         task.eventHandler.handle(new ContainerFailedEvent(attempt.getID(), 
             attempt.getAssignedContainerMgrAddress()));
       }
       
-      if (task.failedAttempts < task.maxAttempts) {
+      task.finishedAttempts.add(taskAttemptId);
+      if (task.failedAttempts.size() < task.maxAttempts) {
         task.handleTaskAttemptCompletion(
-            ((TaskTAttemptEvent) event).getTaskAttemptID(), 
+            taskAttemptId, 
             TaskAttemptCompletionEventStatus.FAILED);
         // we don't need a new event if we already have a spare
-        if (--task.numberUncompletedAttempts == 0
+        task.inProgressAttempts.remove(taskAttemptId);
+        if (task.inProgressAttempts.size() == 0
             && task.successfulAttempt == null) {
-          task.addAndScheduleAttempt();
+          task.addAndScheduleAttempt(Avataar.VIRGIN);
         }
       } else {
         task.handleTaskAttemptCompletion(
-            ((TaskTAttemptEvent) event).getTaskAttemptID(), 
+            taskAttemptId, 
             TaskAttemptCompletionEventStatus.TIPFAILED);
-        TaskTAttemptEvent ev = (TaskTAttemptEvent) event;
-        TaskAttemptId taId = ev.getTaskAttemptID();
+
+        // issue kill to all non finished attempts
+        for (TaskAttempt taskAttempt : task.attempts.values()) {
+          task.killUnfinishedAttempt
+            (taskAttempt, "Task has failed. Killing attempt!");
+        }
+        task.inProgressAttempts.clear();
         
         if (task.historyTaskStartGenerated) {
         TaskFailedEvent taskFailedEvent = createTaskFailedEvent(task, attempt.getDiagnostics(),
-            TaskState.FAILED, taId);
+            TaskStateInternal.FAILED, taskAttemptId);
         task.eventHandler.handle(new JobHistoryEvent(task.taskId.getJobId(),
             taskFailedEvent));
         } else {
@@ -871,28 +1084,32 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
         }
         task.eventHandler.handle(
             new JobTaskEvent(task.taskId, TaskState.FAILED));
-        return task.finished(TaskState.FAILED);
+        return task.finished(TaskStateInternal.FAILED);
       }
       return getDefaultState(task);
     }
 
-    protected TaskState getDefaultState(Task task) {
-      return task.getState();
-    }
-
-    protected void unSucceed(TaskImpl task) {
-      ++task.numberUncompletedAttempts;
-      task.commitAttempt = null;
-      task.successfulAttempt = null;
+    protected TaskStateInternal getDefaultState(TaskImpl task) {
+      return task.getInternalState();
     }
   }
 
-  private static class MapRetroactiveFailureTransition
+  private static class RetroactiveFailureTransition
       extends AttemptFailedTransition {
 
     @Override
-    public TaskState transition(TaskImpl task, TaskEvent event) {
-      //verify that this occurs only for map task
+    public TaskStateInternal transition(TaskImpl task, TaskEvent event) {
+      TaskTAttemptEvent castEvent = (TaskTAttemptEvent) event;
+      if (task.getInternalState() == TaskStateInternal.SUCCEEDED &&
+          !castEvent.getTaskAttemptID().equals(task.successfulAttempt)) {
+        // don't allow a different task attempt to override a previous
+        // succeeded state
+        task.finishedAttempts.add(castEvent.getTaskAttemptID());
+        task.inProgressAttempts.remove(castEvent.getTaskAttemptID());
+        return TaskStateInternal.SUCCEEDED;
+      }
+
+      // a successful REDUCE task should not be overridden
       //TODO: consider moving it to MapTaskImpl
       if (!TaskType.MAP.equals(task.getType())) {
         LOG.error("Unexpected event for REDUCE task " + event.getType());
@@ -907,12 +1124,69 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
       //  fails, we have to let AttemptFailedTransition.transition
       //  believe that there's no redundancy.
       unSucceed(task);
+      // fake increase in Uncomplete attempts for super.transition
+      task.inProgressAttempts.add(castEvent.getTaskAttemptID());
       return super.transition(task, event);
     }
 
     @Override
-    protected TaskState getDefaultState(Task task) {
-      return TaskState.SCHEDULED;
+    protected TaskStateInternal getDefaultState(TaskImpl task) {
+      return TaskStateInternal.SCHEDULED;
+    }
+  }
+
+  private static class RetroactiveKilledTransition implements
+    MultipleArcTransition<TaskImpl, TaskEvent, TaskStateInternal> {
+
+    @Override
+    public TaskStateInternal transition(TaskImpl task, TaskEvent event) {
+      TaskAttemptId attemptId = null;
+      if (event instanceof TaskTAttemptEvent) {
+        TaskTAttemptEvent castEvent = (TaskTAttemptEvent) event;
+        attemptId = castEvent.getTaskAttemptID(); 
+        if (task.getInternalState() == TaskStateInternal.SUCCEEDED &&
+            !attemptId.equals(task.successfulAttempt)) {
+          // don't allow a different task attempt to override a previous
+          // succeeded state
+          task.finishedAttempts.add(castEvent.getTaskAttemptID());
+          task.inProgressAttempts.remove(castEvent.getTaskAttemptID());
+          return TaskStateInternal.SUCCEEDED;
+        }
+      }
+
+      // a successful REDUCE task should not be overridden
+      // TODO: consider moving it to MapTaskImpl
+      if (!TaskType.MAP.equals(task.getType())) {
+        LOG.error("Unexpected event for REDUCE task " + event.getType());
+        task.internalError(event.getType());
+      }
+
+      // successful attempt is now killed. reschedule
+      // tell the job about the rescheduling
+      unSucceed(task);
+      task.handleTaskAttemptCompletion(attemptId,
+          TaskAttemptCompletionEventStatus.KILLED);
+      task.eventHandler.handle(new JobMapTaskRescheduledEvent(task.taskId));
+      // typically we are here because this map task was run on a bad node and
+      // we want to reschedule it on a different node.
+      // Depending on whether there are previous failed attempts or not this
+      // can SCHEDULE or RESCHEDULE the container allocate request. If this
+      // SCHEDULE's then the dataLocal hosts of this taskAttempt will be used
+      // from the map splitInfo. So the bad node might be sent as a location
+      // to the RM. But the RM would ignore that just like it would ignore
+      // currently pending container requests affinitized to bad nodes.
+      task.addAndScheduleAttempt(Avataar.VIRGIN);
+      return TaskStateInternal.SCHEDULED;
+    }
+  }
+
+  private static class AttemptSucceededAtSucceededTransition
+    implements SingleArcTransition<TaskImpl, TaskEvent> {
+    @Override
+    public void transition(TaskImpl task, TaskEvent event) {
+      TaskTAttemptEvent castEvent = (TaskTAttemptEvent) event;
+      task.finishedAttempts.add(castEvent.getTaskAttemptID());
+      task.inProgressAttempts.remove(castEvent.getTaskAttemptID());
     }
   }
 
@@ -923,7 +1197,7 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
       
       if (task.historyTaskStartGenerated) {
       TaskFailedEvent taskFailedEvent = createTaskFailedEvent(task, null,
-            TaskState.KILLED, null); // TODO Verify failedAttemptId is null
+            TaskStateInternal.KILLED, null); // TODO Verify failedAttemptId is null
       task.eventHandler.handle(new JobHistoryEvent(task.taskId.getJobId(),
           taskFailedEvent));
       }else {
@@ -931,8 +1205,8 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
         		" generated for task: " + task.getID());
       }
 
-      task.eventHandler.handle(
-          new JobTaskEvent(task.taskId, TaskState.KILLED));
+      task.eventHandler.handle(new JobTaskEvent(task.taskId,
+          getExternalState(TaskStateInternal.KILLED)));
       task.metrics.endWaitingTask(task);
     }
   }
@@ -940,8 +1214,7 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
   private void killUnfinishedAttempt(TaskAttempt attempt, String logMsg) {
     if (attempt != null && !attempt.isFinished()) {
       eventHandler.handle(
-          new TaskAttemptEvent(attempt.getID(),
-              TaskAttemptEventType.TA_KILL));
+          new TaskAttemptKillEvent(attempt.getID(), logMsg));
     }
   }
 
@@ -955,7 +1228,7 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
             (attempt, "Task KILL is received. Killing attempt!");
       }
 
-      task.numberUncompletedAttempts = 0;
+      task.inProgressAttempts.clear();
     }
   }
 
@@ -965,6 +1238,7 @@ public abstract class TaskImpl implements Task, EventHandler<TaskEvent> {
     public void transition(TaskImpl task, TaskEvent event) {
       task.metrics.launchedTask(task);
       task.metrics.runningTask(task);
+      
     }
   }
 }

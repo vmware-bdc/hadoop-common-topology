@@ -90,27 +90,23 @@ public abstract class NotificationTestCase extends HadoopTestCase {
   }
 
   public static class NotificationServlet extends HttpServlet {
-    public static int counter = 0;
+    public static volatile int counter = 0;
+    public static volatile int failureCounter = 0;
     private static final long serialVersionUID = 1L;
     
     protected void doGet(HttpServletRequest req, HttpServletResponse res)
       throws ServletException, IOException {
+      String queryString = req.getQueryString();
       switch (counter) {
         case 0:
-        {
-          assertTrue(req.getQueryString().contains("SUCCEEDED"));
-        }
-        break;
+          verifyQuery(queryString, "SUCCEEDED");
+          break;
         case 2:
-        {
-          assertTrue(req.getQueryString().contains("KILLED"));
-        }
-        break;
+          verifyQuery(queryString, "KILLED");
+          break;
         case 4:
-        {
-          assertTrue(req.getQueryString().contains("FAILED"));
-        }
-        break;
+          verifyQuery(queryString, "FAILED");
+          break;
       }
       if (counter % 2 == 0) {
         res.sendError(HttpServletResponse.SC_BAD_REQUEST, "forcing error");
@@ -119,6 +115,15 @@ public abstract class NotificationTestCase extends HadoopTestCase {
         res.setStatus(HttpServletResponse.SC_OK);
       }
       counter++;
+    }
+
+    protected void verifyQuery(String query, String expected) 
+        throws IOException {
+      if (query.contains(expected)) {
+        return;
+      }
+      failureCounter++;
+      assertTrue("The request (" + query + ") does not contain " + expected, false);
     }
   }
 
@@ -147,10 +152,16 @@ public abstract class NotificationTestCase extends HadoopTestCase {
   }
 
   public void testMR() throws Exception {
+
     System.out.println(launchWordCount(this.createJobConf(),
                                        "a b c d e f g h", 1, 1));
-    Thread.sleep(2000);
+    boolean keepTrying = true;
+    for (int tries = 0; tries < 30 && keepTrying; tries++) {
+      Thread.sleep(50);
+      keepTrying = !(NotificationServlet.counter == 2);
+    }
     assertEquals(2, NotificationServlet.counter);
+    assertEquals(0, NotificationServlet.failureCounter);
     
     Path inDir = new Path("notificationjob/input");
     Path outDir = new Path("notificationjob/output");
@@ -166,14 +177,24 @@ public abstract class NotificationTestCase extends HadoopTestCase {
     // run a job with KILLED status
     System.out.println(UtilsForTests.runJobKill(this.createJobConf(), inDir,
                                                 outDir).getID());
-    Thread.sleep(2000);
+    keepTrying = true;
+    for (int tries = 0; tries < 30 && keepTrying; tries++) {
+      Thread.sleep(50);
+      keepTrying = !(NotificationServlet.counter == 4);
+    }
     assertEquals(4, NotificationServlet.counter);
+    assertEquals(0, NotificationServlet.failureCounter);
     
     // run a job with FAILED status
     System.out.println(UtilsForTests.runJobFail(this.createJobConf(), inDir,
                                                 outDir).getID());
-    Thread.sleep(2000);
+    keepTrying = true;
+    for (int tries = 0; tries < 30 && keepTrying; tries++) {
+      Thread.sleep(50);
+      keepTrying = !(NotificationServlet.counter == 6);
+    }
     assertEquals(6, NotificationServlet.counter);
+    assertEquals(0, NotificationServlet.failureCounter);
   }
 
   private String launchWordCount(JobConf conf,

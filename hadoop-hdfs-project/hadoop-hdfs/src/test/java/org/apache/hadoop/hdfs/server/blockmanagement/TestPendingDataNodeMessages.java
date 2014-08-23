@@ -17,35 +17,37 @@
  */
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 
 import java.util.Queue;
 
+import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.protocol.Block;
-import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.server.blockmanagement.PendingDataNodeMessages.ReportedBlockInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.ReplicaState;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.junit.Test;
 
 import com.google.common.base.Joiner;
 
 
 public class TestPendingDataNodeMessages {
-  PendingDataNodeMessages msgs = new PendingDataNodeMessages();
+  final PendingDataNodeMessages msgs = new PendingDataNodeMessages();
   
   private final Block block1Gs1 = new Block(1, 0, 1);
   private final Block block1Gs2 = new Block(1, 0, 2);
   private final Block block1Gs2DifferentInstance =
     new Block(1, 0, 2);
   private final Block block2Gs1 = new Block(2, 0, 1);
-  
-  private final DatanodeDescriptor fakeDN = new DatanodeDescriptor(
-      new DatanodeID("fake", 100));
-  
+
   @Test
   public void testQueues() {
-    msgs.enqueueReportedBlock(fakeDN, block1Gs1, ReplicaState.FINALIZED);
-    msgs.enqueueReportedBlock(fakeDN, block1Gs2, ReplicaState.FINALIZED);
+    DatanodeDescriptor fakeDN = DFSTestUtil.getLocalDatanodeDescriptor();
+    DatanodeStorage storage = new DatanodeStorage("STORAGE_ID");
+    DatanodeStorageInfo storageInfo = new DatanodeStorageInfo(fakeDN, storage);
+    msgs.enqueueReportedBlock(storageInfo, block1Gs1, ReplicaState.FINALIZED);
+    msgs.enqueueReportedBlock(storageInfo, block1Gs2, ReplicaState.FINALIZED);
 
     assertEquals(2, msgs.count());
     
@@ -56,8 +58,8 @@ public class TestPendingDataNodeMessages {
     Queue<ReportedBlockInfo> q =
       msgs.takeBlockQueue(block1Gs2DifferentInstance);
     assertEquals(
-        "ReportedBlockInfo [block=blk_1_1, dn=fake:100, reportedState=FINALIZED]," +
-        "ReportedBlockInfo [block=blk_1_2, dn=fake:100, reportedState=FINALIZED]",
+        "ReportedBlockInfo [block=blk_1_1, dn=127.0.0.1:50010, reportedState=FINALIZED]," +
+        "ReportedBlockInfo [block=blk_1_2, dn=127.0.0.1:50010, reportedState=FINALIZED]",
         Joiner.on(",").join(q));
     assertEquals(0, msgs.count());
     

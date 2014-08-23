@@ -22,11 +22,8 @@ import java.util.Map;
 import java.util.Queue;
 
 import org.apache.hadoop.hdfs.protocol.Block;
-import org.apache.hadoop.hdfs.server.blockmanagement.PendingDataNodeMessages.ReportedBlockInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.ReplicaState;
-import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 
-import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
@@ -38,19 +35,19 @@ import com.google.common.collect.Maps;
  * */  
 class PendingDataNodeMessages {
   
-  Map<Block, Queue<ReportedBlockInfo>> queueByBlockId =
+  final Map<Block, Queue<ReportedBlockInfo>> queueByBlockId =
     Maps.newHashMap();
   private int count = 0;
   
     
   static class ReportedBlockInfo {
     private final Block block;
-    private final DatanodeDescriptor dn;
+    private final DatanodeStorageInfo storageInfo;
     private final ReplicaState reportedState;
 
-    ReportedBlockInfo(DatanodeDescriptor dn, Block block,
+    ReportedBlockInfo(DatanodeStorageInfo storageInfo, Block block,
         ReplicaState reportedState) {
-      this.dn = dn;
+      this.storageInfo = storageInfo;
       this.block = block;
       this.reportedState = reportedState;
     }
@@ -59,26 +56,48 @@ class PendingDataNodeMessages {
       return block;
     }
 
-    DatanodeDescriptor getNode() {
-      return dn;
-    }
-
     ReplicaState getReportedState() {
       return reportedState;
+    }
+    
+    DatanodeStorageInfo getStorageInfo() {
+      return storageInfo;
     }
 
     @Override
     public String toString() {
-      return "ReportedBlockInfo [block=" + block + ", dn=" + dn
+      return "ReportedBlockInfo [block=" + block + ", dn="
+          + storageInfo.getDatanodeDescriptor()
           + ", reportedState=" + reportedState + "]";
     }
   }
   
-  void enqueueReportedBlock(DatanodeDescriptor dn, Block block,
+  /**
+   * Remove all pending DN messages which reference the given DN.
+   * @param dn the datanode whose messages we should remove.
+   */
+  void removeAllMessagesForDatanode(DatanodeDescriptor dn) {
+    for (Map.Entry<Block, Queue<ReportedBlockInfo>> entry :
+        queueByBlockId.entrySet()) {
+      Queue<ReportedBlockInfo> newQueue = Lists.newLinkedList();
+      Queue<ReportedBlockInfo> oldQueue = entry.getValue();
+      while (!oldQueue.isEmpty()) {
+        ReportedBlockInfo rbi = oldQueue.remove();
+        if (!rbi.getStorageInfo().getDatanodeDescriptor().equals(dn)) {
+          newQueue.add(rbi);
+        } else {
+          count--;
+        }
+      }
+      queueByBlockId.put(entry.getKey(), newQueue);
+    }
+  }
+  
+  void enqueueReportedBlock(DatanodeStorageInfo storageInfo, Block block,
       ReplicaState reportedState) {
     block = new Block(block);
     getBlockQueue(block).add(
-        new ReportedBlockInfo(dn, block, reportedState));
+        new ReportedBlockInfo(storageInfo, block, reportedState));
     count++;
   }
   
@@ -104,7 +123,7 @@ class PendingDataNodeMessages {
     return queue;
   }
   
-  public int count() {
+  int count() {
     return count ;
   }
 
@@ -121,7 +140,7 @@ class PendingDataNodeMessages {
     return sb.toString();
   }
 
-  public Iterable<ReportedBlockInfo> takeAll() {
+  Iterable<ReportedBlockInfo> takeAll() {
     List<ReportedBlockInfo> rbis = Lists.newArrayListWithCapacity(
         count);
     for (Queue<ReportedBlockInfo> q : queueByBlockId.values()) {

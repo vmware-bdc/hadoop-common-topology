@@ -18,6 +18,8 @@
 package org.apache.hadoop.mapred;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
@@ -26,12 +28,12 @@ import org.apache.hadoop.io.compress.DefaultCodec;
 import org.apache.hadoop.io.compress.GzipCodec;
 
 import org.junit.Test;
-
+import static org.junit.Assert.*;
 public class TestIFile {
 
   @Test
   /**
-   * Create an IFile.Writer using GzipCodec since this codec does not
+   * Create an IFile.Writer using GzipCodec since this code does not
    * have a compressor when run via the tests (ie no native libraries).
    */
   public void testIFileWriterWithCodec() throws Exception {
@@ -42,7 +44,7 @@ public class TestIFile {
     DefaultCodec codec = new GzipCodec();
     codec.setConf(conf);
     IFile.Writer<Text, Text> writer =
-      new IFile.Writer<Text, Text>(conf, rfs, path, Text.class, Text.class,
+      new IFile.Writer<Text, Text>(conf, rfs.create(path), Text.class, Text.class,
                                    codec, null);
     writer.close();
   }
@@ -56,8 +58,21 @@ public class TestIFile {
     Path path = new Path(new Path("build/test.ifile"), "data");
     DefaultCodec codec = new GzipCodec();
     codec.setConf(conf);
+    FSDataOutputStream out = rfs.create(path);
+    IFile.Writer<Text, Text> writer =
+        new IFile.Writer<Text, Text>(conf, out, Text.class, Text.class,
+                                     codec, null);
+    writer.close();
+    FSDataInputStream in = rfs.open(path);
     IFile.Reader<Text, Text> reader =
-      new IFile.Reader<Text, Text>(conf, rfs, path, codec, null);
+      new IFile.Reader<Text, Text>(conf, in, rfs.getFileStatus(path).getLen(),
+          codec, null);
     reader.close();
+    
+    // test check sum 
+    byte[] ab= new byte[100];
+    int readed= reader.checksumIn.readWithChecksum(ab, 0, ab.length);
+    assertEquals( readed,reader.checksumIn.getChecksum().length);
+    
   }
 }

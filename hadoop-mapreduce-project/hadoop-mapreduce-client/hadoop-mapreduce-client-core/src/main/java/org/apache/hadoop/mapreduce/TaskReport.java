@@ -30,6 +30,8 @@ import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.WritableUtils;
 import org.apache.hadoop.mapred.TIPStatus;
+import org.apache.hadoop.mapred.TaskID;
+import org.apache.hadoop.util.StringInterner;
 
 /** A report on the state of a task. */
 @InterfaceAudience.Private
@@ -75,9 +77,16 @@ public class TaskReport implements Writable {
     this.finishTime = finishTime;
     this.counters = counters;
   }
-    
-  /** The id of the task. */
-  public TaskID getTaskId() { return taskid; }
+
+  /** The string of the task ID. */
+  public String getTaskId() {
+    return taskid.toString();
+  }
+
+  /** The ID of the task. */
+  public TaskID getTaskID() {
+    return taskid;
+  }
 
   /** The amount completed, between zero and one. */
   public float getProgress() { return progress; }
@@ -170,7 +179,7 @@ public class TaskReport implements Writable {
              && this.progress == report.getProgress()
              && this.startTime == report.getStartTime()
              && this.state.equals(report.getState())
-             && this.taskid.equals(report.getTaskId());
+             && this.taskid.equals(report.getTaskID());
     }
     return false; 
   }
@@ -208,7 +217,7 @@ public class TaskReport implements Writable {
   public void readFields(DataInput in) throws IOException {
     this.taskid.readFields(in);
     this.progress = in.readFloat();
-    this.state = Text.readString(in);
+    this.state = StringInterner.weakIntern(Text.readString(in));
     this.startTime = in.readLong(); 
     this.finishTime = in.readLong();
     

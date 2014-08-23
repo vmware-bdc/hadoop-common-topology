@@ -21,6 +21,10 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.FileUtil;
@@ -29,16 +33,33 @@ import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.io.IOUtils;
 
+import com.google.common.annotations.VisibleForTesting;
+
 /**
  * This class is used by datanodes to maintain meta data of its replicas.
  * It provides a general interface for meta information of a replica.
  */
 @InterfaceAudience.Private
 abstract public class ReplicaInfo extends Block implements Replica {
+  
   /** volume where the replica belongs */
   private FsVolumeSpi volume;
+  
   /** directory where block & meta files belong */
-  private File dir;
+  
+  /**
+   * Base directory containing numerically-identified sub directories and
+   * possibly blocks.
+   */
+  private File baseDir;
+  
+  /**
+   * Whether or not this replica's parent directory includes subdirs, in which
+   * case we can generate them based on the replica's block ID
+   */
+  private boolean hasSubdirs;
+  
+  private static final Map<String, File> internedBaseDirs = new HashMap<String, File>();
 
   /**
    * Constructor for a zero length replica
@@ -74,12 +95,12 @@ abstract public class ReplicaInfo extends Block implements Replica {
       FsVolumeSpi vol, File dir) {
     super(blockId, len, genStamp);
     this.volume = vol;
-    this.dir = dir;
+    setDirInternal(dir);
   }
 
   /**
    * Copy constructor.
-   * @param from
+   * @param from where to copy from
    */
   ReplicaInfo(ReplicaInfo from) {
     this(from, from.getVolume(), from.getDir());
@@ -116,13 +137,22 @@ abstract public class ReplicaInfo extends Block implements Replica {
   void setVolume(FsVolumeSpi vol) {
     this.volume = vol;
   }
+
+  /**
+   * Get the storageUuid of the volume that stores this replica.
+   */
+  @Override
+  public String getStorageUuid() {
+    return volume.getStorageID();
+  }
   
   /**
    * Return the parent directory path where this replica is located
    * @return the parent directory path where this replica is located
    */
   File getDir() {
-    return dir;
+    return hasSubdirs ? DatanodeUtil.idToBlockDir(baseDir,
+        getBlockId()) : baseDir;
   }
 
   /**
@@ -130,7 +160,51 @@ abstract public class ReplicaInfo extends Block implements Replica {
    * @param dir the parent directory where the replica is located
    */
   public void setDir(File dir) {
-    this.dir = dir;
+    setDirInternal(dir);
+  }
+
+  private void setDirInternal(File dir) {
+    if (dir == null) {
+      baseDir = null;
+      return;
+    }
+
+    ReplicaDirInfo dirInfo = parseBaseDir(dir);
+    this.hasSubdirs = dirInfo.hasSubidrs;
+    
+    synchronized (internedBaseDirs) {
+      if (!internedBaseDirs.containsKey(dirInfo.baseDirPath)) {
+        // Create a new String path of this file and make a brand new File object
+        // to guarantee we drop the reference to the underlying char[] storage.
+        File baseDir = new File(dirInfo.baseDirPath);
+        internedBaseDirs.put(dirInfo.baseDirPath, baseDir);
+      }
+      this.baseDir = internedBaseDirs.get(dirInfo.baseDirPath);
+    }
+  }
+
+  @VisibleForTesting
+  public static class ReplicaDirInfo {
+    public String baseDirPath;
+    public boolean hasSubidrs;
+
+    public ReplicaDirInfo (String baseDirPath, boolean hasSubidrs) {
+      this.baseDirPath = baseDirPath;
+      this.hasSubidrs = hasSubidrs;
+    }
+  }
+  
+  @VisibleForTesting
+  public static ReplicaDirInfo parseBaseDir(File dir) {
+    
+    File currentDir = dir;
+    boolean hasSubdirs = false;
+    while (currentDir.getName().startsWith(DataStorage.BLOCK_SUBDIR_PREFIX)) {
+      hasSubdirs = true;
+      currentDir = currentDir.getParentFile();
+    }
+    
+    return new ReplicaDirInfo(currentDir.getAbsolutePath(), hasSubdirs);
   }
 
   /**
@@ -203,9 +277,6 @@ abstract public class ReplicaInfo extends Block implements Replica {
       throw new IOException("detachBlock:Block not found. " + this);
     }
     File meta = getMetaFile();
-    if (meta == null) {
-      throw new IOException("Meta file not found for block " + this);
-    }
 
     if (HardLink.getLinkCount(file) > numLinks) {
       DataNode.LOG.info("CopyOnWrite for block " + this);

@@ -49,6 +49,13 @@ public class FileOutputCommitter extends OutputCommitter {
    * committed yet.
    */
   public static final String PENDING_DIR_NAME = "_temporary";
+  /**
+   * Temporary directory name 
+   *
+   * The static variable to be compatible with M/R 1.x
+   */
+  @Deprecated
+  protected static final String TEMP_DIR_NAME = PENDING_DIR_NAME;
   public static final String SUCCEEDED_FILE_NAME = "_SUCCESS";
   public static final String SUCCESSFUL_JOB_OUTPUT_DIR_MARKER = 
     "mapreduce.fileoutputcommitter.marksuccessfuljobs";
@@ -154,7 +161,7 @@ public class FileOutputCommitter extends OutputCommitter {
    * @param appAttemptId the ID of the application attempt for this job.
    * @return the path to store job attempt data.
    */
-  private Path getJobAttemptPath(int appAttemptId) {
+  protected Path getJobAttemptPath(int appAttemptId) {
     return getJobAttemptPath(appAttemptId, getOutputPath());
   }
   
@@ -232,7 +239,7 @@ public class FileOutputCommitter extends OutputCommitter {
    * @param context the context of any task.
    * @return the path where the output of a committed task is stored.
    */
-  private Path getCommittedTaskPath(int appAttemptId, TaskAttemptContext context) {
+  protected Path getCommittedTaskPath(int appAttemptId, TaskAttemptContext context) {
     return new Path(getJobAttemptPath(appAttemptId),
         String.valueOf(context.getTaskAttemptID().getTaskID()));
   }
@@ -488,6 +495,7 @@ public class FileOutputCommitter extends OutputCommitter {
   }
 
   @Override
+  @Deprecated
   public boolean isRecoverySupported() {
     return true;
   }

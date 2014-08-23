@@ -92,7 +92,7 @@ public class FileOutputCommitter extends OutputCommitter {
   }
 
   @Private
-  Path getTaskAttemptPath(TaskAttemptContext context) throws IOException {
+  public Path getTaskAttemptPath(TaskAttemptContext context) throws IOException {
     Path out = getOutputPath(context);
     return out == null ? null : getTaskAttemptPath(context, out);
   }
@@ -184,10 +184,16 @@ public class FileOutputCommitter extends OutputCommitter {
   }
   
   @Override
+  @Deprecated
   public boolean isRecoverySupported() {
     return true;
   }
-  
+
+  @Override
+  public boolean isRecoverySupported(JobContext context) throws IOException {
+    return getWrapped(context).isRecoverySupported(context);
+  }
+
   @Override
   public void recoverTask(TaskAttemptContext context)
       throws IOException {

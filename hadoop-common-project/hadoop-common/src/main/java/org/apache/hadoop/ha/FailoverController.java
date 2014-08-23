@@ -27,6 +27,8 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
+import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
+import org.apache.hadoop.ha.HAServiceProtocol.RequestSource;
 import org.apache.hadoop.ipc.RPC;
 
 import com.google.common.base.Preconditions;
@@ -47,13 +49,34 @@ public class FailoverController {
   private final int rpcTimeoutToNewActive;
   
   private final Configuration conf;
+  /*
+   * Need a copy of conf for graceful fence to set 
+   * configurable retries for IPC client.
+   * Refer HDFS-3561
+   */
+  private final Configuration gracefulFenceConf;
 
+  private final RequestSource requestSource;
   
-  public FailoverController(Configuration conf) {
+  public FailoverController(Configuration conf,
+      RequestSource source) {
     this.conf = conf;
+    this.gracefulFenceConf = new Configuration(conf);
+    this.requestSource = source;
     
     this.gracefulFenceTimeout = getGracefulFenceTimeout(conf);
     this.rpcTimeoutToNewActive = getRpcTimeoutToNewActive(conf);
+    
+    //Configure less retries for graceful fence 
+    int gracefulFenceConnectRetries = conf.getInt(
+        CommonConfigurationKeys.HA_FC_GRACEFUL_FENCE_CONNECTION_RETRIES,
+        CommonConfigurationKeys.HA_FC_GRACEFUL_FENCE_CONNECTION_RETRIES_DEFAULT);
+    gracefulFenceConf.setInt(
+        CommonConfigurationKeys.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY,
+        gracefulFenceConnectRetries);
+    gracefulFenceConf.setInt(
+        CommonConfigurationKeys.IPC_CLIENT_CONNECT_MAX_RETRIES_ON_SOCKET_TIMEOUTS_KEY,
+        gracefulFenceConnectRetries);
   }
 
   static int getGracefulFenceTimeout(Configuration conf) {
@@ -100,7 +123,7 @@ public class FailoverController {
       toSvcStatus = toSvc.getServiceStatus();
     } catch (IOException e) {
       String msg = "Unable to get service state for " + target;
-      LOG.error(msg, e);
+      LOG.error(msg + ": " + e.getLocalizedMessage());
       throw new FailoverFailedException(msg, e);
     }
 
@@ -122,7 +145,7 @@ public class FailoverController {
     }
 
     try {
-      HAServiceProtocolHelper.monitorHealth(toSvc);
+      HAServiceProtocolHelper.monitorHealth(toSvc, createReqInfo());
     } catch (HealthCheckFailedException hce) {
       throw new FailoverFailedException(
           "Can't failover to an unhealthy service", hce);
@@ -132,7 +155,10 @@ public class FailoverController {
     }
   }
   
-  
+  private StateChangeRequestInfo createReqInfo() {
+    return new StateChangeRequestInfo(requestSource);
+  }
+
   /**
    * Try to get the HA state of the node at the given address. This
    * function is guaranteed to be "quick" -- ie it has a short timeout
@@ -142,8 +168,8 @@ public class FailoverController {
   boolean tryGracefulFence(HAServiceTarget svc) {
     HAServiceProtocol proxy = null;
     try {
-      proxy = svc.getProxy(conf, gracefulFenceTimeout);
-      proxy.transitionToStandby();
+      proxy = svc.getProxy(gracefulFenceConf, gracefulFenceTimeout);
+      proxy.transitionToStandby(createReqInfo());
       return true;
     } catch (ServiceFailedException sfe) {
       LOG.warn("Unable to gracefully make " + svc + " standby (" +
@@ -198,7 +224,8 @@ public class FailoverController {
     Throwable cause = null;
     try {
       HAServiceProtocolHelper.transitionToActive(
-          toSvc.getProxy(conf, rpcTimeoutToNewActive));
+          toSvc.getProxy(conf, rpcTimeoutToNewActive),
+          createReqInfo());
     } catch (ServiceFailedException sfe) {
       LOG.error("Unable to make " + toSvc + " active (" +
           sfe.getMessage() + "). Failing back.");

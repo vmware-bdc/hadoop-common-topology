@@ -17,21 +17,25 @@
  */
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
 import java.util.ArrayList;
 
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.server.common.GenerationStamp;
-
-import junit.framework.TestCase;
+import org.junit.Test;
 
 /**
  * This class tests that methods in DatanodeDescriptor
  */
-public class TestDatanodeDescriptor extends TestCase {
+public class TestDatanodeDescriptor {
   /**
    * Test that getInvalidateBlocks observes the maxlimit.
    */
+  @Test
   public void testGetInvalidateBlocks() throws Exception {
     final int MAX_BLOCKS = 10;
     final int REMAINING_BLOCKS = 2;
@@ -40,7 +44,7 @@ public class TestDatanodeDescriptor extends TestCase {
     DatanodeDescriptor dd = DFSTestUtil.getLocalDatanodeDescriptor();
     ArrayList<Block> blockList = new ArrayList<Block>(MAX_BLOCKS);
     for (int i=0; i<MAX_BLOCKS; i++) {
-      blockList.add(new Block(i, 0, GenerationStamp.FIRST_VALID_STAMP));
+      blockList.add(new Block(i, 0, GenerationStamp.LAST_RESERVED_STAMP));
     }
     dd.addBlocksToBeInvalidated(blockList);
     Block[] bc = dd.getInvalidateBlocks(MAX_LIMIT);
@@ -49,22 +53,26 @@ public class TestDatanodeDescriptor extends TestCase {
     assertEquals(bc.length, REMAINING_BLOCKS);
   }
   
+  @Test
   public void testBlocksCounter() throws Exception {
-    DatanodeDescriptor dd = DFSTestUtil.getLocalDatanodeDescriptor();
+    DatanodeDescriptor dd = BlockManagerTestUtil.getLocalDatanodeDescriptor(true);
     assertEquals(0, dd.numBlocks());
     BlockInfo blk = new BlockInfo(new Block(1L), 1);
     BlockInfo blk1 = new BlockInfo(new Block(2L), 2);
+    DatanodeStorageInfo[] storages = dd.getStorageInfos();
+    assertTrue(storages.length > 0);
+    final String storageID = storages[0].getStorageID();
     // add first block
-    assertTrue(dd.addBlock(blk));
+    assertTrue(storages[0].addBlock(blk));
     assertEquals(1, dd.numBlocks());
     // remove a non-existent block
     assertFalse(dd.removeBlock(blk1));
     assertEquals(1, dd.numBlocks());
     // add an existent block
-    assertFalse(dd.addBlock(blk));
+    assertFalse(storages[0].addBlock(blk));
     assertEquals(1, dd.numBlocks());
     // add second block
-    assertTrue(dd.addBlock(blk1));
+    assertTrue(storages[0].addBlock(blk1));
     assertEquals(2, dd.numBlocks());
     // remove first block
     assertTrue(dd.removeBlock(blk));

@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Matchers.anyLong;
 import static org.mockito.Matchers.anyObject;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -27,6 +28,7 @@ import static org.mockito.Mockito.spy;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.Log;
@@ -36,11 +38,15 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
+import org.apache.hadoop.hdfs.server.namenode.INodeFile;
 import org.apache.hadoop.hdfs.server.namenode.LeaseManager;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
@@ -63,7 +69,7 @@ public class TestFileAppend4 {
   MiniDFSCluster cluster;
   Path file1;
   FSDataOutputStream stm;
-  boolean simulatedStorage = false;
+  final boolean simulatedStorage = false;
 
   {
     ((Log4JLogger)NameNode.stateChangeLog).getLogger().setLevel(Level.ALL);
@@ -156,7 +162,7 @@ public class TestFileAppend4 {
       // Delay completeFile
       GenericTestUtils.DelayAnswer delayer = new GenericTestUtils.DelayAnswer(LOG);
       doAnswer(delayer).when(spyNN).complete(
-          anyString(), anyString(), (ExtendedBlock)anyObject());
+          anyString(), anyString(), (ExtendedBlock)anyObject(), anyLong());
  
       DFSClient client = new DFSClient(null, spyNN, conf, null);
       file1 = new Path("/testRecoverFinalized");
@@ -166,6 +172,7 @@ public class TestFileAppend4 {
       AppendTestUtil.write(stm, 0, 4096);
       final AtomicReference<Throwable> err = new AtomicReference<Throwable>();
       Thread t = new Thread() { 
+          @Override
           public void run() {
             try {
               stm.close();
@@ -181,7 +188,7 @@ public class TestFileAppend4 {
       // has not been completed in the NN.
       // Lose the leases
       LOG.info("Killing lease checker");
-      client.leaserenewer.interruptAndJoin();
+      client.getLeaseRenewer().interruptAndJoin();
  
       FileSystem fs1 = cluster.getFileSystem();
       FileSystem fs2 = AppendTestUtil.createHdfsWithDifferentUsername(
@@ -228,7 +235,7 @@ public class TestFileAppend4 {
       GenericTestUtils.DelayAnswer delayer =
         new GenericTestUtils.DelayAnswer(LOG);
       doAnswer(delayer).when(spyNN).complete(anyString(), anyString(),
-          (ExtendedBlock) anyObject());
+          (ExtendedBlock) anyObject(), anyLong());
  
       DFSClient client = new DFSClient(null, spyNN, conf, null);
       file1 = new Path("/testCompleteOtherLease");
@@ -238,6 +245,7 @@ public class TestFileAppend4 {
       AppendTestUtil.write(stm, 0, 4096);
       final AtomicReference<Throwable> err = new AtomicReference<Throwable>();
       Thread t = new Thread() { 
+          @Override
           public void run() {
             try {
               stm.close();
@@ -253,7 +261,7 @@ public class TestFileAppend4 {
       // has not been completed in the NN.
       // Lose the leases
       LOG.info("Killing lease checker");
-      client.leaserenewer.interruptAndJoin();
+      client.getLeaseRenewer().interruptAndJoin();
  
       FileSystem fs1 = cluster.getFileSystem();
       FileSystem fs2 = AppendTestUtil.createHdfsWithDifferentUsername(
@@ -286,6 +294,107 @@ public class TestFileAppend4 {
       // The appender should be able to close properly
       appenderStream.close();
     } finally {
+      cluster.shutdown();
+    }
+  }
+
+  /**
+   * Test the updation of NeededReplications for the Appended Block
+   */
+  @Test(timeout = 60000)
+  public void testUpdateNeededReplicationsForAppendedFile() throws Exception {
+    Configuration conf = new Configuration();
+    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1)
+        .build();
+    DistributedFileSystem fileSystem = null;
+    try {
+      // create a file.
+      fileSystem = cluster.getFileSystem();
+      Path f = new Path("/testAppend");
+      FSDataOutputStream create = fileSystem.create(f, (short) 2);
+      create.write("/testAppend".getBytes());
+      create.close();
+
+      // Append to the file.
+      FSDataOutputStream append = fileSystem.append(f);
+      append.write("/testAppend".getBytes());
+      append.close();
+
+      // Start a new datanode
+      cluster.startDataNodes(conf, 1, true, null, null);
+
+      // Check for replications
+      DFSTestUtil.waitReplication(fileSystem, f, (short) 2);
+    } finally {
+      if (null != fileSystem) {
+        fileSystem.close();
+      }
+      cluster.shutdown();
+    }
+  }
+
+  /**
+   * Test that an append with no locations fails with an exception
+   * showing insufficient locations.
+   */
+  @Test(timeout = 60000)
+  public void testAppendInsufficientLocations() throws Exception {
+    Configuration conf = new Configuration();
+
+    // lower heartbeat interval for fast recognition of DN
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY,
+        1000);
+    conf.setInt(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1);
+    conf.setInt(DFSConfigKeys.DFS_CLIENT_SOCKET_TIMEOUT_KEY, 3000);
+
+    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(4)
+        .build();
+    DistributedFileSystem fileSystem = null;
+    try {
+      // create a file with replication 3
+      fileSystem = cluster.getFileSystem();
+      Path f = new Path("/testAppend");
+      FSDataOutputStream create = fileSystem.create(f, (short) 2);
+      create.write("/testAppend".getBytes());
+      create.close();
+
+      // Check for replications
+      DFSTestUtil.waitReplication(fileSystem, f, (short) 2);
+
+      // Shut down all DNs that have the last block location for the file
+      LocatedBlocks lbs = fileSystem.dfs.getNamenode().
+          getBlockLocations("/testAppend", 0, Long.MAX_VALUE);
+      List<DataNode> dnsOfCluster = cluster.getDataNodes();
+      DatanodeInfo[] dnsWithLocations = lbs.getLastLocatedBlock().
+          getLocations();
+      for( DataNode dn : dnsOfCluster) {
+        for(DatanodeInfo loc: dnsWithLocations) {
+          if(dn.getDatanodeId().equals(loc)){
+            dn.shutdown();
+            DFSTestUtil.waitForDatanodeDeath(dn);
+          }
+        }
+      }
+
+      // Wait till 0 replication is recognized
+      DFSTestUtil.waitReplication(fileSystem, f, (short) 0);
+
+      // Append to the file, at this state there are 3 live DNs but none of them
+      // have the block.
+      try{
+        fileSystem.append(f);
+        fail("Append should fail because insufficient locations");
+      } catch (IOException e){
+        LOG.info("Expected exception: ", e);
+      }
+      FSDirectory dir = cluster.getNamesystem().getFSDirectory();
+      final INodeFile inode = INodeFile.
+          valueOf(dir.getINode("/testAppend"), "/testAppend");
+      assertTrue("File should remain closed", !inode.isUnderConstruction());
+    } finally {
+      if (null != fileSystem) {
+        fileSystem.close();
+      }
       cluster.shutdown();
     }
   }

@@ -23,6 +23,7 @@ import java.util.Comparator;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.fs.FileEncryptionInfo;
 
 /**
  * Collection of blocks with their locations and the file length.
@@ -30,27 +31,28 @@ import org.apache.hadoop.classification.InterfaceStability;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public class LocatedBlocks {
-  private long fileLength;
-  private List<LocatedBlock> blocks; // array of blocks with prioritized locations
-  private boolean underConstruction;
+  private final long fileLength;
+  private final List<LocatedBlock> blocks; // array of blocks with prioritized locations
+  private final boolean underConstruction;
   private LocatedBlock lastLocatedBlock = null;
   private boolean isLastBlockComplete = false;
+  private FileEncryptionInfo fileEncryptionInfo = null;
 
   public LocatedBlocks() {
     fileLength = 0;
     blocks = null;
     underConstruction = false;
   }
-  
-  /** public Constructor */
+
   public LocatedBlocks(long flength, boolean isUnderConstuction,
-      List<LocatedBlock> blks, 
-      LocatedBlock lastBlock, boolean isLastBlockCompleted) {
+    List<LocatedBlock> blks, LocatedBlock lastBlock,
+    boolean isLastBlockCompleted, FileEncryptionInfo feInfo) {
     fileLength = flength;
     blocks = blks;
     underConstruction = isUnderConstuction;
     this.lastLocatedBlock = lastBlock;
     this.isLastBlockComplete = isLastBlockCompleted;
+    this.fileEncryptionInfo = feInfo;
   }
   
   /**
@@ -92,26 +94,35 @@ public class LocatedBlocks {
   }
 
   /**
-   * Return ture if file was under construction when 
-   * this LocatedBlocks was constructed, false otherwise.
+   * Return true if file was under construction when this LocatedBlocks was
+   * constructed, false otherwise.
    */
   public boolean isUnderConstruction() {
     return underConstruction;
   }
-  
+
+  /**
+   * @return the FileEncryptionInfo for the LocatedBlocks
+   */
+  public FileEncryptionInfo getFileEncryptionInfo() {
+    return fileEncryptionInfo;
+  }
+
   /**
    * Find block containing specified offset.
    * 
    * @return block if found, or null otherwise.
    */
   public int findBlock(long offset) {
-    // create fake block of size 1 as a key
-    LocatedBlock key = new LocatedBlock();
+    // create fake block of size 0 as a key
+    LocatedBlock key = new LocatedBlock(
+        new ExtendedBlock(), new DatanodeInfo[0], 0L, false);
     key.setStartOffset(offset);
     key.getBlock().setNumBytes(1);
     Comparator<LocatedBlock> comp = 
       new Comparator<LocatedBlock>() {
         // Returns 0 iff a is inside b or b is inside a
+        @Override
         public int compare(LocatedBlock a, LocatedBlock b) {
           long aBeg = a.getStartOffset();
           long bBeg = b.getStartOffset();

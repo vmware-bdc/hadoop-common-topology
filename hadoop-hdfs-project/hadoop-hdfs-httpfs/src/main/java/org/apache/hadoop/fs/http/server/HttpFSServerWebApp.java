@@ -18,7 +18,9 @@
 
 package org.apache.hadoop.fs.http.server;
 
+import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.lib.server.ServerException;
 import org.apache.hadoop.lib.service.FileSystemAccess;
 import org.apache.hadoop.lib.servlet.ServerWebApp;
@@ -29,16 +31,19 @@ import java.io.IOException;
 
 /**
  * Bootstrap class that manages the initialization and destruction of the
- * HttpFSServer server, it is a <code>javax.servlet.ServletContextListener</code>
- * implementation that is wired in HttpFSServer's WAR <code>WEB-INF/web.xml</code>.
+ * HttpFSServer server, it is a <code>javax.servlet.ServletContextListener
+ * </code> implementation that is wired in HttpFSServer's WAR
+ * <code>WEB-INF/web.xml</code>.
  * <p/>
  * It provides acces to the server context via the singleton {@link #get}.
  * <p/>
  * All the configuration is loaded from configuration properties prefixed
  * with <code>httpfs.</code>.
  */
+@InterfaceAudience.Private
 public class HttpFSServerWebApp extends ServerWebApp {
-  private static final Logger LOG = LoggerFactory.getLogger(HttpFSServerWebApp.class);
+  private static final Logger LOG =
+    LoggerFactory.getLogger(HttpFSServerWebApp.class);
 
   /**
    * Server name and prefix for all configuration properties.
@@ -67,8 +72,8 @@ public class HttpFSServerWebApp extends ServerWebApp {
   /**
    * Constructor used for testing purposes.
    */
-  protected HttpFSServerWebApp(String homeDir, String configDir, String logDir, String tempDir,
-                               Configuration config) {
+  public HttpFSServerWebApp(String homeDir, String configDir, String logDir,
+                               String tempDir, Configuration config) {
     super(NAME, homeDir, configDir, logDir, tempDir, config);
   }
 
@@ -80,20 +85,23 @@ public class HttpFSServerWebApp extends ServerWebApp {
   }
 
   /**
-   * Initializes the HttpFSServer server, loads configuration and required services.
+   * Initializes the HttpFSServer server, loads configuration and required
+   * services.
    *
-   * @throws ServerException thrown if HttpFSServer server could not be initialized.
+   * @throws ServerException thrown if HttpFSServer server could not be
+   * initialized.
    */
   @Override
   public void init() throws ServerException {
-    super.init();
     if (SERVER != null) {
       throw new RuntimeException("HttpFSServer server already initialized");
     }
     SERVER = this;
+    super.init();
     adminGroup = getConfig().get(getPrefixedName(CONF_ADMIN_GROUP), "admin");
     LOG.info("Connects to Namenode [{}]",
-             get().get(FileSystemAccess.class).getDefaultConfiguration().get("fs.default.name"));
+             get().get(FileSystemAccess.class).getFileSystemConfiguration().
+               get(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY));
   }
 
   /**
@@ -106,7 +114,8 @@ public class HttpFSServerWebApp extends ServerWebApp {
   }
 
   /**
-   * Returns HttpFSServer server singleton, configuration and services are accessible through it.
+   * Returns HttpFSServer server singleton, configuration and services are
+   * accessible through it.
    *
    * @return the HttpFSServer server singleton.
    */

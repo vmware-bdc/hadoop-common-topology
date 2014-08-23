@@ -24,6 +24,7 @@ import static org.apache.hadoop.mapreduce.counters.CounterGroupFactory.isFramewo
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentSkipListMap;
@@ -39,6 +40,7 @@ import org.apache.hadoop.mapreduce.Counter;
 import org.apache.hadoop.mapreduce.FileSystemCounter;
 import org.apache.hadoop.mapreduce.JobCounter;
 import org.apache.hadoop.mapreduce.TaskCounter;
+import org.apache.hadoop.util.StringInterner;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
@@ -81,7 +83,7 @@ public abstract class AbstractCounters<C extends Counter,
                   TaskCounter.class.getName());
     legacyMap.put("org.apache.hadoop.mapred.JobInProgress$Counter",
                   JobCounter.class.getName());
-    legacyMap.put("FileSystemCounter", FileSystemCounter.class.getName());
+    legacyMap.put("FileSystemCounters", FileSystemCounter.class.getName());
   }
 
   private final Limits limits = new Limits();
@@ -185,7 +187,15 @@ public abstract class AbstractCounters<C extends Counter,
    * @return Set of counter names.
    */
   public synchronized Iterable<String> getGroupNames() {
-    return Iterables.concat(fgroups.keySet(), groups.keySet());
+    HashSet<String> deprecated = new HashSet<String>();
+    for(Map.Entry<String, String> entry : legacyMap.entrySet()) {
+      String newGroup = entry.getValue();
+      boolean isFGroup = isFrameworkGroup(newGroup);
+      if(isFGroup ? fgroups.containsKey(newGroup) : groups.containsKey(newGroup)) {
+        deprecated.add(entry.getKey());
+      }
+    }
+    return Iterables.concat(fgroups.keySet(), groups.keySet(), deprecated);
   }
 
   @Override
@@ -201,7 +211,15 @@ public abstract class AbstractCounters<C extends Counter,
    * @return the group
    */
   public synchronized G getGroup(String groupName) {
-    String newGroupName = filterGroupName(groupName);
+
+    // filterGroupName
+    boolean groupNameInLegacyMap = true;
+    String newGroupName = legacyMap.get(groupName);
+    if (newGroupName == null) {
+      groupNameInLegacyMap = false;
+      newGroupName = Limits.filterGroupName(groupName);
+    }
+
     boolean isFGroup = isFrameworkGroup(newGroupName);
     G group = isFGroup ? fgroups.get(newGroupName) : groups.get(newGroupName);
     if (group == null) {
@@ -212,17 +230,12 @@ public abstract class AbstractCounters<C extends Counter,
         limits.checkGroups(groups.size() + 1);
         groups.put(newGroupName, group);
       }
+      if (groupNameInLegacyMap) {
+        LOG.warn("Group " + groupName + " is deprecated. Use " + newGroupName
+            + " instead");
+      }
     }
     return group;
-  }
-
-  private String filterGroupName(String oldName) {
-    String newName = legacyMap.get(oldName);
-    if (newName == null) {
-      return Limits.filterGroupName(oldName);
-    }
-    LOG.warn("Group "+ oldName +" is deprecated. Use "+ newName +" instead");
-    return newName;
   }
 
   /**
@@ -296,7 +309,8 @@ public abstract class AbstractCounters<C extends Counter,
     int numGroups = WritableUtils.readVInt(in);
     while (numGroups-- > 0) {
       limits.checkGroups(groups.size() + 1);
-      G group = groupFactory.newGenericGroup(Text.readString(in), null, limits);
+      G group = groupFactory.newGenericGroup(
+          StringInterner.weakIntern(Text.readString(in)), null, limits);
       group.readFields(in);
       groups.put(group.getName(), group);
     }

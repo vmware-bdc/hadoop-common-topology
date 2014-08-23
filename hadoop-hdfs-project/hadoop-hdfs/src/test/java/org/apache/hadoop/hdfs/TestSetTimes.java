@@ -17,26 +17,37 @@
  */
 package org.apache.hadoop.hdfs;
 
-import junit.framework.TestCase;
-import java.io.*;
-import java.util.Random;
-import java.net.*;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
-import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.FileStatus;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.Random;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.test.MockitoUtil;
+import org.apache.hadoop.util.Time;
+import org.junit.Test;
+import org.mockito.Mockito;
 
 /**
  * This class tests the access time on files.
  *
  */
-public class TestSetTimes extends TestCase {
+public class TestSetTimes {
   static final long seed = 0xDEADBEEFL;
   static final int blockSize = 8192;
   static final int fileSize = 16384;
@@ -77,6 +88,7 @@ public class TestSetTimes extends TestCase {
   /**
    * Tests mod & access time in DFS.
    */
+  @Test
   public void testTimes() throws IOException {
     Configuration conf = new HdfsConfiguration();
     final int MAX_IDLE_TIME = 2000; // 2s
@@ -159,8 +171,8 @@ public class TestSetTimes extends TestCase {
       assertTrue(atime2 == stat.getAccessTime());
       assertTrue(mtime2 == mtime3);
 
-      long mtime4 = System.currentTimeMillis() - (3600L * 1000L);
-      long atime4 = System.currentTimeMillis();
+      long mtime4 = Time.now() - (3600L * 1000L);
+      long atime4 = Time.now();
       fileSys.setTimes(dir1, mtime4, atime4);
       // check new modification time on file
       stat = fileSys.getFileStatus(dir1);
@@ -208,6 +220,7 @@ public class TestSetTimes extends TestCase {
   /**
    * Tests mod time change at close in DFS.
    */
+  @Test
   public void testTimesAtClose() throws IOException {
     Configuration conf = new HdfsConfiguration();
     final int MAX_IDLE_TIME = 2000; // 2s
@@ -261,6 +274,37 @@ public class TestSetTimes extends TestCase {
       throw e;
     } finally {
       fileSys.close();
+      cluster.shutdown();
+    }
+  }
+  
+  /**
+   * Test that when access time updates are not needed, the FSNamesystem
+   * write lock is not taken by getBlockLocations.
+   * Regression test for HDFS-3981.
+   */
+  @Test(timeout=60000)
+  public void testGetBlockLocationsOnlyUsesReadLock() throws IOException {
+    Configuration conf = new HdfsConfiguration();
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_ACCESSTIME_PRECISION_KEY, 100*1000);
+    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
+      .numDataNodes(0)
+      .build();
+    ReentrantReadWriteLock spyLock = NameNodeAdapter.spyOnFsLock(cluster.getNamesystem());
+    try {
+      // Create empty file in the FSN.
+      Path p = new Path("/empty-file");
+      DFSTestUtil.createFile(cluster.getFileSystem(), p, 0, (short)1, 0L);
+      
+      // getBlockLocations() should not need the write lock, since we just created
+      // the file (and thus its access time is already within the 100-second
+      // accesstime precision configured above). 
+      MockitoUtil.doThrowWhenCallStackMatches(
+          new AssertionError("Should not need write lock"),
+          ".*getBlockLocations.*")
+          .when(spyLock).writeLock();
+      cluster.getFileSystem().getFileBlockLocations(p, 0, 100);
+    } finally {
       cluster.shutdown();
     }
   }

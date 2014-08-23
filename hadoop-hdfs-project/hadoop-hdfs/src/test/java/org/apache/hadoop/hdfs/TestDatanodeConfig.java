@@ -20,6 +20,8 @@ package org.apache.hadoop.hdfs;
 import static org.apache.hadoop.hdfs.server.common.Util.fileAsURI;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeTrue;
 
 import java.io.File;
 import java.io.IOException;
@@ -30,6 +32,8 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
+import org.apache.hadoop.io.nativeio.NativeIO;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -47,6 +51,10 @@ public class TestDatanodeConfig {
   public static void setUp() throws Exception {
     clearBaseDir();
     Configuration conf = new HdfsConfiguration();
+    conf.setInt(DFSConfigKeys.DFS_DATANODE_HTTPS_PORT_KEY, 0);
+    conf.set(DFSConfigKeys.DFS_DATANODE_ADDRESS_KEY, "localhost:0");
+    conf.set(DFSConfigKeys.DFS_DATANODE_IPC_ADDRESS_KEY, "localhost:0");
+    conf.set(DFSConfigKeys.DFS_DATANODE_HTTP_ADDRESS_KEY, "localhost:0");
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
     cluster.waitActive();
   }
@@ -79,11 +87,14 @@ public class TestDatanodeConfig {
     DataNode dn = null;
     try {
       dn = DataNode.createDataNode(new String[]{}, conf);
-    } catch(IOException e) {
+      fail();
+    } catch(Exception e) {
       // expecting exception here
+    } finally {
+      if (dn != null) {
+        dn.shutdown();
+      }
     }
-    if(dn != null)
-      dn.shutdown();
     assertNull("Data-node startup should have failed.", dn);
 
     // 2. Test "file:" schema and no schema (path-only). Both should work.
@@ -93,8 +104,14 @@ public class TestDatanodeConfig {
     String dnDir3 = dataDir.getAbsolutePath() + "3";
     conf.set(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY,
                 dnDir1 + "," + dnDir2 + "," + dnDir3);
-    cluster.startDataNodes(conf, 1, false, StartupOption.REGULAR, null);
-    assertTrue("Data-node should startup.", cluster.isDataNodeUp());
+    try {
+      cluster.startDataNodes(conf, 1, false, StartupOption.REGULAR, null);
+      assertTrue("Data-node should startup.", cluster.isDataNodeUp());
+    } finally {
+      if (cluster != null) {
+        cluster.shutdownDataNodes();
+      }
+    }
   }
 
   private static String makeURI(String scheme, String host, String path)
@@ -104,6 +121,48 @@ public class TestDatanodeConfig {
       return uDir.toString();
     } catch(URISyntaxException e) {
       throw new IOException("Bad URI", e);
+    }
+  }
+
+  @Test(timeout=60000)
+  public void testMemlockLimit() throws Exception {
+    assumeTrue(NativeIO.isAvailable());
+    final long memlockLimit =
+        NativeIO.POSIX.getCacheManipulator().getMemlockLimit();
+
+    // Can't increase the memlock limit past the maximum.
+    assumeTrue(memlockLimit != Long.MAX_VALUE);
+
+    File dataDir = new File(BASE_DIR, "data").getCanonicalFile();
+    Configuration conf = cluster.getConfiguration(0);
+    conf.set(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY,
+      makeURI("file", null, fileAsURI(dataDir).getPath()));
+    long prevLimit = conf.
+        getLong(DFSConfigKeys.DFS_DATANODE_MAX_LOCKED_MEMORY_KEY,
+            DFSConfigKeys.DFS_DATANODE_MAX_LOCKED_MEMORY_DEFAULT);
+    DataNode dn = null;
+    try {
+      // Try starting the DN with limit configured to the ulimit
+      conf.setLong(DFSConfigKeys.DFS_DATANODE_MAX_LOCKED_MEMORY_KEY,
+          memlockLimit);
+      dn = DataNode.createDataNode(new String[]{},  conf);
+      dn.shutdown();
+      dn = null;
+      // Try starting the DN with a limit > ulimit
+      conf.setLong(DFSConfigKeys.DFS_DATANODE_MAX_LOCKED_MEMORY_KEY,
+          memlockLimit+1);
+      try {
+        dn = DataNode.createDataNode(new String[]{}, conf);
+      } catch (RuntimeException e) {
+        GenericTestUtils.assertExceptionContains(
+            "more than the datanode's available RLIMIT_MEMLOCK", e);
+      }
+    } finally {
+      if (dn != null) {
+        dn.shutdown();
+      }
+      conf.setLong(DFSConfigKeys.DFS_DATANODE_MAX_LOCKED_MEMORY_KEY,
+          prevLimit);
     }
   }
 }

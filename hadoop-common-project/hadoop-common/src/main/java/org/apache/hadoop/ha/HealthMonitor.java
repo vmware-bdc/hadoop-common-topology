@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 
+import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -43,7 +44,8 @@ import com.google.common.base.Preconditions;
  * Classes which need callbacks should implement the {@link Callback}
  * interface.
  */
-class HealthMonitor {
+@InterfaceAudience.Private
+public class HealthMonitor {
   private static final Log LOG = LogFactory.getLog(
       HealthMonitor.class);
 
@@ -72,10 +74,14 @@ class HealthMonitor {
   private List<Callback> callbacks = Collections.synchronizedList(
       new LinkedList<Callback>());
 
+  private List<ServiceStateCallback> serviceStateCallbacks = Collections
+      .synchronizedList(new LinkedList<ServiceStateCallback>());
+
   private HAServiceStatus lastServiceState = new HAServiceStatus(
       HAServiceState.INITIALIZING);
   
-  enum State {
+  @InterfaceAudience.Private
+  public enum State {
     /**
      * The health monitor is still starting up.
      */
@@ -131,7 +137,15 @@ class HealthMonitor {
   public void removeCallback(Callback cb) {
     callbacks.remove(cb);
   }
-  
+
+  public synchronized void addServiceStateCallback(ServiceStateCallback cb) {
+    this.serviceStateCallbacks.add(cb);
+  }
+
+  public synchronized void removeServiceStateCallback(ServiceStateCallback cb) {
+    serviceStateCallbacks.remove(cb);
+  }
+
   public void shutdown() {
     LOG.info("Stopping HealthMonitor thread");
     shouldRun = false;
@@ -214,6 +228,9 @@ class HealthMonitor {
   
   private synchronized void setLastServiceStatus(HAServiceStatus status) {
     this.lastServiceState = status;
+    for (ServiceStateCallback cb : serviceStateCallbacks) {
+      cb.reportServiceStatus(lastServiceState);
+    }
   }
 
   private synchronized void enterState(State newState) {
@@ -289,5 +306,12 @@ class HealthMonitor {
    */
   static interface Callback {
     void enteredState(State newState);
+  }
+
+  /**
+   * Callback interface for service states.
+   */
+  static interface ServiceStateCallback {
+    void reportServiceStatus(HAServiceStatus status);
   }
 }

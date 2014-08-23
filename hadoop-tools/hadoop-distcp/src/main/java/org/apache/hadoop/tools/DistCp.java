@@ -33,11 +33,14 @@ import org.apache.hadoop.tools.CopyListing.*;
 import org.apache.hadoop.tools.mapred.CopyMapper;
 import org.apache.hadoop.tools.mapred.CopyOutputFormat;
 import org.apache.hadoop.tools.util.DistCpUtils;
+import org.apache.hadoop.util.ShutdownHookManager;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 
 import java.io.IOException;
 import java.util.Random;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * DistCp is the main driver-class for DistCpV2.
@@ -49,6 +52,12 @@ import java.util.Random;
  * behaviour.
  */
 public class DistCp extends Configured implements Tool {
+
+  /**
+   * Priority of the ResourceManager shutdown hook.
+   */
+  public static final int SHUTDOWN_HOOK_PRIORITY = 30;
+
   private static final Log LOG = LogFactory.getLog(DistCp.class);
 
   private DistCpOptions inputOptions;
@@ -80,7 +89,8 @@ public class DistCp extends Configured implements Tool {
   /**
    * To be used with the ToolRunner. Not for public consumption.
    */
-  private DistCp() {}
+  @VisibleForTesting
+  public DistCp() {}
 
   /**
    * Implementation of Tool::run(). Orchestrates the copy of source file(s)
@@ -91,9 +101,14 @@ public class DistCp extends Configured implements Tool {
    * @return On success, it returns 0. Else, -1.
    */
   public int run(String[] argv) {
+    if (argv.length < 1) {
+      OptionsParser.usage();
+      return DistCpConstants.INVALID_ARGUMENT;
+    }
+    
     try {
       inputOptions = (OptionsParser.parse(argv));
-
+      setTargetPathExists();
       LOG.info("Input Options: " + inputOptions);
     } catch (Throwable e) {
       LOG.error("Invalid arguments: ", e);
@@ -110,6 +125,12 @@ public class DistCp extends Configured implements Tool {
     } catch (DuplicateFileException e) {
       LOG.error("Duplicate files in input path: ", e);
       return DistCpConstants.DUPLICATE_INPUT;
+    } catch (AclsNotSupportedException e) {
+      LOG.error("ACLs not supported on at least one file system: ", e);
+      return DistCpConstants.ACLS_NOT_SUPPORTED;
+    } catch (XAttrsNotSupportedException e) {
+      LOG.error("XAttrs not supported on at least one file system: ", e);
+      return DistCpConstants.XATTRS_NOT_SUPPORTED;
     } catch (Exception e) {
       LOG.error("Exception encountered ", e);
       return DistCpConstants.UNKNOWN_ERROR;
@@ -129,10 +150,13 @@ public class DistCp extends Configured implements Tool {
 
     Job job = null;
     try {
-      metaFolder = createMetaFolderPath();
-      jobFS = metaFolder.getFileSystem(getConf());
+      synchronized(this) {
+        //Don't cleanup while we are setting up.
+        metaFolder = createMetaFolderPath();
+        jobFS = metaFolder.getFileSystem(getConf());
 
-      job = createJob();
+        job = createJob();
+      }
       createInputFileListing(job);
 
       job.submit();
@@ -147,12 +171,25 @@ public class DistCp extends Configured implements Tool {
     job.getConfiguration().set(DistCpConstants.CONF_LABEL_DISTCP_JOB_ID, jobID);
     
     LOG.info("DistCp job-id: " + jobID);
-    if (inputOptions.shouldBlock()) {
-      job.waitForCompletion(true);
+    if (inputOptions.shouldBlock() && !job.waitForCompletion(true)) {
+      throw new IOException("DistCp failure: Job " + jobID + " has failed: "
+          + job.getStatus().getFailureInfo());
     }
     return job;
   }
 
+  /**
+   * Set targetPathExists in both inputOptions and job config,
+   * for the benefit of CopyCommitter
+   */
+  private void setTargetPathExists() throws IOException {
+    Path target = inputOptions.getTargetPath();
+    FileSystem targetFS = target.getFileSystem(getConf());
+    boolean targetExists = targetFS.exists(target);
+    inputOptions.setTargetPathExists(targetExists);
+    getConf().setBoolean(DistCpConstants.CONF_LABEL_TARGET_PATH_EXISTS, 
+        targetExists);
+  }
   /**
    * Create Job object for submitting it, with all the configuration
    *
@@ -267,7 +304,12 @@ public class DistCp extends Configured implements Tool {
     FileSystem targetFS = targetPath.getFileSystem(configuration);
     targetPath = targetPath.makeQualified(targetFS.getUri(),
                                           targetFS.getWorkingDirectory());
-
+    if (inputOptions.shouldPreserve(DistCpOptions.FileAttribute.ACL)) {
+      DistCpUtils.checkFileSystemAclSupport(targetFS);
+    }
+    if (inputOptions.shouldPreserve(DistCpOptions.FileAttribute.XATTR)) {
+      DistCpUtils.checkFileSystemXAttrSupport(targetFS);
+    }
     if (inputOptions.shouldAtomicCommit()) {
       Path workDir = inputOptions.getAtomicWorkPath();
       if (workDir == null) {
@@ -304,7 +346,7 @@ public class DistCp extends Configured implements Tool {
    * @return Returns the path where the copy listing is created
    * @throws IOException - If any
    */
-  private Path createInputFileListing(Job job) throws IOException {
+  protected Path createInputFileListing(Job job) throws IOException {
     Path fileListingPath = getFileListingPath();
     CopyListing copyListing = CopyListing.getCopyListing(job.getConfiguration(),
         job.getCredentials(), inputOptions);
@@ -319,7 +361,7 @@ public class DistCp extends Configured implements Tool {
    * @return - Path where the copy listing file has to be saved
    * @throws IOException - Exception if any
    */
-  private Path getFileListingPath() throws IOException {
+  protected Path getFileListingPath() throws IOException {
     String fileListPathStr = metaFolder + "/fileList.seq";
     Path path = new Path(fileListPathStr);
     return new Path(path.toUri().normalize().toString());
@@ -349,17 +391,20 @@ public class DistCp extends Configured implements Tool {
    * @param argv Command-line arguments sent to DistCp.
    */
   public static void main(String argv[]) {
+    int exitCode;
     try {
       DistCp distCp = new DistCp();
       Cleanup CLEANUP = new Cleanup(distCp);
 
-      Runtime.getRuntime().addShutdownHook(CLEANUP);
-      System.exit(ToolRunner.run(getDefaultConf(), distCp, argv));
+      ShutdownHookManager.get().addShutdownHook(CLEANUP,
+        SHUTDOWN_HOOK_PRIORITY);
+      exitCode = ToolRunner.run(getDefaultConf(), distCp, argv);
     }
     catch (Exception e) {
       LOG.error("Couldn't complete DistCp operation: ", e);
-      System.exit(DistCpConstants.UNKNOWN_ERROR);
+      exitCode = DistCpConstants.UNKNOWN_ERROR;
     }
+    System.exit(exitCode);
   }
 
   /**
@@ -388,7 +433,7 @@ public class DistCp extends Configured implements Tool {
     return submitted;
   }
 
-  private static class Cleanup extends Thread {
+  private static class Cleanup implements Runnable {
     private final DistCp distCp;
 
     public Cleanup(DistCp distCp) {

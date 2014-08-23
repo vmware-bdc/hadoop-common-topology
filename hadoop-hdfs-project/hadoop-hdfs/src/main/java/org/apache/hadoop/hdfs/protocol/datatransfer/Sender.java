@@ -17,8 +17,6 @@
  */
 package org.apache.hadoop.hdfs.protocol.datatransfer;
 
-import static org.apache.hadoop.hdfs.protocol.HdfsProtoUtil.toProto;
-import static org.apache.hadoop.hdfs.protocol.HdfsProtoUtil.toProtos;
 import static org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferProtoUtil.toProto;
 
 import java.io.DataOutput;
@@ -27,17 +25,25 @@ import java.io.IOException;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.CachingStrategyProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ChecksumProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ClientOperationHeaderProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.OpBlockChecksumProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.OpCopyBlockProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.OpReadBlockProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.OpReplaceBlockProto;
+import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.OpRequestShortCircuitAccessProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.OpTransferBlockProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.OpWriteBlockProto;
+import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ReleaseShortCircuitAccessRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ShortCircuitShmRequestProto;
+import org.apache.hadoop.hdfs.protocolPB.PBHelper;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
+import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
+import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitShm.SlotId;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.DataChecksum;
 
@@ -63,9 +69,24 @@ public class Sender implements DataTransferProtocol {
 
   private static void send(final DataOutputStream out, final Op opcode,
       final Message proto) throws IOException {
+    if (LOG.isTraceEnabled()) {
+      LOG.trace("Sending DataTransferOp " + proto.getClass().getSimpleName()
+          + ": " + proto);
+    }
     op(out, opcode);
     proto.writeDelimitedTo(out);
     out.flush();
+  }
+
+  static private CachingStrategyProto getCachingStrategy(CachingStrategy cachingStrategy) {
+    CachingStrategyProto.Builder builder = CachingStrategyProto.newBuilder();
+    if (cachingStrategy.getReadahead() != null) {
+      builder.setReadahead(cachingStrategy.getReadahead().longValue());
+    }
+    if (cachingStrategy.getDropBehind() != null) {
+      builder.setDropBehind(cachingStrategy.getDropBehind().booleanValue());
+    }
+    return builder.build();
   }
 
   @Override
@@ -73,12 +94,16 @@ public class Sender implements DataTransferProtocol {
       final Token<BlockTokenIdentifier> blockToken,
       final String clientName,
       final long blockOffset,
-      final long length) throws IOException {
+      final long length,
+      final boolean sendChecksum,
+      final CachingStrategy cachingStrategy) throws IOException {
 
     OpReadBlockProto proto = OpReadBlockProto.newBuilder()
       .setHeader(DataTransferProtoUtil.buildClientHeader(blk, clientName, blockToken))
       .setOffset(blockOffset)
       .setLen(length)
+      .setSendChecksums(sendChecksum)
+      .setCachingStrategy(getCachingStrategy(cachingStrategy))
       .build();
 
     send(out, Op.READ_BLOCK, proto);
@@ -87,16 +112,19 @@ public class Sender implements DataTransferProtocol {
 
   @Override
   public void writeBlock(final ExtendedBlock blk,
+      final StorageType storageType, 
       final Token<BlockTokenIdentifier> blockToken,
       final String clientName,
       final DatanodeInfo[] targets,
+      final StorageType[] targetStorageTypes, 
       final DatanodeInfo source,
       final BlockConstructionStage stage,
       final int pipelineSize,
       final long minBytesRcvd,
       final long maxBytesRcvd,
       final long latestGenerationStamp,
-      DataChecksum requestedChecksum) throws IOException {
+      DataChecksum requestedChecksum,
+      final CachingStrategy cachingStrategy) throws IOException {
     ClientOperationHeaderProto header = DataTransferProtoUtil.buildClientHeader(
         blk, clientName, blockToken);
     
@@ -105,16 +133,19 @@ public class Sender implements DataTransferProtocol {
 
     OpWriteBlockProto.Builder proto = OpWriteBlockProto.newBuilder()
       .setHeader(header)
-      .addAllTargets(toProtos(targets, 1))
+      .setStorageType(PBHelper.convertStorageType(storageType))
+      .addAllTargets(PBHelper.convert(targets, 1))
+      .addAllTargetStorageTypes(PBHelper.convertStorageTypes(targetStorageTypes, 1))
       .setStage(toProto(stage))
       .setPipelineSize(pipelineSize)
       .setMinBytesRcvd(minBytesRcvd)
       .setMaxBytesRcvd(maxBytesRcvd)
       .setLatestGenerationStamp(latestGenerationStamp)
-      .setRequestedChecksum(checksumProto);
+      .setRequestedChecksum(checksumProto)
+      .setCachingStrategy(getCachingStrategy(cachingStrategy));
     
     if (source != null) {
-      proto.setSource(toProto(source));
+      proto.setSource(PBHelper.convertDatanodeInfo(source));
     }
 
     send(out, Op.WRITE_BLOCK, proto.build());
@@ -124,26 +155,63 @@ public class Sender implements DataTransferProtocol {
   public void transferBlock(final ExtendedBlock blk,
       final Token<BlockTokenIdentifier> blockToken,
       final String clientName,
-      final DatanodeInfo[] targets) throws IOException {
+      final DatanodeInfo[] targets,
+      final StorageType[] targetStorageTypes) throws IOException {
     
     OpTransferBlockProto proto = OpTransferBlockProto.newBuilder()
       .setHeader(DataTransferProtoUtil.buildClientHeader(
           blk, clientName, blockToken))
-      .addAllTargets(toProtos(targets, 0))
+      .addAllTargets(PBHelper.convert(targets))
+      .addAllTargetStorageTypes(PBHelper.convertStorageTypes(targetStorageTypes))
       .build();
 
     send(out, Op.TRANSFER_BLOCK, proto);
   }
 
   @Override
+  public void requestShortCircuitFds(final ExtendedBlock blk,
+      final Token<BlockTokenIdentifier> blockToken,
+      SlotId slotId, int maxVersion) throws IOException {
+    OpRequestShortCircuitAccessProto.Builder builder =
+        OpRequestShortCircuitAccessProto.newBuilder()
+          .setHeader(DataTransferProtoUtil.buildBaseHeader(
+            blk, blockToken)).setMaxVersion(maxVersion);
+    if (slotId != null) {
+      builder.setSlotId(PBHelper.convert(slotId));
+    }
+    OpRequestShortCircuitAccessProto proto = builder.build();
+    send(out, Op.REQUEST_SHORT_CIRCUIT_FDS, proto);
+  }
+  
+  @Override
+  public void releaseShortCircuitFds(SlotId slotId) throws IOException {
+    ReleaseShortCircuitAccessRequestProto proto = 
+        ReleaseShortCircuitAccessRequestProto.newBuilder().
+        setSlotId(PBHelper.convert(slotId)).
+        build();
+    send(out, Op.RELEASE_SHORT_CIRCUIT_FDS, proto);
+  }
+
+  @Override
+  public void requestShortCircuitShm(String clientName) throws IOException {
+    ShortCircuitShmRequestProto proto =
+        ShortCircuitShmRequestProto.newBuilder().
+        setClientName(clientName).
+        build();
+    send(out, Op.REQUEST_SHORT_CIRCUIT_SHM, proto);
+  }
+  
+  @Override
   public void replaceBlock(final ExtendedBlock blk,
+      final StorageType storageType, 
       final Token<BlockTokenIdentifier> blockToken,
       final String delHint,
       final DatanodeInfo source) throws IOException {
     OpReplaceBlockProto proto = OpReplaceBlockProto.newBuilder()
       .setHeader(DataTransferProtoUtil.buildBaseHeader(blk, blockToken))
+      .setStorageType(PBHelper.convertStorageType(storageType))
       .setDelHint(delHint)
-      .setSource(toProto(source))
+      .setSource(PBHelper.convertDatanodeInfo(source))
       .build();
     
     send(out, Op.REPLACE_BLOCK, proto);

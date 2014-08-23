@@ -22,15 +22,18 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.JobState;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptState;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskState;
+import org.apache.hadoop.mapreduce.v2.api.records.TaskType;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
+import org.apache.hadoop.mapreduce.v2.app.job.JobStateInternal;
 import org.apache.hadoop.mapreduce.v2.app.job.Task;
 import org.apache.hadoop.mapreduce.v2.app.job.TaskAttempt;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobEvent;
@@ -39,12 +42,18 @@ import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskAttemptEventType;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.TaskEventType;
+import org.apache.hadoop.mapreduce.v2.app.job.event.TaskTAttemptEvent;
+import org.apache.hadoop.mapreduce.v2.app.job.impl.JobImpl;
+import org.apache.hadoop.yarn.event.AsyncDispatcher;
+import org.apache.hadoop.yarn.event.Dispatcher;
+import org.apache.hadoop.yarn.event.Event;
 import org.junit.Test;
 
 /**
  * Tests the state machine with respect to Job/Task/TaskAttempt kill scenarios.
  *
  */
+@SuppressWarnings({"unchecked", "rawtypes"})
 public class TestKill {
 
   @Test
@@ -129,6 +138,161 @@ public class TestKill {
     iter = attempts.values().iterator();
     Assert.assertEquals("Attempt state not correct", TaskAttemptState.SUCCEEDED, 
           iter.next().getReport().getTaskAttemptState());
+  }
+
+  @Test
+  public void testKillTaskWait() throws Exception {
+    final Dispatcher dispatcher = new AsyncDispatcher() {
+      private TaskAttemptEvent cachedKillEvent;
+      @Override
+      protected void dispatch(Event event) {
+        if (event instanceof TaskAttemptEvent) {
+          TaskAttemptEvent killEvent = (TaskAttemptEvent) event;
+          if (killEvent.getType() == TaskAttemptEventType.TA_KILL) {
+            TaskAttemptId taID = killEvent.getTaskAttemptID();
+            if (taID.getTaskId().getTaskType() == TaskType.REDUCE
+                && taID.getTaskId().getId() == 0 && taID.getId() == 0) {
+              // Task is asking the reduce TA to kill itself. 'Create' a race
+              // condition. Make the task succeed and then inform the task that
+              // TA has succeeded. Once Task gets the TA succeeded event at
+              // KILL_WAIT, then relay the actual kill signal to TA
+              super.dispatch(new TaskAttemptEvent(taID,
+                TaskAttemptEventType.TA_DONE));
+              super.dispatch(new TaskAttemptEvent(taID,
+                TaskAttemptEventType.TA_CONTAINER_CLEANED));
+              super.dispatch(new TaskTAttemptEvent(taID,
+                TaskEventType.T_ATTEMPT_SUCCEEDED));
+              this.cachedKillEvent = killEvent;
+              return;
+            }
+          }
+        } else if (event instanceof TaskEvent) {
+          TaskEvent taskEvent = (TaskEvent) event;
+          if (taskEvent.getType() == TaskEventType.T_ATTEMPT_SUCCEEDED
+              && this.cachedKillEvent != null) {
+            // When the TA comes and reports that it is done, send the
+            // cachedKillEvent
+            super.dispatch(this.cachedKillEvent);
+            return;
+          }
+
+        }
+        super.dispatch(event);
+      }
+    };
+    MRApp app = new MRApp(1, 1, false, this.getClass().getName(), true) {
+      @Override
+      public Dispatcher createDispatcher() {
+        return dispatcher;
+      }
+    };
+    Job job = app.submit(new Configuration());
+    JobId jobId = app.getJobId();
+    app.waitForState(job, JobState.RUNNING);
+    Assert.assertEquals("Num tasks not correct", 2, job.getTasks().size());
+    Iterator<Task> it = job.getTasks().values().iterator();
+    Task mapTask = it.next();
+    Task reduceTask = it.next();
+    app.waitForState(mapTask, TaskState.RUNNING);
+    app.waitForState(reduceTask, TaskState.RUNNING);
+    TaskAttempt mapAttempt = mapTask.getAttempts().values().iterator().next();
+    app.waitForState(mapAttempt, TaskAttemptState.RUNNING);
+    TaskAttempt reduceAttempt = reduceTask.getAttempts().values().iterator().next();
+    app.waitForState(reduceAttempt, TaskAttemptState.RUNNING);
+
+    // Finish map
+    app.getContext().getEventHandler().handle(
+        new TaskAttemptEvent(
+            mapAttempt.getID(),
+            TaskAttemptEventType.TA_DONE));
+    app.waitForState(mapTask, TaskState.SUCCEEDED);
+
+    // Now kill the job
+    app.getContext().getEventHandler()
+      .handle(new JobEvent(jobId, JobEventType.JOB_KILL));
+
+    app.waitForInternalState((JobImpl)job, JobStateInternal.KILLED);
+  }
+
+  static class MyAsyncDispatch extends AsyncDispatcher {
+    private CountDownLatch latch;
+    private TaskAttemptEventType attemptEventTypeToWait;
+    MyAsyncDispatch(CountDownLatch latch, TaskAttemptEventType attemptEventTypeToWait) {
+      super();
+      this.latch = latch;
+      this.attemptEventTypeToWait = attemptEventTypeToWait;
+    }
+
+    @Override
+    protected void dispatch(Event event) {
+      if (event instanceof TaskAttemptEvent) {
+        TaskAttemptEvent attemptEvent = (TaskAttemptEvent) event;
+        TaskAttemptId attemptID = ((TaskAttemptEvent) event).getTaskAttemptID();
+        if (attemptEvent.getType() == this.attemptEventTypeToWait
+            && attemptID.getTaskId().getId() == 0 && attemptID.getId() == 0 ) {
+          try {
+            latch.await();
+          } catch (InterruptedException e) {
+            e.printStackTrace();
+          }
+        }
+      }
+      super.dispatch(event);
+    }
+  }
+
+  // This is to test a race condition where JobEventType.JOB_KILL is generated
+  // right after TaskAttemptEventType.TA_DONE is generated.
+  // TaskImpl's state machine might receive both T_ATTEMPT_SUCCEEDED
+  // and T_ATTEMPT_KILLED from the same attempt.
+  @Test
+  public void testKillTaskWaitKillJobAfterTA_DONE() throws Exception {
+    CountDownLatch latch = new CountDownLatch(1);
+    final Dispatcher dispatcher = new MyAsyncDispatch(latch, TaskAttemptEventType.TA_DONE);
+    MRApp app = new MRApp(1, 1, false, this.getClass().getName(), true) {
+      @Override
+      public Dispatcher createDispatcher() {
+        return dispatcher;
+      }
+    };
+    Job job = app.submit(new Configuration());
+    JobId jobId = app.getJobId();
+    app.waitForState(job, JobState.RUNNING);
+    Assert.assertEquals("Num tasks not correct", 2, job.getTasks().size());
+    Iterator<Task> it = job.getTasks().values().iterator();
+    Task mapTask = it.next();
+    Task reduceTask = it.next();
+    app.waitForState(mapTask, TaskState.RUNNING);
+    app.waitForState(reduceTask, TaskState.RUNNING);
+    TaskAttempt mapAttempt = mapTask.getAttempts().values().iterator().next();
+    app.waitForState(mapAttempt, TaskAttemptState.RUNNING);
+    TaskAttempt reduceAttempt = reduceTask.getAttempts().values().iterator().next();
+    app.waitForState(reduceAttempt, TaskAttemptState.RUNNING);
+
+    // The order in the dispatch event queue, from the oldest to the newest
+    // TA_DONE
+    // JOB_KILL
+    // CONTAINER_REMOTE_CLEANUP ( from TA_DONE's handling )
+    // T_KILL ( from JOB_KILL's handling )
+    // TA_CONTAINER_CLEANED ( from CONTAINER_REMOTE_CLEANUP's handling )
+    // TA_KILL ( from T_KILL's handling )
+    // T_ATTEMPT_SUCCEEDED ( from TA_CONTAINER_CLEANED's handling )
+    // T_ATTEMPT_KILLED ( from TA_KILL's handling )
+
+    // Finish map
+    app.getContext().getEventHandler().handle(
+        new TaskAttemptEvent(
+            mapAttempt.getID(),
+            TaskAttemptEventType.TA_DONE));
+
+    // Now kill the job
+    app.getContext().getEventHandler()
+        .handle(new JobEvent(jobId, JobEventType.JOB_KILL));
+
+    //unblock
+    latch.countDown();
+
+    app.waitForInternalState((JobImpl)job, JobStateInternal.KILLED);
   }
 
   @Test

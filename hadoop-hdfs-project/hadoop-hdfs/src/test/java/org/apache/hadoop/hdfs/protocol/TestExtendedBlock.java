@@ -17,7 +17,8 @@
  */
 package org.apache.hadoop.hdfs.protocol;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 
 import org.junit.Test;
 
@@ -47,6 +48,26 @@ public class TestExtendedBlock {
     assertEquals(
         new ExtendedBlock(POOL_A, BLOCK_1_GS1),
         new ExtendedBlock(POOL_A, BLOCK_1_GS2));
+  }
+  
+  @Test
+  public void testHashcode() {
+    
+    // Different pools, same block id -> different hashcode
+    assertNotEquals(
+        new ExtendedBlock(POOL_A, BLOCK_1_GS1).hashCode(),
+        new ExtendedBlock(POOL_B, BLOCK_1_GS1).hashCode());
+    
+    // Same pool, different block id -> different hashcode
+    assertNotEquals(
+        new ExtendedBlock(POOL_A, BLOCK_1_GS1).hashCode(),
+        new ExtendedBlock(POOL_A, BLOCK_2_GS1).hashCode());
+    
+    // Same block -> same hashcode
+    assertEquals(
+        new ExtendedBlock(POOL_A, BLOCK_1_GS1).hashCode(),
+        new ExtendedBlock(POOL_A, BLOCK_1_GS1).hashCode());
+
   }
 
   private static void assertNotEquals(Object a, Object b) {

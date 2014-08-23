@@ -20,7 +20,7 @@ package org.apache.hadoop.hdfs.server.namenode;
 import java.io.IOException;
 import java.io.Closeable;
 
-import static org.apache.hadoop.hdfs.server.common.Util.now;
+import static org.apache.hadoop.util.Time.now;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
@@ -65,15 +65,17 @@ public abstract class EditLogOutputStream implements Closeable {
   /**
    * Create and initialize underlying persistent edits log storage.
    * 
+   * @param layoutVersion The LayoutVersion of the journal
    * @throws IOException
    */
-  abstract public void create() throws IOException;
+  abstract public void create(int layoutVersion) throws IOException;
 
   /**
    * Close the journal.
    * @throws IOException if the journal can't be closed,
    *         or if there are unflushed edits
    */
+  @Override
   abstract public void close() throws IOException;
 
   /**
@@ -91,18 +93,24 @@ public abstract class EditLogOutputStream implements Closeable {
   /**
    * Flush and sync all data that is ready to be flush 
    * {@link #setReadyToFlush()} into underlying persistent store.
+   * @param durable if true, the edits should be made truly durable before
+   * returning
    * @throws IOException
    */
-  abstract protected void flushAndSync() throws IOException;
+  abstract protected void flushAndSync(boolean durable) throws IOException;
 
   /**
    * Flush data to persistent store.
    * Collect sync metrics.
    */
   public void flush() throws IOException {
+    flush(true);
+  }
+  
+  public void flush(boolean durable) throws IOException {
     numSync++;
     long start = now();
-    flushAndSync();
+    flushAndSync(durable);
     long end = now();
     totalTimeSync += (end - start);
   }
@@ -119,16 +127,24 @@ public abstract class EditLogOutputStream implements Closeable {
   }
   
   /**
-   * Return total time spent in {@link #flushAndSync()}
+   * Return total time spent in {@link #flushAndSync(boolean)}
    */
   long getTotalSyncTime() {
     return totalTimeSync;
   }
 
   /**
-   * Return number of calls to {@link #flushAndSync()}
+   * Return number of calls to {@link #flushAndSync(boolean)}
    */
   protected long getNumSync() {
     return numSync;
+  }
+
+  /**
+   * @return a short text snippet suitable for describing the current
+   * status of the stream
+   */
+  public String generateReport() {
+    return toString();
   }
 }

@@ -16,6 +16,12 @@
  * limitations under the License.
  */
 
+/**
+ * These .proto interfaces are private and stable.
+ * Please see http://wiki.apache.org/hadoop/Compatibility
+ * for what changes are allowed for a *stable* .proto interface.
+ */
+
 // This file contains protocol buffers that are used throughout HDFS -- i.e.
 // by the client, server, and data transfer protocols.
 
@@ -23,7 +29,9 @@ option java_package = "org.apache.hadoop.hdfs.protocol.proto";
 option java_outer_classname = "DatanodeProtocolProtos";
 option java_generic_services = true;
 option java_generate_equals_and_hash = true;
+package hadoop.hdfs.datanode;
 
+import "HAServiceProtocol.proto";
 import "hdfs.proto";
 
 /**
@@ -37,19 +45,6 @@ message DatanodeRegistrationProto {
 }
 
 /**
- * Represents a storage available on the datanode
- */
-message DatanodeStorageProto {
-  enum StorageState {
-    NORMAL = 0;
-    READ_ONLY = 1;
-  }
-
-  required string storageID = 1;    // Unique identifier for the storage
-  optional StorageState state = 2 [default = NORMAL];
-}
-
-/**
  * Commands sent from namenode to the datanodes
  */
 message DatanodeCommandProto {
@@ -60,8 +55,9 @@ message DatanodeCommandProto {
     FinalizeCommand = 3;
     KeyUpdateCommand = 4;
     RegisterCommand = 5;
-    UpgradeCommand = 6;
+    UnusedUpgradeCommand = 6;
     NullDatanodeCommand = 7;
+    BlockIdCommand = 8;
   }
 
   required Type cmdType = 1;    // Type of the command
@@ -74,7 +70,7 @@ message DatanodeCommandProto {
   optional FinalizeCommandProto finalizeCmd = 5;
   optional KeyUpdateCommandProto keyUpdateCmd = 6;
   optional RegisterCommandProto registerCmd = 7;
-  optional UpgradeCommandProto upgradeCmd = 8;
+  optional BlockIdCommandProto blkIdCmd = 8;
 }
 
 /**
@@ -95,12 +91,29 @@ message BlockCommandProto {
   enum Action {  
     TRANSFER = 1;   // Transfer blocks to another datanode
     INVALIDATE = 2; // Invalidate blocks
-    SHUTDOWN = 3; // Shutdown the datanode
+    SHUTDOWN = 3;   // Shutdown the datanode
   }
+
   required Action action = 1;
   required string blockPoolId = 2;
   repeated BlockProto blocks = 3;
   repeated DatanodeInfosProto targets = 4;
+  repeated StorageUuidsProto targetStorageUuids = 5;
+  repeated StorageTypesProto targetStorageTypes = 6;
+}
+
+/**
+ * Command to instruct datanodes to perform certain action
+ * on the given set of block IDs.
+ */
+message BlockIdCommandProto {
+  enum Action {
+    CACHE = 1;
+    UNCACHE = 2;
+  }
+  required Action action = 1;
+  required string blockPoolId = 2;
+  repeated uint64 blockIds = 3 [packed=true];
 }
 
 /**
@@ -132,20 +145,6 @@ message RegisterCommandProto {
 }
 
 /**
- * Generic distributed upgrade Command
- */
-message UpgradeCommandProto {
-  enum Action {
-    UNKNOWN = 0;          // Unknown action
-    REPORT_STATUS = 100;  // Report upgrade status
-    START_UPGRADE = 101;  // Start upgrade
-  }
-  required Action action = 1;  // Upgrade action
-  required uint32 version = 2; // Version of the upgrade
-  required uint32 upgradeStatus = 3; // % completed in range 0 & 100
-}
-
-/**
  * registration - Information of the datanode registering with the namenode
  */
 message RegisterDatanodeRequestProto {
@@ -170,6 +169,8 @@ message RegisterDatanodeResponseProto {
  * xmitsInProgress - number of transfers from this datanode to others
  * xceiverCount - number of active transceiver threads
  * failedVolumes - number of failed volumes
+ * cacheCapacity - total cache capacity available at the datanode
+ * cacheUsed - amount of cache used
  */
 message HeartbeatRequestProto {
   required DatanodeRegistrationProto registration = 1; // Datanode info
@@ -177,15 +178,8 @@ message HeartbeatRequestProto {
   optional uint32 xmitsInProgress = 3 [ default = 0 ];
   optional uint32 xceiverCount = 4 [ default = 0 ];
   optional uint32 failedVolumes = 5 [ default = 0 ];
-}
-
-message StorageReportProto {
-  required string storageID = 1;
-  optional bool failed = 2 [ default = false ];
-  optional uint64 capacity = 3 [ default = 0 ];
-  optional uint64 dfsUsed = 4 [ default = 0 ];
-  optional uint64 remaining = 5 [ default = 0 ];
-  optional uint64 blockPoolUsed = 6 [ default = 0 ];
+  optional uint64 cacheCapacity = 6 [ default = 0 ];
+  optional uint64 cacheUsed = 7 [default = 0 ];
 }
 
 /**
@@ -193,11 +187,7 @@ message StorageReportProto {
  * txid - Highest transaction ID this NN has seen
  */
 message NNHAStatusHeartbeatProto {
-  enum State {
-    ACTIVE = 0;
-    STANDBY = 1;
-  }
-  required State state = 1; 
+  required hadoop.common.HAServiceStateProto state = 1;
   required uint64 txid = 2;
 }
 
@@ -208,14 +198,17 @@ message NNHAStatusHeartbeatProto {
 message HeartbeatResponseProto {
   repeated DatanodeCommandProto cmds = 1; // Returned commands can be null
   required NNHAStatusHeartbeatProto haStatus = 2;
+  optional RollingUpgradeStatusProto rollingUpgradeStatus = 3;
 }
 
 /**
  * registration - datanode registration information
  * blockPoolID  - block pool ID of the reported blocks
- * blocks       - each block is represented as two longs in the array.
+ * blocks       - each block is represented as multiple longs in the array.
  *                first long represents block ID
  *                second long represents length
+ *                third long represents gen stamp
+ *                fourth long (if under construction) represents replica state
  */
 message BlockReportRequestProto {
   required DatanodeRegistrationProto registration = 1;
@@ -239,6 +232,21 @@ message BlockReportResponseProto {
 } 
 
 /**
+ * registration - datanode registration information
+ * blockPoolId  - block pool ID of the reported blocks
+ * blocks       - representation of blocks as longs for efficiency reasons
+ */
+message CacheReportRequestProto {
+  required DatanodeRegistrationProto registration = 1;
+  required string blockPoolId = 2;
+  repeated uint64 blocks = 3 [packed=true];
+}
+
+message CacheReportResponseProto {
+  optional DatanodeCommandProto cmd = 1;
+}
+
+/**
  * Data structure to send received or deleted block information
  * from datanode to namenode.
  */
@@ -258,8 +266,9 @@ message ReceivedDeletedBlockInfoProto {
  * List of blocks received and deleted for a storage.
  */
 message StorageReceivedDeletedBlocksProto {
-  required string storageID = 1;
+  required string storageUuid = 1 [ deprecated = true ];
   repeated ReceivedDeletedBlockInfoProto blocks = 2;
+  optional DatanodeStorageProto storage = 3;   // supersedes storageUuid.
 }
 
 /**
@@ -300,20 +309,6 @@ message ErrorReportRequestProto {
  * void response
  */
 message ErrorReportResponseProto {
-}
-
-/**
- * cmd - Upgrade command sent from datanode to namenode
- */
-message ProcessUpgradeRequestProto {
-  optional UpgradeCommandProto cmd = 1;
-}
-
-/**
- * cmd - Upgrade command sent from namenode to datanode
- */
-message ProcessUpgradeResponseProto {
-  optional UpgradeCommandProto cmd = 1;
 }
 
 /**
@@ -370,6 +365,11 @@ service DatanodeProtocolService {
   rpc blockReport(BlockReportRequestProto) returns(BlockReportResponseProto);
 
   /**
+   * Report cached blocks at a datanode to the namenode
+   */
+  rpc cacheReport(CacheReportRequestProto) returns(CacheReportResponseProto);
+
+  /**
    * Incremental block report from the DN. This contains info about recently
    * received and deleted blocks, as well as when blocks start being
    * received.
@@ -387,12 +387,6 @@ service DatanodeProtocolService {
    * Request the version
    */
   rpc versionRequest(VersionRequestProto) returns(VersionResponseProto);
-
-  /**
-   * Generic way to send commands from datanode to namenode during
-   * distributed upgrade process.
-   */
-  rpc processUpgrade(ProcessUpgradeRequestProto) returns(ProcessUpgradeResponseProto);
 
   /**
    * Report corrupt blocks at the specified location

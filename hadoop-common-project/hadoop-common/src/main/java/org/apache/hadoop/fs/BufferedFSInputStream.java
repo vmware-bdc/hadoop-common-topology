@@ -18,6 +18,8 @@
 package org.apache.hadoop.fs;
 
 import java.io.BufferedInputStream;
+import java.io.EOFException;
+import java.io.FileDescriptor;
 import java.io.IOException;
 
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -31,7 +33,7 @@ import org.apache.hadoop.classification.InterfaceStability;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class BufferedFSInputStream extends BufferedInputStream
-implements Seekable, PositionedReadable {
+implements Seekable, PositionedReadable, HasFileDescriptor {
   /**
    * Creates a <code>BufferedFSInputStream</code>
    * with the specified buffer size,
@@ -48,10 +50,15 @@ implements Seekable, PositionedReadable {
     super(in, size);
   }
 
+  @Override
   public long getPos() throws IOException {
+    if (in == null) {
+      throw new IOException(FSExceptionMessages.STREAM_IS_CLOSED);
+    }
     return ((FSInputStream)in).getPos()-(count-pos);
   }
 
+  @Override
   public long skip(long n) throws IOException {
     if (n <= 0) {
       return 0;
@@ -61,16 +68,25 @@ implements Seekable, PositionedReadable {
     return n;
   }
 
+  @Override
   public void seek(long pos) throws IOException {
-    if( pos<0 ) {
-      return;
+    if (in == null) {
+      throw new IOException(FSExceptionMessages.STREAM_IS_CLOSED);
     }
-    // optimize: check if the pos is in the buffer
-    long end = ((FSInputStream)in).getPos();
-    long start = end - count;
-    if( pos>=start && pos<end) {
-      this.pos = (int)(pos-start);
-      return;
+    if (pos < 0) {
+      throw new EOFException(FSExceptionMessages.NEGATIVE_SEEK);
+    }
+    if (this.pos != this.count) {
+      // optimize: check if the pos is in the buffer
+      // This optimization only works if pos != count -- if they are
+      // equal, it's possible that the previous reads were just
+      // longer than the total buffer size, and hence skipped the buffer.
+      long end = ((FSInputStream)in).getPos();
+      long start = end - count;
+      if( pos>=start && pos<end) {
+        this.pos = (int)(pos-start);
+        return;
+      }
     }
 
     // invalidate buffer
@@ -80,21 +96,34 @@ implements Seekable, PositionedReadable {
     ((FSInputStream)in).seek(pos);
   }
 
+  @Override
   public boolean seekToNewSource(long targetPos) throws IOException {
     pos = 0;
     count = 0;
     return ((FSInputStream)in).seekToNewSource(targetPos);
   }
 
+  @Override
   public int read(long position, byte[] buffer, int offset, int length) throws IOException {
     return ((FSInputStream)in).read(position, buffer, offset, length) ;
   }
 
+  @Override
   public void readFully(long position, byte[] buffer, int offset, int length) throws IOException {
     ((FSInputStream)in).readFully(position, buffer, offset, length);
   }
 
+  @Override
   public void readFully(long position, byte[] buffer) throws IOException {
     ((FSInputStream)in).readFully(position, buffer);
+  }
+
+  @Override
+  public FileDescriptor getFileDescriptor() throws IOException {
+    if (in instanceof HasFileDescriptor) {
+      return ((HasFileDescriptor) in).getFileDescriptor();
+    } else {
+      return null;
+    }
   }
 }

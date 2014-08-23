@@ -23,7 +23,6 @@ import java.io.IOException;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSMainOperationsBaseTest;
-import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.junit.After;
@@ -32,27 +31,33 @@ import org.junit.Before;
 import org.junit.Test;
 
 public class TestFSMainOperationsLocalFileSystem extends FSMainOperationsBaseTest {
-   static FileSystem fcTarget;
+  FileSystem fcTarget;
+   
+  @Override
+  protected FileSystem createFileSystem() throws Exception {
+      return ViewFileSystemTestSetup.setupForViewFileSystem(
+              ViewFileSystemTestSetup.createConfig(), this, fcTarget);
+  }
+   
+  @Override
   @Before
   public void setUp() throws Exception {
     Configuration conf = new Configuration();
     fcTarget = FileSystem.getLocal(conf);
-    fSys = ViewFileSystemTestSetup.setupForViewFileSystem(
-        ViewFileSystemTestSetup.createConfig(), fcTarget);
     super.setUp();
   }
   
+  @Override
   @After
   public void tearDown() throws Exception {
     super.tearDown();
-    ViewFileSystemTestSetup.tearDown(fcTarget);
+    ViewFileSystemTestSetup.tearDown(this, fcTarget);
   }
   
   @Test
   @Override
   public void testWDAbsolute() throws IOException {
-    Path absoluteDir = FileSystemTestHelper.getTestRootPath(fSys,
-        "test/existingDir");
+    Path absoluteDir = getTestRootPath(fSys, "test/existingDir");
     fSys.mkdirs(absoluteDir);
     fSys.setWorkingDirectory(absoluteDir);
     Assert.assertEquals(absoluteDir, fSys.getWorkingDirectory());

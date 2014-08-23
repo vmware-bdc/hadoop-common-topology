@@ -16,10 +16,15 @@ package org.apache.hadoop.security.authentication.server;
 import org.apache.hadoop.security.authentication.client.AuthenticationException;
 import org.apache.hadoop.security.authentication.client.PseudoAuthenticator;
 
+import org.apache.http.client.utils.URLEncodedUtils;
+import org.apache.http.NameValuePair;
+
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.nio.charset.Charset;
+import java.util.List;
 import java.util.Properties;
 
 /**
@@ -48,7 +53,27 @@ public class PseudoAuthenticationHandler implements AuthenticationHandler {
    */
   public static final String ANONYMOUS_ALLOWED = TYPE + ".anonymous.allowed";
 
+  private static final Charset UTF8_CHARSET = Charset.forName("UTF-8");
   private boolean acceptAnonymous;
+  private String type;
+
+  /**
+   * Creates a Hadoop pseudo authentication handler with the default auth-token
+   * type, <code>simple</code>.
+   */
+  public PseudoAuthenticationHandler() {
+    this(TYPE);
+  }
+
+  /**
+   * Creates a Hadoop pseudo authentication handler with a custom auth-token
+   * type.
+   *
+   * @param type auth-token type.
+   */
+  public PseudoAuthenticationHandler(String type) {
+    this.type = type;
+  }
 
   /**
    * Initializes the authentication handler instance.
@@ -90,7 +115,40 @@ public class PseudoAuthenticationHandler implements AuthenticationHandler {
    */
   @Override
   public String getType() {
-    return TYPE;
+    return type;
+  }
+
+  /**
+   * This is an empty implementation, it always returns <code>TRUE</code>.
+   *
+   *
+   *
+   * @param token the authentication token if any, otherwise <code>NULL</code>.
+   * @param request the HTTP client request.
+   * @param response the HTTP client response.
+   *
+   * @return <code>TRUE</code>
+   * @throws IOException it is never thrown.
+   * @throws AuthenticationException it is never thrown.
+   */
+  @Override
+  public boolean managementOperation(AuthenticationToken token,
+                                     HttpServletRequest request,
+                                     HttpServletResponse response)
+    throws IOException, AuthenticationException {
+    return true;
+  }
+
+  private String getUserName(HttpServletRequest request) {
+    List<NameValuePair> list = URLEncodedUtils.parse(request.getQueryString(), UTF8_CHARSET);
+    if (list != null) {
+      for (NameValuePair nv : list) {
+        if (PseudoAuthenticator.USER_NAME.equals(nv.getName())) {
+          return nv.getValue();
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -118,7 +176,7 @@ public class PseudoAuthenticationHandler implements AuthenticationHandler {
   public AuthenticationToken authenticate(HttpServletRequest request, HttpServletResponse response)
     throws IOException, AuthenticationException {
     AuthenticationToken token;
-    String userName = request.getParameter(PseudoAuthenticator.USER_NAME);
+    String userName = getUserName(request);
     if (userName == null) {
       if (getAcceptAnonymous()) {
         token = AuthenticationToken.ANONYMOUS;
@@ -126,7 +184,7 @@ public class PseudoAuthenticationHandler implements AuthenticationHandler {
         throw new AuthenticationException("Anonymous requests are disallowed");
       }
     } else {
-      token = new AuthenticationToken(userName, userName, TYPE);
+      token = new AuthenticationToken(userName, userName, getType());
     }
     return token;
   }

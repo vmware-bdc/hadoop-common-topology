@@ -19,6 +19,7 @@ package org.apache.hadoop.hdfs.server.protocol;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeStatus;
 
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
@@ -27,15 +28,18 @@ import org.apache.hadoop.classification.InterfaceStability;
  */
 public class HeartbeatResponse {
   /** Commands returned from the namenode to the datanode */
-  private DatanodeCommand[] commands;
+  private final DatanodeCommand[] commands;
   
   /** Information about the current HA-related state of the NN */
-  private NNHAStatusHeartbeat haStatus;
+  private final NNHAStatusHeartbeat haStatus;
+
+  private final RollingUpgradeStatus rollingUpdateStatus;
   
   public HeartbeatResponse(DatanodeCommand[] cmds,
-      NNHAStatusHeartbeat haStatus) {
+      NNHAStatusHeartbeat haStatus, RollingUpgradeStatus rollingUpdateStatus) {
     commands = cmds;
     this.haStatus = haStatus;
+    this.rollingUpdateStatus = rollingUpdateStatus;
   }
   
   public DatanodeCommand[] getCommands() {
@@ -44,5 +48,9 @@ public class HeartbeatResponse {
   
   public NNHAStatusHeartbeat getNameNodeHaState() {
     return haStatus;
+  }
+
+  public RollingUpgradeStatus getRollingUpdateStatus() {
+    return rollingUpdateStatus;
   }
 }

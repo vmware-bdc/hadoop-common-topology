@@ -19,13 +19,12 @@
 package org.apache.hadoop.mapreduce.v2.hs;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
 import java.security.AccessControlException;
 import java.security.PrivilegedExceptionAction;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.EnumSet;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -39,6 +38,8 @@ import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.v2.api.HSClientProtocol;
 import org.apache.hadoop.mapreduce.v2.api.MRClientProtocol;
 import org.apache.hadoop.mapreduce.v2.api.MRDelegationTokenIdentifier;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.CancelDelegationTokenRequest;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.CancelDelegationTokenResponse;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.FailTaskAttemptRequest;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.FailTaskAttemptResponse;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.GetCountersRequest;
@@ -63,6 +64,8 @@ import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskAttemptRequest
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskAttemptResponse;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskRequest;
 import org.apache.hadoop.mapreduce.v2.api.protocolrecords.KillTaskResponse;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.RenewDelegationTokenRequest;
+import org.apache.hadoop.mapreduce.v2.api.protocolrecords.RenewDelegationTokenResponse;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskId;
@@ -72,21 +75,21 @@ import org.apache.hadoop.mapreduce.v2.app.job.Task;
 import org.apache.hadoop.mapreduce.v2.app.security.authorize.ClientHSPolicyProvider;
 import org.apache.hadoop.mapreduce.v2.hs.webapp.HsWebApp;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JHAdminConfig;
+import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
 import org.apache.hadoop.security.token.Token;
-import org.apache.hadoop.yarn.YarnException;
-import org.apache.hadoop.yarn.api.records.DelegationToken;
-import org.apache.hadoop.yarn.exceptions.YarnRemoteException;
+import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.ipc.RPCUtil;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
-import org.apache.hadoop.yarn.service.AbstractService;
-import org.apache.hadoop.yarn.util.BuilderUtils;
+import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.webapp.WebApp;
 import org.apache.hadoop.yarn.webapp.WebApps;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * This module is responsible for talking to the
@@ -112,21 +115,15 @@ public class HistoryClientService extends AbstractService {
     this.jhsDTSecretManager = jhsDTSecretManager;
   }
 
-  public void start() {
+  protected void serviceStart() throws Exception {
     Configuration conf = getConfig();
     YarnRPC rpc = YarnRPC.create(conf);
     initializeWebApp(conf);
-    String serviceAddr = conf.get(JHAdminConfig.MR_HISTORY_ADDRESS,
-        JHAdminConfig.DEFAULT_MR_HISTORY_ADDRESS);
-    InetSocketAddress address = NetUtils.createSocketAddr(serviceAddr,
-      JHAdminConfig.DEFAULT_MR_HISTORY_PORT,
-      JHAdminConfig.DEFAULT_MR_HISTORY_ADDRESS);
-    InetAddress hostNameResolved = null;
-    try {
-      hostNameResolved = InetAddress.getLocalHost(); 
-    } catch (UnknownHostException e) {
-      throw new YarnException(e);
-    }
+    InetSocketAddress address = conf.getSocketAddr(
+        JHAdminConfig.MR_HISTORY_BIND_HOST,
+        JHAdminConfig.MR_HISTORY_ADDRESS,
+        JHAdminConfig.DEFAULT_MR_HISTORY_ADDRESS,
+        JHAdminConfig.DEFAULT_MR_HISTORY_PORT);
 
     server =
         rpc.getServer(HSClientProtocol.class, protocolHandler, address,
@@ -142,30 +139,43 @@ public class HistoryClientService extends AbstractService {
     }
     
     server.start();
-    this.bindAddress =
-        NetUtils.createSocketAddr(hostNameResolved.getHostAddress()
-            + ":" + server.getPort());
-    LOG.info("Instantiated MRClientService at " + this.bindAddress);
+    this.bindAddress = conf.updateConnectAddr(JHAdminConfig.MR_HISTORY_BIND_HOST,
+                                              JHAdminConfig.MR_HISTORY_ADDRESS,
+                                              JHAdminConfig.DEFAULT_MR_HISTORY_ADDRESS,
+                                              server.getListenerAddress());
+    LOG.info("Instantiated HistoryClientService at " + this.bindAddress);
 
-    super.start();
+    super.serviceStart();
   }
 
-  private void initializeWebApp(Configuration conf) {
+  @VisibleForTesting
+  protected void initializeWebApp(Configuration conf) {
     webApp = new HsWebApp(history);
-    String bindAddress = conf.get(JHAdminConfig.MR_HISTORY_WEBAPP_ADDRESS,
-        JHAdminConfig.DEFAULT_MR_HISTORY_WEBAPP_ADDRESS);
-    WebApps.$for("jobhistory", HistoryClientService.class, this, "ws").with(conf).at(bindAddress).start(webApp);
+    InetSocketAddress bindAddress = MRWebAppUtil.getJHSWebBindAddress(conf);
+    // NOTE: there should be a .at(InetSocketAddress)
+    WebApps
+        .$for("jobhistory", HistoryClientService.class, this, "ws")
+        .with(conf)
+        .withHttpSpnegoKeytabKey(
+            JHAdminConfig.MR_WEBAPP_SPNEGO_KEYTAB_FILE_KEY)
+        .withHttpSpnegoPrincipalKey(
+            JHAdminConfig.MR_WEBAPP_SPNEGO_USER_NAME_KEY)
+        .at(NetUtils.getHostPortString(bindAddress)).start(webApp);
+    
+    String connectHost = MRWebAppUtil.getJHSWebappURLWithoutScheme(conf).split(":")[0];
+    MRWebAppUtil.setJHSWebappURLWithoutScheme(conf,
+        connectHost + ":" + webApp.getListenerAddress().getPort());
   }
 
   @Override
-  public void stop() {
+  protected void serviceStop() throws Exception {
     if (server != null) {
       server.stop();
     }
     if (webApp != null) {
       webApp.stop();
     }
-    super.stop();
+    super.serviceStop();
   }
 
   @Private
@@ -182,7 +192,11 @@ public class HistoryClientService extends AbstractService {
 
     private RecordFactory recordFactory = RecordFactoryProvider.getRecordFactory(null);
 
-    private Job verifyAndGetJob(final JobId jobID) throws YarnRemoteException {
+    public InetSocketAddress getConnectAddress() {
+      return getBindAddress();
+    }
+    
+    private Job verifyAndGetJob(final JobId jobID) throws IOException {
       UserGroupInformation loginUgi = null;
       Job job = null;
       try {
@@ -195,10 +209,8 @@ public class HistoryClientService extends AbstractService {
             return job;
           }
         });
-      } catch (IOException e) {
-        throw RPCUtil.getRemoteException(e);
       } catch (InterruptedException e) {
-        throw RPCUtil.getRemoteException(e);
+        throw new IOException(e);
       }
       if (job != null) {
         JobACL operation = JobACL.VIEW_JOB;
@@ -208,7 +220,8 @@ public class HistoryClientService extends AbstractService {
     }
 
     @Override
-    public GetCountersResponse getCounters(GetCountersRequest request) throws YarnRemoteException {
+    public GetCountersResponse getCounters(GetCountersRequest request)
+        throws IOException {
       JobId jobId = request.getJobId();
       Job job = verifyAndGetJob(jobId);
       GetCountersResponse response = recordFactory.newRecordInstance(GetCountersResponse.class);
@@ -217,7 +230,8 @@ public class HistoryClientService extends AbstractService {
     }
 
     @Override
-    public GetJobReportResponse getJobReport(GetJobReportRequest request) throws YarnRemoteException {
+    public GetJobReportResponse getJobReport(GetJobReportRequest request)
+        throws IOException {
       JobId jobId = request.getJobId();
       Job job = verifyAndGetJob(jobId);
       GetJobReportResponse response = recordFactory.newRecordInstance(GetJobReportResponse.class);
@@ -231,7 +245,8 @@ public class HistoryClientService extends AbstractService {
     }
 
     @Override
-    public GetTaskAttemptReportResponse getTaskAttemptReport(GetTaskAttemptReportRequest request) throws YarnRemoteException {
+    public GetTaskAttemptReportResponse getTaskAttemptReport(
+        GetTaskAttemptReportRequest request) throws IOException {
       TaskAttemptId taskAttemptId = request.getTaskAttemptId();
       Job job = verifyAndGetJob(taskAttemptId.getTaskId().getJobId());
       GetTaskAttemptReportResponse response = recordFactory.newRecordInstance(GetTaskAttemptReportResponse.class);
@@ -240,7 +255,8 @@ public class HistoryClientService extends AbstractService {
     }
 
     @Override
-    public GetTaskReportResponse getTaskReport(GetTaskReportRequest request) throws YarnRemoteException {
+    public GetTaskReportResponse getTaskReport(GetTaskReportRequest request)
+        throws IOException {
       TaskId taskId = request.getTaskId();
       Job job = verifyAndGetJob(taskId.getJobId());
       GetTaskReportResponse response = recordFactory.newRecordInstance(GetTaskReportResponse.class);
@@ -249,7 +265,9 @@ public class HistoryClientService extends AbstractService {
     }
 
     @Override
-    public GetTaskAttemptCompletionEventsResponse getTaskAttemptCompletionEvents(GetTaskAttemptCompletionEventsRequest request) throws YarnRemoteException {
+    public GetTaskAttemptCompletionEventsResponse
+        getTaskAttemptCompletionEvents(
+            GetTaskAttemptCompletionEventsRequest request) throws IOException {
       JobId jobId = request.getJobId();
       int fromEventId = request.getFromEventId();
       int maxEvents = request.getMaxEvents();
@@ -261,22 +279,25 @@ public class HistoryClientService extends AbstractService {
     }
 
     @Override
-    public KillJobResponse killJob(KillJobRequest request) throws YarnRemoteException {
-      throw RPCUtil.getRemoteException("Invalid operation on completed job");
+    public KillJobResponse killJob(KillJobRequest request) throws IOException {
+      throw new IOException("Invalid operation on completed job");
     }
 
     @Override
-    public KillTaskResponse killTask(KillTaskRequest request) throws YarnRemoteException {
-      throw RPCUtil.getRemoteException("Invalid operation on completed job");
+    public KillTaskResponse killTask(KillTaskRequest request)
+        throws IOException {
+      throw new IOException("Invalid operation on completed job");
     }
 
     @Override
-    public KillTaskAttemptResponse killTaskAttempt(KillTaskAttemptRequest request) throws YarnRemoteException {
-      throw RPCUtil.getRemoteException("Invalid operation on completed job");
+    public KillTaskAttemptResponse killTaskAttempt(
+        KillTaskAttemptRequest request) throws IOException {
+      throw new IOException("Invalid operation on completed job");
     }
 
     @Override
-    public GetDiagnosticsResponse getDiagnostics(GetDiagnosticsRequest request) throws YarnRemoteException {
+    public GetDiagnosticsResponse getDiagnostics(GetDiagnosticsRequest request)
+        throws IOException {
       TaskAttemptId taskAttemptId = request.getTaskAttemptId();
 
       Job job = verifyAndGetJob(taskAttemptId.getTaskId().getJobId());
@@ -287,12 +308,14 @@ public class HistoryClientService extends AbstractService {
     }
 
     @Override
-    public FailTaskAttemptResponse failTaskAttempt(FailTaskAttemptRequest request) throws YarnRemoteException {
-      throw RPCUtil.getRemoteException("Invalid operation on completed job");
+    public FailTaskAttemptResponse failTaskAttempt(
+        FailTaskAttemptRequest request) throws IOException {
+      throw new IOException("Invalid operation on completed job");
     }
 
     @Override
-    public GetTaskReportsResponse getTaskReports(GetTaskReportsRequest request) throws YarnRemoteException {
+    public GetTaskReportsResponse getTaskReports(GetTaskReportsRequest request)
+        throws IOException {
       JobId jobId = request.getJobId();
       TaskType taskType = request.getTaskType();
 
@@ -307,20 +330,15 @@ public class HistoryClientService extends AbstractService {
     
     @Override
     public GetDelegationTokenResponse getDelegationToken(
-        GetDelegationTokenRequest request) throws YarnRemoteException {
-
-      try {
+        GetDelegationTokenRequest request) throws IOException {
 
       UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
 
       // Verify that the connection is kerberos authenticated
-      AuthenticationMethod authMethod = UserGroupInformation
-        .getRealAuthenticationMethod(ugi);
-      if (UserGroupInformation.isSecurityEnabled()
-          && (authMethod != AuthenticationMethod.KERBEROS)) {
-       throw new IOException(
-          "Delegation Token can be issued only with kerberos authentication");
-      }
+        if (!isAllowedDelegationTokenOp()) {
+          throw new IOException(
+              "Delegation Token can be issued only with kerberos authentication");
+        }
 
       GetDelegationTokenResponse response = recordFactory.newRecordInstance(
           GetDelegationTokenResponse.class);
@@ -337,31 +355,81 @@ public class HistoryClientService extends AbstractService {
       Token<MRDelegationTokenIdentifier> realJHSToken =
           new Token<MRDelegationTokenIdentifier>(tokenIdentifier,
               jhsDTSecretManager);
-      DelegationToken mrDToken = BuilderUtils.newDelegationToken(
-        realJHSToken.getIdentifier(), realJHSToken.getKind().toString(),
-        realJHSToken.getPassword(), bindAddress.getAddress().getHostAddress()
-            + ":" + bindAddress.getPort());
+      org.apache.hadoop.yarn.api.records.Token mrDToken =
+          org.apache.hadoop.yarn.api.records.Token.newInstance(
+            realJHSToken.getIdentifier(), realJHSToken.getKind().toString(),
+            realJHSToken.getPassword(), realJHSToken.getService().toString());
       response.setDelegationToken(mrDToken);
       return response;
-      } catch (IOException i) {
-        throw RPCUtil.getRemoteException(i);
-      }
+    }
+
+    @Override
+    public RenewDelegationTokenResponse renewDelegationToken(
+        RenewDelegationTokenRequest request) throws IOException {
+        if (!isAllowedDelegationTokenOp()) {
+          throw new IOException(
+              "Delegation Token can be renewed only with kerberos authentication");
+        }
+
+        org.apache.hadoop.yarn.api.records.Token protoToken = request.getDelegationToken();
+        Token<MRDelegationTokenIdentifier> token =
+            new Token<MRDelegationTokenIdentifier>(
+                protoToken.getIdentifier().array(), protoToken.getPassword()
+                    .array(), new Text(protoToken.getKind()), new Text(
+                    protoToken.getService()));
+
+        String user = UserGroupInformation.getCurrentUser().getShortUserName();
+        long nextExpTime = jhsDTSecretManager.renewToken(token, user);
+        RenewDelegationTokenResponse renewResponse = Records
+            .newRecord(RenewDelegationTokenResponse.class);
+        renewResponse.setNextExpirationTime(nextExpTime);
+        return renewResponse;
+    }
+
+    @Override
+    public CancelDelegationTokenResponse cancelDelegationToken(
+        CancelDelegationTokenRequest request) throws IOException {
+        if (!isAllowedDelegationTokenOp()) {
+          throw new IOException(
+              "Delegation Token can be cancelled only with kerberos authentication");
+        }
+
+        org.apache.hadoop.yarn.api.records.Token protoToken = request.getDelegationToken();
+        Token<MRDelegationTokenIdentifier> token =
+            new Token<MRDelegationTokenIdentifier>(
+                protoToken.getIdentifier().array(), protoToken.getPassword()
+                    .array(), new Text(protoToken.getKind()), new Text(
+                    protoToken.getService()));
+
+        String user = UserGroupInformation.getCurrentUser().getUserName();
+        jhsDTSecretManager.cancelToken(token, user);
+        return Records.newRecord(CancelDelegationTokenResponse.class);
     }
 
     private void checkAccess(Job job, JobACL jobOperation)
-        throws YarnRemoteException {
+        throws IOException {
 
       UserGroupInformation callerUGI;
-      try {
-        callerUGI = UserGroupInformation.getCurrentUser();
-      } catch (IOException e) {
-        throw RPCUtil.getRemoteException(e);
-      }
+      callerUGI = UserGroupInformation.getCurrentUser();
+
       if (!job.checkAccess(callerUGI, jobOperation)) {
-        throw RPCUtil.getRemoteException(new AccessControlException("User "
+        throw new IOException(new AccessControlException("User "
             + callerUGI.getShortUserName() + " cannot perform operation "
             + jobOperation.name() + " on " + job.getID()));
       }
     }
+
+    private boolean isAllowedDelegationTokenOp() throws IOException {
+      if (UserGroupInformation.isSecurityEnabled()) {
+        return EnumSet.of(AuthenticationMethod.KERBEROS,
+                          AuthenticationMethod.KERBEROS_SSL,
+                          AuthenticationMethod.CERTIFICATE)
+            .contains(UserGroupInformation.getCurrentUser()
+                    .getRealAuthenticationMethod());
+      } else {
+        return true;
+      }
+    }
+
   }
 }

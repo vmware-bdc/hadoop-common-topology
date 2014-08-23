@@ -21,11 +21,13 @@ package org.apache.hadoop.hdfs.web;
 import java.io.BufferedReader;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.Random;
 
 import javax.servlet.http.HttpServletResponse;
 import javax.ws.rs.core.MediaType;
@@ -37,17 +39,18 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystemContractBaseTest;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.AppendTestUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.hdfs.web.resources.DoAsParam;
-import org.apache.hadoop.hdfs.web.resources.GetOpParam;
-import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
-import org.apache.hadoop.hdfs.web.resources.PutOpParam;
+import org.apache.hadoop.hdfs.web.resources.*;
+import org.apache.hadoop.hdfs.web.resources.NamenodeAddressParam;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.junit.Assert;
+import org.junit.Test;
 
 public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
   private static final Configuration conf = new Configuration();
@@ -76,7 +79,7 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
     final UserGroupInformation current = UserGroupInformation.getCurrentUser();
     ugi = UserGroupInformation.createUserForTesting(
         current.getShortUserName() + "x", new String[]{"user"});
-    fs = WebHdfsTestUtil.getWebHdfsFileSystemAs(ugi, conf);
+    fs = WebHdfsTestUtil.getWebHdfsFileSystemAs(ugi, conf, WebHdfsFileSystem.SCHEME);
     defaultWorkingDirectory = fs.getWorkingDirectory().toUri().getPath();
   }
 
@@ -181,9 +184,8 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
     final Path p = new Path("/test/testOpenNonExistFile");
     //open it as a file, should get FileNotFoundException 
     try {
-      final FSDataInputStream in = fs.open(p);
-      in.read();
-      fail();
+      fs.open(p);
+      fail("Expected FileNotFoundException was not thrown");
     } catch(FileNotFoundException fnfe) {
       WebHdfsFileSystem.LOG.info("This is expected.", fnfe);
     }
@@ -204,15 +206,20 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
       assertEquals(0, count);
     }
 
-    final Path p = new Path(dir, "file");
-    createFile(p);
+    final byte[] mydata = new byte[1 << 20];
+    new Random().nextBytes(mydata);
 
-    final int one_third = data.length/3;
+    final Path p = new Path(dir, "file");
+    FSDataOutputStream out = fs.create(p, false, 4096, (short)3, 1L << 17);
+    out.write(mydata, 0, mydata.length);
+    out.close();
+
+    final int one_third = mydata.length/3;
     final int two_third = one_third*2;
 
     { //test seek
       final int offset = one_third; 
-      final int len = data.length - offset;
+      final int len = mydata.length - offset;
       final byte[] buf = new byte[len];
 
       final FSDataInputStream in = fs.open(p);
@@ -224,13 +231,13 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
   
       for (int i = 0; i < buf.length; i++) {
         assertEquals("Position " + i + ", offset=" + offset + ", length=" + len,
-            data[i + offset], buf[i]);
+            mydata[i + offset], buf[i]);
       }
     }
 
     { //test position read (read the data after the two_third location)
       final int offset = two_third; 
-      final int len = data.length - offset;
+      final int len = mydata.length - offset;
       final byte[] buf = new byte[len];
 
       final FSDataInputStream in = fs.open(p);
@@ -239,7 +246,7 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
   
       for (int i = 0; i < buf.length; i++) {
         assertEquals("Position " + i + ", offset=" + offset + ", length=" + len,
-            data[i + offset], buf[i]);
+            mydata[i + offset], buf[i]);
       }
     }
   }
@@ -258,8 +265,8 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
     assertTrue(status != null);
     assertEquals(0777, status.getPermission().toShort());
 
-    //delete root - disabled due to a sticky bit bug 
-    //assertFalse(fs.delete(root, true));
+    //delete root
+    assertFalse(fs.delete(root, true));
 
     //create file using root path 
     try {
@@ -281,11 +288,113 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
     }
   }
 
+  /**
+   * Test get with length parameter greater than actual file length.
+   */
+  public void testLengthParamLongerThanFile() throws IOException {
+    WebHdfsFileSystem webhdfs = (WebHdfsFileSystem)fs;
+    Path dir = new Path("/test");
+    assertTrue(webhdfs.mkdirs(dir));
+
+    // Create a file with some content.
+    Path testFile = new Path("/test/testLengthParamLongerThanFile");
+    String content = "testLengthParamLongerThanFile";
+    FSDataOutputStream testFileOut = webhdfs.create(testFile);
+    try {
+      testFileOut.write(content.getBytes("US-ASCII"));
+    } finally {
+      IOUtils.closeStream(testFileOut);
+    }
+
+    // Open the file, but request length longer than actual file length by 1.
+    HttpOpParam.Op op = GetOpParam.Op.OPEN;
+    URL url = webhdfs.toUrl(op, testFile, new LengthParam(Long.valueOf(
+      content.length() + 1)));
+    HttpURLConnection conn = null;
+    InputStream is = null;
+    try {
+      conn = (HttpURLConnection)url.openConnection();
+      conn.setRequestMethod(op.getType().toString());
+      conn.setDoOutput(op.getDoOutput());
+      conn.setInstanceFollowRedirects(true);
+
+      // Expect OK response and Content-Length header equal to actual length.
+      assertEquals(HttpServletResponse.SC_OK, conn.getResponseCode());
+      assertEquals(String.valueOf(content.length()), conn.getHeaderField(
+        "Content-Length"));
+
+      // Check content matches.
+      byte[] respBody = new byte[content.length()];
+      is = conn.getInputStream();
+      IOUtils.readFully(is, respBody, 0, content.length());
+      assertEquals(content, new String(respBody, "US-ASCII"));
+    } finally {
+      IOUtils.closeStream(is);
+      if (conn != null) {
+        conn.disconnect();
+      }
+    }
+  }
+
+  /**
+   * Test get with offset and length parameters that combine to request a length
+   * greater than actual file length.
+   */
+  public void testOffsetPlusLengthParamsLongerThanFile() throws IOException {
+    WebHdfsFileSystem webhdfs = (WebHdfsFileSystem)fs;
+    Path dir = new Path("/test");
+    assertTrue(webhdfs.mkdirs(dir));
+
+    // Create a file with some content.
+    Path testFile = new Path("/test/testOffsetPlusLengthParamsLongerThanFile");
+    String content = "testOffsetPlusLengthParamsLongerThanFile";
+    FSDataOutputStream testFileOut = webhdfs.create(testFile);
+    try {
+      testFileOut.write(content.getBytes("US-ASCII"));
+    } finally {
+      IOUtils.closeStream(testFileOut);
+    }
+
+    // Open the file, but request offset starting at 1 and length equal to file
+    // length.  Considering the offset, this is longer than the actual content.
+    HttpOpParam.Op op = GetOpParam.Op.OPEN;
+    URL url = webhdfs.toUrl(op, testFile, new LengthParam(Long.valueOf(
+      content.length())), new OffsetParam(1L));
+    HttpURLConnection conn = null;
+    InputStream is = null;
+    try {
+      conn = (HttpURLConnection)url.openConnection();
+      conn.setRequestMethod(op.getType().toString());
+      conn.setDoOutput(op.getDoOutput());
+      conn.setInstanceFollowRedirects(true);
+
+      // Expect OK response and Content-Length header equal to actual length.
+      assertEquals(HttpServletResponse.SC_OK, conn.getResponseCode());
+      assertEquals(String.valueOf(content.length() - 1), conn.getHeaderField(
+        "Content-Length"));
+
+      // Check content matches.
+      byte[] respBody = new byte[content.length() - 1];
+      is = conn.getInputStream();
+      IOUtils.readFully(is, respBody, 0, content.length() - 1);
+      assertEquals(content.substring(1), new String(respBody, "US-ASCII"));
+    } finally {
+      IOUtils.closeStream(is);
+      if (conn != null) {
+        conn.disconnect();
+      }
+    }
+  }
+
   public void testResponseCode() throws IOException {
     final WebHdfsFileSystem webhdfs = (WebHdfsFileSystem)fs;
     final Path root = new Path("/");
     final Path dir = new Path("/test/testUrl");
     assertTrue(webhdfs.mkdirs(dir));
+    final Path file = new Path("/test/file");
+    final FSDataOutputStream out = webhdfs.create(file);
+    out.write(1);
+    out.close();
 
     {//test GETHOMEDIRECTORY
       final URL url = webhdfs.toUrl(GetOpParam.Op.GETHOMEDIRECTORY, root);
@@ -302,7 +411,7 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
           new DoAsParam(ugi.getShortUserName() + "proxy"));
       final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
       conn.connect();
-      assertEquals(HttpServletResponse.SC_UNAUTHORIZED, conn.getResponseCode());
+      assertEquals(HttpServletResponse.SC_FORBIDDEN, conn.getResponseCode());
       conn.disconnect();
     }
 
@@ -350,6 +459,108 @@ public class TestWebHdfsFileSystemContract extends FileSystemContractBaseTest {
 
     {//test append.
       AppendTestUtil.testAppend(fs, new Path(dir, "append"));
+    }
+
+    {//test NamenodeAddressParam not set.
+      final HttpOpParam.Op op = PutOpParam.Op.CREATE;
+      final URL url = webhdfs.toUrl(op, dir);
+      HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+      conn.setRequestMethod(op.getType().toString());
+      conn.setDoOutput(false);
+      conn.setInstanceFollowRedirects(false);
+      conn.connect();
+      final String redirect = conn.getHeaderField("Location");
+      conn.disconnect();
+
+      //remove NamenodeAddressParam
+      WebHdfsFileSystem.LOG.info("redirect = " + redirect);
+      final int i = redirect.indexOf(NamenodeAddressParam.NAME);
+      final int j = redirect.indexOf("&", i);
+      String modified = redirect.substring(0, i - 1) + redirect.substring(j);
+      WebHdfsFileSystem.LOG.info("modified = " + modified);
+
+      //connect to datanode
+      conn = (HttpURLConnection)new URL(modified).openConnection();
+      conn.setRequestMethod(op.getType().toString());
+      conn.setDoOutput(op.getDoOutput());
+      conn.connect();
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, conn.getResponseCode());
+    }
+
+    {//test jsonParse with non-json type.
+      final HttpOpParam.Op op = GetOpParam.Op.OPEN;
+      final URL url = webhdfs.toUrl(op, file);
+      final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+      conn.setRequestMethod(op.getType().toString());
+      conn.connect();
+
+      try {
+        WebHdfsFileSystem.jsonParse(conn, false);
+        fail();
+      } catch(IOException ioe) {
+        WebHdfsFileSystem.LOG.info("GOOD", ioe);
+      }
+      conn.disconnect();
+    }
+
+    {//test create with path containing spaces
+      HttpOpParam.Op op = PutOpParam.Op.CREATE;
+      Path path = new Path("/test/path with spaces");
+      URL url = webhdfs.toUrl(op, path);
+      HttpURLConnection conn = (HttpURLConnection)url.openConnection();
+      conn.setRequestMethod(op.getType().toString());
+      conn.setDoOutput(false);
+      conn.setInstanceFollowRedirects(false);
+      final String redirect;
+      try {
+        conn.connect();
+        assertEquals(HttpServletResponse.SC_TEMPORARY_REDIRECT,
+          conn.getResponseCode());
+        redirect = conn.getHeaderField("Location");
+      } finally {
+        conn.disconnect();
+      }
+
+      conn = (HttpURLConnection)new URL(redirect).openConnection();
+      conn.setRequestMethod(op.getType().toString());
+      conn.setDoOutput(op.getDoOutput());
+      try {
+        conn.connect();
+        assertEquals(HttpServletResponse.SC_CREATED, conn.getResponseCode());
+      } finally {
+        conn.disconnect();
+      }
+    }
+  }
+
+  @Test
+  public void testAccess() throws IOException, InterruptedException {
+    Path p1 = new Path("/pathX");
+    try {
+      UserGroupInformation ugi = UserGroupInformation.createUserForTesting("alpha",
+          new String[]{"beta"});
+      WebHdfsFileSystem fs = WebHdfsTestUtil.getWebHdfsFileSystemAs(ugi, conf,
+          WebHdfsFileSystem.SCHEME);
+
+      fs.mkdirs(p1);
+      fs.setPermission(p1, new FsPermission((short) 0444));
+      fs.access(p1, FsAction.READ);
+      try {
+        fs.access(p1, FsAction.WRITE);
+        fail("The access call should have failed.");
+      } catch (AccessControlException e) {
+        // expected
+      }
+
+      Path badPath = new Path("/bad");
+      try {
+        fs.access(badPath, FsAction.READ);
+        fail("The access call should have failed");
+      } catch (FileNotFoundException e) {
+        // expected
+      }
+    } finally {
+      fs.delete(p1, true);
     }
   }
 }

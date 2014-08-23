@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.fs;
 
-import java.io.BufferedOutputStream;
 import java.io.DataOutputStream;
 import java.io.FilterOutputStream;
 import java.io.IOException;
@@ -26,12 +25,12 @@ import java.io.OutputStream;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 
-/** Utility that wraps a {@link OutputStream} in a {@link DataOutputStream},
- * buffers output through a {@link BufferedOutputStream} and creates a checksum
- * file. */
+/** Utility that wraps a {@link OutputStream} in a {@link DataOutputStream}.
+ */
 @InterfaceAudience.Public
 @InterfaceStability.Stable
-public class FSDataOutputStream extends DataOutputStream implements Syncable {
+public class FSDataOutputStream extends DataOutputStream
+    implements Syncable, CanSetDropBehind {
   private final OutputStream wrappedStream;
 
   private static class PositionCache extends FilterOutputStream {
@@ -68,7 +67,10 @@ public class FSDataOutputStream extends DataOutputStream implements Syncable {
 
     @Override
     public void close() throws IOException {
-      out.close();
+      // ensure close works even if a null reference was passed in
+      if (out != null) {
+        out.close();
+      }
     }
   }
 
@@ -100,7 +102,7 @@ public class FSDataOutputStream extends DataOutputStream implements Syncable {
   }
 
   /**
-   * Get a reference to the wrapped output stream. Used by unit tests.
+   * Get a reference to the wrapped output stream.
    *
    * @return the underlying output stream
    */
@@ -124,6 +126,16 @@ public class FSDataOutputStream extends DataOutputStream implements Syncable {
       ((Syncable)wrappedStream).hsync();
     } else {
       wrappedStream.flush();
+    }
+  }
+
+  @Override
+  public void setDropBehind(Boolean dropBehind) throws IOException {
+    try {
+      ((CanSetDropBehind)wrappedStream).setDropBehind(dropBehind);
+    } catch (ClassCastException e) {
+      throw new UnsupportedOperationException("the wrapped stream does " +
+          "not support setting the drop-behind caching setting.");
     }
   }
 }

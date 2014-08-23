@@ -16,8 +16,6 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
-import static org.apache.hadoop.fs.CommonConfigurationKeys.HADOOP_SECURITY_AUTHENTICATION;
-
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.channels.ServerSocketChannel;
@@ -25,11 +23,16 @@ import java.nio.channels.ServerSocketChannel;
 import org.apache.commons.daemon.Daemon;
 import org.apache.commons.daemon.DaemonContext;
 import org.apache.hadoop.conf.Configuration;
-
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
-import org.apache.hadoop.http.HttpServer;
-import org.mortbay.jetty.nio.SelectChannelConnector;
+import org.apache.hadoop.http.HttpConfig;
+import org.apache.hadoop.http.HttpServer2;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.mortbay.jetty.Connector;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Utility class to start a datanode in a secure cluster, first obtaining 
@@ -41,9 +44,9 @@ public class SecureDataNodeStarter implements Daemon {
    */
   public static class SecureResources {
     private final ServerSocket streamingSocket;
-    private final SelectChannelConnector listener;
+    private final Connector listener;
     public SecureResources(ServerSocket streamingSocket,
-        SelectChannelConnector listener) {
+        Connector listener) {
 
       this.streamingSocket = streamingSocket;
       this.listener = listener;
@@ -51,59 +54,22 @@ public class SecureDataNodeStarter implements Daemon {
 
     public ServerSocket getStreamingSocket() { return streamingSocket; }
 
-    public SelectChannelConnector getListener() { return listener; }
+    public Connector getListener() { return listener; }
   }
   
   private String [] args;
   private SecureResources resources;
-  
+
   @Override
   public void init(DaemonContext context) throws Exception {
     System.err.println("Initializing secure datanode resources");
-    // We should only start up a secure datanode in a Kerberos-secured cluster
-    Configuration conf = new Configuration(); // Skip UGI method to not log in
-    if(!conf.get(HADOOP_SECURITY_AUTHENTICATION).equals("kerberos"))
-      throw new RuntimeException("Cannot start secure datanode in unsecure cluster");
+    // Create a new HdfsConfiguration object to ensure that the configuration in
+    // hdfs-site.xml is picked up.
+    Configuration conf = new HdfsConfiguration();
     
     // Stash command-line arguments for regular datanode
     args = context.getArguments();
-    
-    // Obtain secure port for data streaming to datanode
-    InetSocketAddress streamingAddr  = DataNode.getStreamingAddr(conf);
-    int socketWriteTimeout = conf.getInt(DFSConfigKeys.DFS_DATANODE_SOCKET_WRITE_TIMEOUT_KEY,
-        HdfsServerConstants.WRITE_TIMEOUT);
-    
-    ServerSocket ss = (socketWriteTimeout > 0) ? 
-        ServerSocketChannel.open().socket() : new ServerSocket();
-    ss.bind(streamingAddr, 0);
-    
-    // Check that we got the port we need
-    if (ss.getLocalPort() != streamingAddr.getPort()) {
-      throw new RuntimeException("Unable to bind on specified streaming port in secure " +
-      		"context. Needed " + streamingAddr.getPort() + ", got " + ss.getLocalPort());
-    }
-
-    // Obtain secure listener for web server
-    SelectChannelConnector listener = 
-                   (SelectChannelConnector)HttpServer.createDefaultChannelConnector();
-    InetSocketAddress infoSocAddr = DataNode.getInfoAddr(conf);
-    listener.setHost(infoSocAddr.getHostName());
-    listener.setPort(infoSocAddr.getPort());
-    // Open listener here in order to bind to port as root
-    listener.open(); 
-    if (listener.getPort() != infoSocAddr.getPort()) {
-      throw new RuntimeException("Unable to bind on specified info port in secure " +
-          "context. Needed " + streamingAddr.getPort() + ", got " + ss.getLocalPort());
-    }
-    System.err.println("Successfully obtained privileged resources (streaming port = "
-        + ss + " ) (http listener port = " + listener.getConnection() +")");
-    
-    if (ss.getLocalPort() >= 1023 || listener.getPort() >= 1023) {
-      throw new RuntimeException("Cannot start secure datanode with unprivileged ports");
-    }
-    System.err.println("Opened streaming server at " + streamingAddr);
-    System.err.println("Opened info server at " + infoSocAddr);
-    resources = new SecureResources(ss, listener);
+    resources = getSecureResources(conf);
   }
 
   @Override
@@ -111,7 +77,72 @@ public class SecureDataNodeStarter implements Daemon {
     System.err.println("Starting regular datanode initialization");
     DataNode.secureMain(args, resources);
   }
-  
-  @Override public void destroy() { /* Nothing to do */ }
+
+  @Override public void destroy() {}
   @Override public void stop() throws Exception { /* Nothing to do */ }
+
+  /**
+   * Acquire privileged resources (i.e., the privileged ports) for the data
+   * node. The privileged resources consist of the port of the RPC server and
+   * the port of HTTP (not HTTPS) server.
+   */
+  @VisibleForTesting
+  public static SecureResources getSecureResources(Configuration conf)
+      throws Exception {
+    HttpConfig.Policy policy = DFSUtil.getHttpPolicy(conf);
+    boolean isSecure = UserGroupInformation.isSecurityEnabled();
+
+    // Obtain secure port for data streaming to datanode
+    InetSocketAddress streamingAddr  = DataNode.getStreamingAddr(conf);
+    int socketWriteTimeout = conf.getInt(
+        DFSConfigKeys.DFS_DATANODE_SOCKET_WRITE_TIMEOUT_KEY,
+        HdfsServerConstants.WRITE_TIMEOUT);
+
+    ServerSocket ss = (socketWriteTimeout > 0) ? 
+        ServerSocketChannel.open().socket() : new ServerSocket();
+    ss.bind(streamingAddr, 0);
+
+    // Check that we got the port we need
+    if (ss.getLocalPort() != streamingAddr.getPort()) {
+      throw new RuntimeException(
+          "Unable to bind on specified streaming port in secure "
+              + "context. Needed " + streamingAddr.getPort() + ", got "
+              + ss.getLocalPort());
+    }
+
+    if (ss.getLocalPort() > 1023 && isSecure) {
+      throw new RuntimeException(
+        "Cannot start secure datanode with unprivileged RPC ports");
+    }
+
+    System.err.println("Opened streaming server at " + streamingAddr);
+
+    // Bind a port for the web server. The code intends to bind HTTP server to
+    // privileged port only, as the client can authenticate the server using
+    // certificates if they are communicating through SSL.
+    Connector listener = null;
+    if (policy.isHttpEnabled()) {
+      listener = HttpServer2.createDefaultChannelConnector();
+      InetSocketAddress infoSocAddr = DataNode.getInfoAddr(conf);
+      listener.setHost(infoSocAddr.getHostName());
+      listener.setPort(infoSocAddr.getPort());
+      // Open listener here in order to bind to port as root
+      listener.open();
+      if (listener.getPort() != infoSocAddr.getPort()) {
+        throw new RuntimeException("Unable to bind on specified info port in secure " +
+            "context. Needed " + streamingAddr.getPort() + ", got " + ss.getLocalPort());
+      }
+      System.err.println("Successfully obtained privileged resources (streaming port = "
+          + ss + " ) (http listener port = " + listener.getConnection() +")");
+
+      if (listener.getPort() > 1023 && isSecure) {
+        throw new RuntimeException(
+            "Cannot start secure datanode with unprivileged HTTP ports");
+      }
+      System.err.println("Opened info server at " + infoSocAddr);
+    }
+
+    return new SecureResources(ss, listener);
+  }
+
 }

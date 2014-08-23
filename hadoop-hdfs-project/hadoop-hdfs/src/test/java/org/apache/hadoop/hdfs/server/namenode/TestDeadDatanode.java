@@ -17,10 +17,11 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
+
 import java.io.IOException;
 import java.util.concurrent.TimeoutException;
-
-import junit.framework.Assert;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -42,6 +43,7 @@ import org.apache.hadoop.hdfs.server.protocol.RegisterCommand;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.util.Time;
 import org.junit.After;
 import org.junit.Test;
 
@@ -64,10 +66,10 @@ public class TestDeadDatanode {
    */
   private void waitForDatanodeState(String nodeID, boolean alive, int waitTime)
       throws TimeoutException, InterruptedException {
-    long stopTime = System.currentTimeMillis() + waitTime;
+    long stopTime = Time.now() + waitTime;
     FSNamesystem namesystem = cluster.getNamesystem();
     String state = alive ? "alive" : "dead";
-    while (System.currentTimeMillis() < stopTime) {
+    while (Time.now() < stopTime) {
       final DatanodeDescriptor dd = BlockManagerTestUtil.getDatanode(
           namesystem, nodeID);
       if (dd.isAlive == alive) {
@@ -102,11 +104,11 @@ public class TestDeadDatanode {
     DatanodeRegistration reg = 
       DataNodeTestUtils.getDNRegistrationForBP(cluster.getDataNodes().get(0), poolId);
       
-    waitForDatanodeState(reg.getStorageID(), true, 20000);
+    waitForDatanodeState(reg.getDatanodeUuid(), true, 20000);
 
     // Shutdown and wait for datanode to be marked dead
     dn.shutdown();
-    waitForDatanodeState(reg.getStorageID(), false, 20000);
+    waitForDatanodeState(reg.getDatanodeUuid(), false, 20000);
 
     DatanodeProtocol dnp = cluster.getNameNodeRpc();
     
@@ -115,34 +117,36 @@ public class TestDeadDatanode {
         ReceivedDeletedBlockInfo.BlockStatus.RECEIVED_BLOCK,
         null) };
     StorageReceivedDeletedBlocks[] storageBlocks = { 
-        new StorageReceivedDeletedBlocks(reg.getStorageID(), blocks) };
+        new StorageReceivedDeletedBlocks(reg.getDatanodeUuid(), blocks) };
     
     // Ensure blockReceived call from dead datanode is rejected with IOException
     try {
       dnp.blockReceivedAndDeleted(reg, poolId, storageBlocks);
-      Assert.fail("Expected IOException is not thrown");
+      fail("Expected IOException is not thrown");
     } catch (IOException ex) {
       // Expected
     }
 
     // Ensure blockReport from dead datanode is rejected with IOException
     StorageBlockReport[] report = { new StorageBlockReport(
-        new DatanodeStorage(reg.getStorageID()),
+        new DatanodeStorage(reg.getDatanodeUuid()),
         new long[] { 0L, 0L, 0L }) };
     try {
       dnp.blockReport(reg, poolId, report);
-      Assert.fail("Expected IOException is not thrown");
+      fail("Expected IOException is not thrown");
     } catch (IOException ex) {
       // Expected
     }
 
     // Ensure heartbeat from dead datanode is rejected with a command
     // that asks datanode to register again
-    StorageReport[] rep = { new StorageReport(reg.getStorageID(), false, 0, 0,
-        0, 0) };
-    DatanodeCommand[] cmd = dnp.sendHeartbeat(reg, rep, 0, 0, 0).getCommands();
-    Assert.assertEquals(1, cmd.length);
-    Assert.assertEquals(cmd[0].getAction(), RegisterCommand.REGISTER
+    StorageReport[] rep = { new StorageReport(
+        new DatanodeStorage(reg.getDatanodeUuid()),
+        false, 0, 0, 0, 0) };
+    DatanodeCommand[] cmd = dnp.sendHeartbeat(reg, rep, 0L, 0L, 0, 0, 0)
+        .getCommands();
+    assertEquals(1, cmd.length);
+    assertEquals(cmd[0].getAction(), RegisterCommand.REGISTER
         .getAction());
   }
 }

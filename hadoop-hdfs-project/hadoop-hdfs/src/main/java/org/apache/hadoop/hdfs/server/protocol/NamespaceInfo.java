@@ -25,6 +25,7 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage;
 import org.apache.hadoop.util.VersionInfo;
 
@@ -36,28 +37,27 @@ import org.apache.hadoop.util.VersionInfo;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public class NamespaceInfo extends StorageInfo {
-  String  buildVersion;
-  int distributedUpgradeVersion;
+  final String  buildVersion;
   String blockPoolID = "";    // id of the block pool
   String softwareVersion;
 
   public NamespaceInfo() {
-    super();
+    super(NodeType.NAME_NODE);
     buildVersion = null;
   }
 
   public NamespaceInfo(int nsID, String clusterID, String bpID,
-      long cT, int duVersion, String buildVersion, String softwareVersion) {
-    super(HdfsConstants.LAYOUT_VERSION, nsID, clusterID, cT);
+      long cT, String buildVersion, String softwareVersion) {
+    super(HdfsConstants.NAMENODE_LAYOUT_VERSION, nsID, clusterID, cT,
+        NodeType.NAME_NODE);
     blockPoolID = bpID;
     this.buildVersion = buildVersion;
-    this.distributedUpgradeVersion = duVersion;
     this.softwareVersion = softwareVersion;
   }
 
   public NamespaceInfo(int nsID, String clusterID, String bpID, 
-      long cT, int duVersion) {
-    this(nsID, clusterID, bpID, cT, duVersion, Storage.getBuildVersion(),
+      long cT) {
+    this(nsID, clusterID, bpID, cT, Storage.getBuildVersion(),
         VersionInfo.getVersion());
   }
   
@@ -65,10 +65,6 @@ public class NamespaceInfo extends StorageInfo {
     return buildVersion;
   }
 
-  public int getDistributedUpgradeVersion() {
-    return distributedUpgradeVersion;
-  }
-  
   public String getBlockPoolID() {
     return blockPoolID;
   }
@@ -77,6 +73,7 @@ public class NamespaceInfo extends StorageInfo {
     return softwareVersion;
   }
 
+  @Override
   public String toString(){
     return super.toString() + ";bpid=" + blockPoolID;
   }
